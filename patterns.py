@@ -43,9 +43,13 @@ _SPACED_SEGMENT = rf"{_SEGMENT}(?: {_SEGMENT})*"
 # interior spaces (``C:\Program Files\x``).
 _ROOTED_WINDOWS_PATH = rf"(?:[A-Za-z]:[\\/]|\\\\)(?:{_SPACED_SEGMENT}[\\/])*{_SEGMENT}"
 # A lone backslash still starts a path — that is how ``…\dir\file`` collapses —
-# but takes no spaces, because ``step1\nretry aborted\nstage2`` would otherwise
-# swallow the words that distinguish one failure from another.
-_BACKSLASH_PATH = rf"\\(?:{_SEGMENT}[\\/])*{_SEGMENT}"
+# but it takes no spaces and needs a second separator. One backslash followed by a
+# single token is far more often a literal escape in tool output than a path, and
+# collapsing it would erase the one word that separates two failures:
+# ``step1\nretry failed`` and ``step1\nreload failed`` must stay apart. A
+# single-separator relative path keeps collapsing through ``_RELATIVE_PATH``,
+# which requires an extension (``src\main.py``).
+_BACKSLASH_PATH = rf"\\(?:{_SEGMENT}[\\/])+{_SEGMENT}"
 # Forward slashes appear in ordinary prose, so a POSIX path takes no spaces.
 _POSIX_PATH = rf"(?<!\w)/(?:{_SEGMENT}/)*{_SEGMENT}"
 # One flat, bounded separator loop. The trailing ``.ext`` requirement makes every

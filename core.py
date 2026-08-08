@@ -1231,8 +1231,11 @@ def _prompt_note_content_error(
         action_match = _PROMPT_NOTE_ACTION.match(line)
         if not action_match or not _PROMPT_NOTE_SAFE_ACTION.fullmatch(action_match.group(1)):
             return "Prompt note action must match an approved behavioral policy"
-        if _prompt_note_credential_field(action_match.group(1)):
-            return "Prompt note action cannot name a credential field to supply"
+        # The whole line, not just the action: the condition is free text up to
+        # 200 characters, so "When the 'api_key' field is missing, include the
+        # required fields." carries the same instruction one clause to the left.
+        if _prompt_note_credential_field(line):
+            return "Prompt note cannot name a credential field to supply"
     rendered = "Refine notes:\n- " + content
     per_note_limit = max(
         1, config.prompt_notes_max_chars() // config.prompt_notes_max_count()
@@ -2404,6 +2407,14 @@ def _apply_edit(
         message += f" | scope={note_scope}"
         if note_scope == "global" and config.prompt_notes_default_scope() == "session":
             message += " (session scope needs the live session; kept permanent)"
+            # The automatic end-of-session pass throws its result away, so the
+            # message alone would leave the one trigger that fires every session
+            # reporting a permanent note nowhere but in the journal file.
+            note_auto_event(
+                "prompt_note_kept_global",
+                "A session-scoped note could not bind to the analysed session, "
+                "so it was stored permanently instead.",
+            )
     if staged and pending_id:
         message += f" | pending_id={pending_id}"
     if apply_result.get("error"):

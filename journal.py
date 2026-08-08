@@ -1585,8 +1585,6 @@ def prune_expired_backups() -> List[Path]:
                 terminal_names.add(backup_path.name)
             else:
                 referenced_names.add(backup_path.name)
-        # An entry that can still roll back outranks a terminal one for the same file.
-        terminal_names -= referenced_names
         try:
             candidates = list(backups_dir().iterdir())
         except OSError as exc:
@@ -1595,6 +1593,8 @@ def prune_expired_backups() -> List[Path]:
         removed: List[Path] = []
         for candidate in candidates:
             try:
+                # ``referenced_names`` first: an entry that can still roll back
+                # outranks a terminal one naming the same file.
                 limit = terminal_cutoff if candidate.name in terminal_names else cutoff
                 if (
                     candidate.suffix != ".bak"
