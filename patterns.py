@@ -28,18 +28,24 @@ except ImportError:
 #     pair of numbers. A backslash or a ``C:`` is not prose, so that boundary is
 #     not imposed there — doing so measurably stopped real Windows paths from
 #     collapsing (``…\dir\file``, ``…\dir\sub``).
-#   * interior spaces are accepted only where the separator itself is unambiguous
-#     (``C:\Program Files\x``), never in a forward-slash path, so prose between two
-#     paths survives: ``no such file /tmp/a and permission denied /tmp/b``
-#     normalizes to two PATH tokens with ``and permission denied`` intact.
+#   * interior spaces are accepted only under a root that cannot be anything else —
+#     a drive letter or a UNC prefix — so prose between two paths survives:
+#     ``no such file /tmp/a and permission denied /tmp/b`` normalizes to two PATH
+#     tokens with ``and permission denied`` intact, and a lone backslash (which in
+#     tool output is often a literal escape, ``step1\nretry aborted``) cannot span
+#     the words that separate two failures.
 #   * an unrooted path (``src/main.py``) is only recognized when its last segment
 #     carries an extension — that is what separates a real relative path from two
 #     prose words around a slash.
 _SEGMENT = r"[\w.\-]+"
 _SPACED_SEGMENT = rf"{_SEGMENT}(?: {_SEGMENT})*"
-# A drive letter or a backslash root: prose almost never contains a backslash or
-# a ``C:``, so segments here may carry interior spaces.
-_WINDOWS_PATH = rf"(?:[A-Za-z]:[\\/]|\\)(?:{_SPACED_SEGMENT}[\\/])*{_SEGMENT}"
+# A drive letter or a UNC prefix is never prose, so segments under it may carry
+# interior spaces (``C:\Program Files\x``).
+_ROOTED_WINDOWS_PATH = rf"(?:[A-Za-z]:[\\/]|\\\\)(?:{_SPACED_SEGMENT}[\\/])*{_SEGMENT}"
+# A lone backslash still starts a path — that is how ``…\dir\file`` collapses —
+# but takes no spaces, because ``step1\nretry aborted\nstage2`` would otherwise
+# swallow the words that distinguish one failure from another.
+_BACKSLASH_PATH = rf"\\(?:{_SEGMENT}[\\/])*{_SEGMENT}"
 # Forward slashes appear in ordinary prose, so a POSIX path takes no spaces.
 _POSIX_PATH = rf"(?<!\w)/(?:{_SEGMENT}/)*{_SEGMENT}"
 # One flat, bounded separator loop. The trailing ``.ext`` requirement makes every
@@ -48,7 +54,9 @@ _POSIX_PATH = rf"(?<!\w)/(?:{_SEGMENT}/)*{_SEGMENT}"
 # and ``/refine audit`` normalizes every row twice). Eight separators cover real
 # paths; a deeper one still normalizes, just from a later segment on.
 _RELATIVE_PATH = rf"(?<!\w){_SEGMENT}(?:[\\/]{_SEGMENT}){{1,8}}\.[A-Za-z0-9]{{1,8}}"
-_PATH = re.compile(rf"(?:{_WINDOWS_PATH}|{_POSIX_PATH}|{_RELATIVE_PATH})")
+_PATH = re.compile(
+    rf"(?:{_ROOTED_WINDOWS_PATH}|{_BACKSLASH_PATH}|{_POSIX_PATH}|{_RELATIVE_PATH})"
+)
 
 # Order matters: timestamps and paths must be replaced before bare integers,
 # otherwise the digit rule eats the parts that make them recognizable.

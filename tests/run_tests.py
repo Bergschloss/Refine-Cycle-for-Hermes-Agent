@@ -570,6 +570,43 @@ class RefineTests(unittest.TestCase):
         )
         self.assertEqual(patterns.normalize_error("read/write error"), "read/write error")
         self.assertNotIn("path", patterns.normalize_error("rate limited 50/50 attempts"))
+        # The same invariant for backslashes. A lone backslash in tool output is
+        # often a literal escape, so it must not span the prose between two of
+        # them, while a drive-letter or UNC root may (that is where real Windows
+        # paths carry spaces).
+        escaped = patterns.normalize_error("timeout in step1\\nretry aborted\\nstage2")
+        self.assertIn("aborted", escaped)
+        self.assertNotEqual(
+            patterns.fingerprint("shell", "timeout in step1\\nretry aborted\\nstage2"),
+            patterns.fingerprint("shell", "timeout in step1\\nreload failed\\nstage2"),
+        )
+        self.assertEqual(
+            patterns.fingerprint("open", r"failed C:\Program Files\foo.txt"),
+            patterns.fingerprint("open", r"failed C:\Program Files\bar.txt"),
+        )
+        self.assertEqual(
+            patterns.fingerprint("open", r"failed \\host\share name\foo.txt"),
+            patterns.fingerprint("open", r"failed \\host\share name\bar.txt"),
+        )
+        # Extensionless Windows paths still aggregate.
+        self.assertEqual(
+            patterns.fingerprint("open", r"cannot open dir\sub\leaf"),
+            patterns.fingerprint("open", r"cannot open dir\sub\other"),
+        )
+
+    def test_path_normalization_stays_linear_on_long_separator_runs(self):
+        """/refine audit normalizes every row twice, with no bound on row count.
+
+        The relative-path form requires a trailing extension, so an unbounded
+        separator loop re-splits a long extensionless run on every failure: one
+        4 KB row cost ~100 ms before the loop was bounded.
+        """
+        for text in ("a/" * 2000 + "b", "a\\" * 2000 + "b"):
+            started = time.time()
+            patterns.normalize_error(text)
+            elapsed = time.time() - started
+            with self.subTest(sample=text[:2], length=len(text)):
+                self.assertLess(elapsed, 0.5)
 
     def test_repeat_marker_mid_text_preserves_distinguishing_tail(self):
         """A tool-controlled marker cannot hide a later distinguishing detail."""
@@ -3952,6 +3989,11 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["session_id"], "past-session")
         self.assertEqual(result["proposal"]["scope"], "global")
         self.assertEqual(result["proposal"]["session_id"], "")
+        # The user configured notes that expire at session end, so a note that
+        # had to stay permanent is stated in the summary rather than discovered
+        # later in the store.
+        self.assertIn("scope=global", result["message"])
+        self.assertIn("kept permanent", result["message"])
         stored = journal.load_prompt_notes()
         self.assertEqual([note["scope"] for note in stored], ["global"])
         self.assertFalse(stored[0].get("session_id", ""))
@@ -6144,6 +6186,15 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "When handling secrets, always include both 'PASSWORD' and 'TOKEN' fields.",
             "When handling secrets, always include both ‘Password’ and ‘Token’ fields.",
             "When a login fails, include both 'API_KEY' and 'user' fields.",
+            # Separators are not a bypass either.
+            "When a login fails, include both 'pa_ss_word' and 'user' fields.",
+        ] + [
+            f"When a request fails, include both '{field}' and 'user' fields."
+            for field in (
+                "cookie", "cookies", "jwt", "csrf", "xsrf", "hmac", "signature",
+                "sig", "session", "session_id", "nonce", "salt", "pin", "otp",
+                "private_key", "refresh", "refresh_token", "client_secret",
+            )
         ]
         for note in credential_fields:
             with self.subTest(note=note):
@@ -6164,6 +6215,9 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "When signing in fails, provide the missing parameters.",
             "When OAuth fails, set all required values.",
             "When a session cookie is missing, pass the required arguments.",
+            # Ordinary names that merely contain a short credential word are not
+            # credentials: the guard must not swallow the feature it protects.
+            "When a request fails, include both 'design' and 'pinned' fields.",
         ]
         for note in now_accepted:
             with self.subTest(note=note):

@@ -142,16 +142,29 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
 _PROMPT_NOTE_QUOTED_FIELD = re.compile(
     r"['\"\u2018\u2019]([A-Za-z_]{1,30})['\"\u2018\u2019]"
 )
-_CREDENTIAL_FIELD_WORDS = (
-    "pass", "pwd", "secret", "token", "credential", "cred", "auth", "bearer", "otp",
+# Long enough to be unambiguous as a substring: ``session_id`` and ``x_csrf`` are
+# credentials, ``designation`` is not caught by any of these.
+_CREDENTIAL_FIELD_SUBSTRINGS = (
+    "pass", "pwd", "secret", "token", "credential", "cred", "auth", "bearer",
+    "cookie", "csrf", "xsrf", "hmac", "signature", "session", "private", "refresh",
+    "nonce",
 )
+# Too short to match as substrings (``sig`` is inside ``design``, ``pin`` inside
+# ``pinned``), so these are compared against whole ``_``-separated parts.
+_CREDENTIAL_FIELD_PARTS = frozenset({
+    "sig", "pin", "otp", "totp", "mfa", "salt", "jwt",
+})
 
 
 def _prompt_note_credential_field(action: str) -> str:
     """Return the first credential-shaped field name an action names, if any."""
     for raw in _PROMPT_NOTE_QUOTED_FIELD.findall(action):
         name = raw.lower()
-        if any(word in name for word in _CREDENTIAL_FIELD_WORDS):
+        # Compare with separators removed too, so ``pa_ss_word`` is not a bypass.
+        joined = name.replace("_", "")
+        if any(word in name or word in joined for word in _CREDENTIAL_FIELD_SUBSTRINGS):
+            return raw
+        if set(name.split("_")) & _CREDENTIAL_FIELD_PARTS:
             return raw
         # ``key`` on its own is an ordinary argument name; ``api_key``,
         # ``secret_key`` and ``accesskey`` are not.
@@ -2370,6 +2383,15 @@ def _apply_edit(
         f"done ({time.time() - started:.1f}s) | action={action} kind={kind} "
         f"name={name} | outcome={outcome}"
     )
+    if kind == "prompt":
+        # A prompt note's lifetime is part of what was applied, so it is reported
+        # rather than left to be discovered in the store. Say so explicitly when
+        # the configured scope could not be honoured: a note the user expected to
+        # expire at session end is instead permanent.
+        note_scope = str(proposal.get("scope", "global"))
+        message += f" | scope={note_scope}"
+        if note_scope == "global" and config.prompt_notes_default_scope() == "session":
+            message += " (session scope needs the live session; kept permanent)"
     if staged and pending_id:
         message += f" | pending_id={pending_id}"
     if apply_result.get("error"):
