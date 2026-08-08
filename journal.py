@@ -1521,13 +1521,14 @@ def skill_baseline(name: str) -> Optional[Dict[str, Any]]:
 _BACKUP_RETENTION_SECONDS = 30 * 86400
 # Outcomes whose backup is still the pre-edit copy someone may need.
 #
-# The first five can still lead to a rollback. ``error`` and ``conflict`` cannot,
-# and that is exactly why they are here: an ``error`` is recorded when the host
-# reported success but the target no longer matches the proposal, and a
-# ``conflict`` is recorded mid-transaction after a backup was already taken. In
-# both cases the skill may already be modified while ``/refine rollback`` is
-# unavailable, so the ``.bak`` file is the only faithful copy left — the journal
-# snapshot is stored scrubbed and can be redacted.
+# The first five can still lead to a rollback. ``error`` cannot, and that is
+# exactly why it is here: it is recorded when the host reported success but the
+# target no longer matches the proposal, so the skill may already be modified
+# while ``/refine rollback`` is unavailable, and the journal snapshot is stored
+# scrubbed — a credential-shaped line comes back redacted, leaving the ``.bak``
+# as the only faithful copy. ``conflict`` normally removes its own backup and
+# journals an empty path; it is listed for the branch where that removal fails
+# (a Windows sharing violation), which leaves a real referenced file behind.
 _BACKUP_RETENTION_OUTCOMES = {
     "prepared", "pending_approval", "applied", "rollback_prepared", "pending_rollback",
     "error", "conflict",

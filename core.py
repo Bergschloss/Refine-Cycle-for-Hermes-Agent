@@ -136,7 +136,12 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
 # above — yet it is persisted into the agent's own future system context, and both
 # the field name and the condition originate in an untrusted trajectory. So the
 # bounded identifier form stays, and credential words are kept out of it.
-_PROMPT_NOTE_QUOTED_FIELD = re.compile(r"['\"\u2018\u2019]([a-z_]{1,30})['\"\u2018\u2019]")
+# Case-insensitive on purpose: the allowlist above is compiled with ``(?i)``, so it
+# accepts ``'PASSWORD'`` exactly as it accepts ``'password'``. Extracting only
+# lowercase names here would leave the guard bypassable by capitalization.
+_PROMPT_NOTE_QUOTED_FIELD = re.compile(
+    r"['\"\u2018\u2019]([A-Za-z_]{1,30})['\"\u2018\u2019]"
+)
 _CREDENTIAL_FIELD_WORDS = (
     "pass", "pwd", "secret", "token", "credential", "cred", "auth", "bearer", "otp",
 )
@@ -144,13 +149,14 @@ _CREDENTIAL_FIELD_WORDS = (
 
 def _prompt_note_credential_field(action: str) -> str:
     """Return the first credential-shaped field name an action names, if any."""
-    for name in _PROMPT_NOTE_QUOTED_FIELD.findall(action):
+    for raw in _PROMPT_NOTE_QUOTED_FIELD.findall(action):
+        name = raw.lower()
         if any(word in name for word in _CREDENTIAL_FIELD_WORDS):
-            return name
+            return raw
         # ``key`` on its own is an ordinary argument name; ``api_key``,
         # ``secret_key`` and ``accesskey`` are not.
         if "key" in name and name not in ("key", "keys"):
-            return name
+            return raw
     return ""
 
 
@@ -1449,6 +1455,7 @@ def _refine_once(
     session_id: Optional[str] = None,
     auto: bool = False,
     dry_run: bool = False,
+    explicit_session: bool = False,
 ) -> Dict[str, Any]:
     trigger = "auto" if auto else "manual"
     started = time.time()
@@ -1927,13 +1934,17 @@ def _refine_once(
         if proposal.get("action") == "multi":
             # Normalize each edit so the user sees the final form.
             edits = [
-                _normalize_edit(sanitize(edit), session)
+                _normalize_edit(
+                    sanitize(edit), session, explicit_session=explicit_session
+                )
                 for edit in proposal.get("edits", [])
                 if isinstance(edit, dict)
             ]
             dry_proposal = dict(proposal, edits=edits)
         else:
-            dry_proposal = _normalize_edit(proposal, session)
+            dry_proposal = _normalize_edit(
+                proposal, session, explicit_session=explicit_session
+            )
 
         # Build a diff for patch proposals.
         diff_text = ""
@@ -2020,12 +2031,13 @@ def _refine_once(
             session=session,
             started=started,
             llm_meta=_run_llm_meta,
+            explicit_session=explicit_session,
         )
         transaction["evidence"] = evidence_summary
         transaction["llm_meta"] = _run_llm_meta
         return transaction
 
-    proposal = _normalize_edit(proposal, session)
+    proposal = _normalize_edit(proposal, session, explicit_session=explicit_session)
 
     if proposal.get("action") == "no_op":
         entry_id = _journal_nonmutation(
@@ -2385,7 +2397,9 @@ def _apply_edit(
     return response
 
 
-def _normalize_edit(proposal: Dict[str, Any], session: str) -> Dict[str, Any]:
+def _normalize_edit(
+    proposal: Dict[str, Any], session: str, *, explicit_session: bool = False
+) -> Dict[str, Any]:
     """Apply the boundary normalization every edit needs before guardrails run."""
     normalized = dict(
         proposal,
@@ -2400,18 +2414,21 @@ def _normalize_edit(proposal: Dict[str, Any], session: str) -> Dict[str, Any]:
             if scope == "session"
             else ""
         )
-        if scope == "session":
-            # ``/refine session <id>`` analyses a session that is usually not the
-            # live one. A note bound to it could never be injected (the hook only
-            # matches the current session) and never cleaned up (that session will
-            # not end again), so it would occupy a note slot forever after paying
-            # for one of the day's edits. Store it globally instead.
-            live_session, _ = resolve_session_id()
-            if not note_session or note_session != journal.normalize_prompt_note_session_id(
-                live_session
-            ):
-                scope = "global"
-                note_session = ""
+        if scope == "session" and (explicit_session or not note_session):
+            # ``/refine session <id>`` names a session the user wants *analysed*,
+            # which is normally not the live one. A note bound to it could never
+            # be injected (the hook matches only the current session) and never
+            # expire (that session will not end again), so it would hold a note
+            # slot forever after paying for one of the day's edits. The same is
+            # true for an id the note store cannot represent. Both go global.
+            #
+            # This is decided from the caller's intent, not by comparing against
+            # the last session id seen from a hook: that value is one process
+            # global shared by every channel, so an automatic pass for session A
+            # would promote its own note to a permanent global one whenever
+            # another channel happened to write its id in between.
+            scope = "global"
+            note_session = ""
         normalized = dict(
             normalized,
             content=journal.normalize_prompt_note_content(normalized.get("content", "")),
@@ -2429,6 +2446,7 @@ def _apply_transaction(
     session: str,
     started: float,
     llm_meta: Optional[Dict[str, Any]] = None,
+    explicit_session: bool = False,
 ) -> Dict[str, Any]:
     """Apply one multi-edit proposal as a sequence of independent durable edits.
 
@@ -2478,7 +2496,9 @@ def _apply_transaction(
             merged["expected_outcome"] = shared_expected
         if not str(merged.get("pattern_fingerprint", "") or ""):
             merged["pattern_fingerprint"] = shared_fingerprint
-        return _normalize_edit(sanitize(merged), session)
+        return _normalize_edit(
+            sanitize(merged), session, explicit_session=explicit_session
+        )
 
     def edit_group(index: int) -> Dict[str, Any]:
         group = {
@@ -2752,8 +2772,14 @@ def refine_run(
     session_id: Optional[str] = None,
     auto: bool = False,
     dry_run: bool = False,
+    explicit_session: bool = False,
 ) -> Dict[str, Any]:
-    """Serialize a run, reconcile approvals, and preserve every recovery id."""
+    """Serialize a run, reconcile approvals, and preserve every recovery id.
+
+    ``explicit_session`` marks the ``/refine session <id>`` form, where the user
+    names a session to analyse rather than working in it. Only prompt-note scoping
+    reads it — see ``_normalize_edit``.
+    """
     started = time.time()
     with journal.mutation_lock():
         try:
@@ -2770,7 +2796,7 @@ def refine_run(
             # Dry-run: one proposal pass, no apply, no budget consumed.
             return _refine_once(
                 llm, reason=scrub_text(reason), session_id=session_id,
-                auto=auto, dry_run=True,
+                auto=auto, dry_run=True, explicit_session=explicit_session,
             )
 
         runs: List[Dict[str, Any]] = []
@@ -2783,7 +2809,8 @@ def refine_run(
             if journal.daily_limit_reached():
                 break
             result = _refine_once(
-                llm, reason=run_reason, session_id=session_id, auto=auto
+                llm, reason=run_reason, session_id=session_id, auto=auto,
+                explicit_session=explicit_session,
             )
             runs.append(result)
             if not result.get("success") or not int(result.get("edits_applied", 0) or 0):

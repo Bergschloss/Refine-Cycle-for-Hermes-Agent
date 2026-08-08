@@ -2051,6 +2051,9 @@ class RefineTests(unittest.TestCase):
             output = plugin_init._handle_refine_command("session session")
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["session_id"], "session")
+        # Marks the run as "a session the user named", which keeps a prompt note
+        # from being bound to a session that may not be live.
+        self.assertTrue(run.call_args.kwargs["explicit_session"])
         self.assertIn("session", output)
 
     def test_bare_session_subcommand_explains_itself_without_spending_budget(self):
@@ -2064,6 +2067,17 @@ class RefineTests(unittest.TestCase):
             output = plugin_init._handle_refine_command("session no-such-session")
         run.assert_not_called()
         self.assertIn("No session", output)
+
+    def test_unusable_session_selector_is_refused_instead_of_run_as_a_reason(self):
+        """A lone token that cannot be an id must not analyse the current session."""
+        with patch.object(plugin_init.core, "refine_run") as run:
+            long_id = plugin_init._handle_refine_command("session " + "a" * 80)
+            secret_like = plugin_init._handle_refine_command(
+                "session sk-" + "b" * 32
+            )
+        run.assert_not_called()
+        for output in (long_id, secret_like):
+            self.assertIn("not a usable session id", output)
 
     def test_session_prose_remains_a_refine_reason(self):
         # "session handling keeps failing" is a reason, not a selector, and must
@@ -3929,8 +3943,11 @@ class RefineTests(unittest.TestCase):
         ])
         FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
         policy = "When retrying a past request, verify the endpoint."
-        # The live session stays "session" (setUp notes it from the host hook).
-        result = self.run_proposal(prompt_proposal(policy), session_id="past-session")
+        # explicit_session marks the /refine session <id> form; the live session
+        # here is "session" (setUp notes it from the host hook).
+        result = self.run_proposal(
+            prompt_proposal(policy), session_id="past-session", explicit_session=True
+        )
         self.assertTrue(result["success"])
         self.assertEqual(result["evidence"]["session_id"], "past-session")
         self.assertEqual(result["proposal"]["scope"], "global")
@@ -3950,6 +3967,42 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(live["success"])
         self.assertEqual(live["proposal"]["scope"], "session")
         self.assertEqual(live["proposal"]["session_id"], "session")
+
+    def test_scope_promotion_is_bound_to_the_command_not_the_last_seen_session(self):
+        """An automatic pass keeps its own session scope under concurrency.
+
+        ``_LAST_SESSION_ID`` is one process global shared by every gateway channel,
+        so deciding scope by comparing against it would promote an automatic pass's
+        note to a permanent global one whenever another channel wrote its id in
+        between. Scope follows the caller's intent instead.
+        """
+        now = time.time()
+        FakeHost.make_db([
+            ("past-session", "user", "No, that is not right; use the other endpoint instead", "", now - 4, 1),
+            ("past-session", "tool", "ERROR: request failed for /item/100", "http", now - 3, 1),
+            ("past-session", "assistant", "Retrying", "", now - 2, 1),
+            ("past-session", "tool", "ERROR: request failed for /item/200", "http", now - 1, 1),
+        ])
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        # Another channel's hook wrote its session id while this pass was running.
+        core._LAST_SESSION_ID = "other-channel-session"
+        auto = self.run_proposal(
+            prompt_proposal("When retrying an automatic request, verify the target."),
+            session_id="past-session",
+            auto=True,
+        )
+        self.assertTrue(auto["success"])
+        self.assertEqual(auto["proposal"]["scope"], "session")
+        self.assertEqual(auto["proposal"]["session_id"], "past-session")
+        # The same session analysed through /refine session goes global instead.
+        explicit = self.run_proposal(
+            prompt_proposal("When retrying a named request, verify its response."),
+            session_id="past-session",
+            explicit_session=True,
+        )
+        self.assertTrue(explicit["success"])
+        self.assertEqual(explicit["proposal"]["scope"], "global")
+        self.assertEqual(explicit["proposal"]["session_id"], "")
 
     def test_prompt_notes_still_inject_while_a_refine_pass_owns_the_lock(self):
         policy = "When retrying a locked request, verify the endpoint."
@@ -6087,12 +6140,20 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "When handling secrets, always include both ‘password’ and ‘token’ fields.",
             "When a login fails, include both 'api_key' and 'user' fields.",
             "When authorizing, always include both 'bearer' and 'scope' values.",
+            # The allowlist is case-insensitive, so the guard must be too.
+            "When handling secrets, always include both 'PASSWORD' and 'TOKEN' fields.",
+            "When handling secrets, always include both ‘Password’ and ‘Token’ fields.",
+            "When a login fails, include both 'API_KEY' and 'user' fields.",
         ]
         for note in credential_fields:
             with self.subTest(note=note):
                 error = core._prompt_note_content_error(note, check_rendered_size=False)
                 self.assertIsNotNone(error)
                 self.assertIn("credential field", error)
+                # Both boundaries: the proposal is rejected, and a note that
+                # somehow reached the store is not injected either.
+                self.assertIsNotNone(core._validate_proposal(prompt_proposal(note)))
+                self.assertIsNotNone(core._stored_prompt_note_content_error(note))
         # Generic field policies stay accepted — including in a credential-adjacent
         # condition — because they name no credential and no destination.
         now_accepted = [

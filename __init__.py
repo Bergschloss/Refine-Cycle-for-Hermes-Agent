@@ -515,6 +515,15 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         # against the sessions table, so a one-word reason reports "not found"
         # instead of silently analysing the wrong session or spending a pass.
         explicit_session = journal.normalize_prompt_note_session_id(remainder)
+        if " " not in remainder and not explicit_session:
+            # A lone token that cannot be an id is refused rather than run as a
+            # reason: falling through would analyse the *current* session and
+            # could spend one of the day's edits on a request that named another.
+            return (
+                "❌ That is not a usable session id.\n"
+                "Usage: /refine session <session_id>\n"
+                f"Find ids in the sessions table of {config.state_db_path()}"
+            )
         if explicit_session and " " not in remainder:
             _, lookup_status = core._get_session_source_status(explicit_session)
             if lookup_status == "error":
@@ -534,6 +543,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                     reason="",
                     session_id=explicit_session,
                     auto=False,
+                    explicit_session=True,
                 )
             except Exception as exc:
                 logger.exception("refine session command failed")

@@ -23,9 +23,11 @@ except ImportError:
 # Path normalization has to collapse volatile detail (``/users/8821`` and
 # ``/users/9134`` are one failure) *without* merging errors that only look alike
 # after normalization. Three boundaries carry that second half:
-#   * ``(?<!\w)`` — a path starts at a word boundary, so ``read/write error`` and
-#     ``read/execute error`` stay two failures, and ``50/50 attempts`` stays a
-#     pair of numbers instead of becoming a path.
+#   * a *forward-slash* path must start at a word boundary, so ``read/write error``
+#     and ``read/execute error`` stay two failures and ``50/50 attempts`` stays a
+#     pair of numbers. A backslash or a ``C:`` is not prose, so that boundary is
+#     not imposed there — doing so measurably stopped real Windows paths from
+#     collapsing (``…\dir\file``, ``…\dir\sub``).
 #   * interior spaces are accepted only where the separator itself is unambiguous
 #     (``C:\Program Files\x``), never in a forward-slash path, so prose between two
 #     paths survives: ``no such file /tmp/a and permission denied /tmp/b``
@@ -39,9 +41,14 @@ _SPACED_SEGMENT = rf"{_SEGMENT}(?: {_SEGMENT})*"
 # a ``C:``, so segments here may carry interior spaces.
 _WINDOWS_PATH = rf"(?:[A-Za-z]:[\\/]|\\)(?:{_SPACED_SEGMENT}[\\/])*{_SEGMENT}"
 # Forward slashes appear in ordinary prose, so a POSIX path takes no spaces.
-_POSIX_PATH = rf"/(?:{_SEGMENT}/)*{_SEGMENT}"
-_RELATIVE_PATH = rf"{_SEGMENT}[\\/](?:{_SEGMENT}[\\/])*{_SEGMENT}\.[A-Za-z0-9]{{1,8}}"
-_PATH = re.compile(rf"(?<!\w)(?:{_WINDOWS_PATH}|{_POSIX_PATH}|{_RELATIVE_PATH})")
+_POSIX_PATH = rf"(?<!\w)/(?:{_SEGMENT}/)*{_SEGMENT}"
+# One flat, bounded separator loop. The trailing ``.ext`` requirement makes every
+# separator run re-split when it is absent, so an unbounded loop turns a long run
+# of extensionless ``a/b/c…`` text into quadratic work (105 ms for one 4 KB row,
+# and ``/refine audit`` normalizes every row twice). Eight separators cover real
+# paths; a deeper one still normalizes, just from a later segment on.
+_RELATIVE_PATH = rf"(?<!\w){_SEGMENT}(?:[\\/]{_SEGMENT}){{1,8}}\.[A-Za-z0-9]{{1,8}}"
+_PATH = re.compile(rf"(?:{_WINDOWS_PATH}|{_POSIX_PATH}|{_RELATIVE_PATH})")
 
 # Order matters: timestamps and paths must be replaced before bare integers,
 # otherwise the digit rule eats the parts that make them recognizable.
