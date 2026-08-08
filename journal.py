@@ -1519,6 +1519,7 @@ def skill_baseline(name: str) -> Optional[Dict[str, Any]]:
 
 
 _BACKUP_RETENTION_SECONDS = 30 * 86400
+_TERMINAL_BACKUP_RETENTION_SECONDS = 90 * 86400
 # Outcomes whose backup is still the pre-edit copy someone may need.
 #
 # The first five can still lead to a rollback. ``error`` cannot, and that is
@@ -1529,25 +1530,33 @@ _BACKUP_RETENTION_SECONDS = 30 * 86400
 # as the only faithful copy. ``conflict`` normally removes its own backup and
 # journals an empty path; it is listed for the branch where that removal fails
 # (a Windows sharing violation), which leaves a real referenced file behind.
-_BACKUP_RETENTION_OUTCOMES = {
+_ROLLBACKABLE_BACKUP_OUTCOMES = {
     "prepared", "pending_approval", "applied", "rollback_prepared", "pending_rollback",
-    "error", "conflict",
 }
+# Terminal: no state transition leads out of these, so their backups would never
+# be pruned at all if they were treated like the rollbackable ones. A backup is
+# written unscrubbed on purpose (rollback must restore the user's real content),
+# so "keep forever" would also mean "keep any credential in that skill in
+# cleartext forever". They get a longer window instead of an unbounded one.
+_TERMINAL_BACKUP_OUTCOMES = {"error", "conflict"}
+_BACKUP_RETENTION_OUTCOMES = _ROLLBACKABLE_BACKUP_OUTCOMES | _TERMINAL_BACKUP_OUTCOMES
 
 
 def prune_expired_backups() -> List[Path]:
     """Remove aged orphan ``.bak`` files without rewriting journal history.
 
-    A backup remains protected while any journal entry still needs it — either
-    because rollback is still possible or because the edit ended in a state where
-    the target may have changed and rollback is not available
-    (``_BACKUP_RETENTION_OUTCOMES``). Comparing basenames preserves migration's
-    legacy-path fallback,
-    where append-only entries retain their former absolute path while the backup
-    itself is copied into the active backup directory. Any unreadable journal or
+    A backup referenced by an entry that can still roll back is kept regardless of
+    age. One referenced only by a terminal ``error`` or ``conflict`` entry is kept
+    for the longer terminal window, because the target may already have changed
+    while rollback is unavailable. Everything else goes at the ordinary cutoff.
+    Comparing basenames preserves migration's legacy-path fallback, where
+    append-only entries retain their former absolute path while the backup itself
+    is copied into the active backup directory. Any unreadable journal or
     filesystem failure fails closed by retaining the candidate.
     """
-    cutoff = time.time() - _BACKUP_RETENTION_SECONDS
+    now = time.time()
+    cutoff = now - _BACKUP_RETENTION_SECONDS
+    terminal_cutoff = now - _TERMINAL_BACKUP_RETENTION_SECONDS
     with mutation_lock():
         try:
             active_entries = _load_entries()
@@ -1558,18 +1567,26 @@ def prune_expired_backups() -> List[Path]:
             )
             return []
         referenced_names = set()
+        terminal_names = set()
         for entry in active_entries:
             proposal = entry.get("proposal")
+            outcome = entry.get("outcome")
             if (
-                entry.get("outcome") not in _BACKUP_RETENTION_OUTCOMES
+                outcome not in _BACKUP_RETENTION_OUTCOMES
                 or not isinstance(proposal, dict)
                 or proposal.get("kind") != "skill"
                 or proposal.get("action") != "patch"
             ):
                 continue
             backup_path = Path(str(entry.get("backup_path", "")))
-            if backup_path.name:
+            if not backup_path.name:
+                continue
+            if outcome in _TERMINAL_BACKUP_OUTCOMES:
+                terminal_names.add(backup_path.name)
+            else:
                 referenced_names.add(backup_path.name)
+        # An entry that can still roll back outranks a terminal one for the same file.
+        terminal_names -= referenced_names
         try:
             candidates = list(backups_dir().iterdir())
         except OSError as exc:
@@ -1578,11 +1595,12 @@ def prune_expired_backups() -> List[Path]:
         removed: List[Path] = []
         for candidate in candidates:
             try:
+                limit = terminal_cutoff if candidate.name in terminal_names else cutoff
                 if (
                     candidate.suffix != ".bak"
                     or not candidate.is_file()
                     or candidate.name in referenced_names
-                    or candidate.stat().st_mtime >= cutoff
+                    or candidate.stat().st_mtime >= limit
                 ):
                     continue
                 candidate.unlink()

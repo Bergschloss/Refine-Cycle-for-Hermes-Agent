@@ -142,6 +142,9 @@ def _run_auto_refine(session_id: str, *, cleanup_session_notes: bool = False) ->
                     llm=_session_llm(),
                     session_id=session_id,
                     auto=True,
+                    # The same worker clears this session's notes below, so a
+                    # session-scoped note written here would not survive the call.
+                    session_ending=cleanup_session_notes,
                 )
             if cleanup_session_notes:
                 _clear_session_prompt_notes(

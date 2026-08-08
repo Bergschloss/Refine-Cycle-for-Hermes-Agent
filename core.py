@@ -147,28 +147,33 @@ _PROMPT_NOTE_QUOTED_FIELD = re.compile(
 _CREDENTIAL_FIELD_SUBSTRINGS = (
     "pass", "pwd", "secret", "token", "credential", "cred", "auth", "bearer",
     "cookie", "csrf", "xsrf", "hmac", "signature", "session", "private", "refresh",
-    "nonce",
+    "nonce", "seed", "mnemonic", "digest", "recovery", "security", "twofactor",
+    "backupcode",
 )
 # Too short to match as substrings (``sig`` is inside ``design``, ``pin`` inside
 # ``pinned``), so these are compared against whole ``_``-separated parts.
 _CREDENTIAL_FIELD_PARTS = frozenset({
-    "sig", "pin", "otp", "totp", "mfa", "salt", "jwt",
+    "sig", "pin", "otp", "otc", "totp", "mfa", "salt", "jwt", "pat",
 })
 
 
 def _prompt_note_credential_field(action: str) -> str:
-    """Return the first credential-shaped field name an action names, if any."""
+    """Return the first credential-shaped field name an action names, if any.
+
+    Every comparison also runs against the name with ``_`` removed, because the
+    separators are free: without that, ``a_p_i_k_e_y`` and ``p_i_n`` walk straight
+    past a list that stops ``api_key`` and ``pin``.
+    """
     for raw in _PROMPT_NOTE_QUOTED_FIELD.findall(action):
         name = raw.lower()
-        # Compare with separators removed too, so ``pa_ss_word`` is not a bypass.
         joined = name.replace("_", "")
         if any(word in name or word in joined for word in _CREDENTIAL_FIELD_SUBSTRINGS):
             return raw
-        if set(name.split("_")) & _CREDENTIAL_FIELD_PARTS:
+        if ({joined} | set(name.split("_"))) & _CREDENTIAL_FIELD_PARTS:
             return raw
         # ``key`` on its own is an ordinary argument name; ``api_key``,
         # ``secret_key`` and ``accesskey`` are not.
-        if "key" in name and name not in ("key", "keys"):
+        if ("key" in name or "key" in joined) and joined not in ("key", "keys"):
             return raw
     return ""
 
@@ -1469,6 +1474,7 @@ def _refine_once(
     auto: bool = False,
     dry_run: bool = False,
     explicit_session: bool = False,
+    session_ending: bool = False,
 ) -> Dict[str, Any]:
     trigger = "auto" if auto else "manual"
     started = time.time()
@@ -1948,7 +1954,8 @@ def _refine_once(
             # Normalize each edit so the user sees the final form.
             edits = [
                 _normalize_edit(
-                    sanitize(edit), session, explicit_session=explicit_session
+                    sanitize(edit), session, explicit_session=explicit_session,
+                    session_ending=session_ending,
                 )
                 for edit in proposal.get("edits", [])
                 if isinstance(edit, dict)
@@ -1956,7 +1963,8 @@ def _refine_once(
             dry_proposal = dict(proposal, edits=edits)
         else:
             dry_proposal = _normalize_edit(
-                proposal, session, explicit_session=explicit_session
+                proposal, session, explicit_session=explicit_session,
+                session_ending=session_ending,
             )
 
         # Build a diff for patch proposals.
@@ -2045,12 +2053,16 @@ def _refine_once(
             started=started,
             llm_meta=_run_llm_meta,
             explicit_session=explicit_session,
+            session_ending=session_ending,
         )
         transaction["evidence"] = evidence_summary
         transaction["llm_meta"] = _run_llm_meta
         return transaction
 
-    proposal = _normalize_edit(proposal, session, explicit_session=explicit_session)
+    proposal = _normalize_edit(
+        proposal, session, explicit_session=explicit_session,
+        session_ending=session_ending,
+    )
 
     if proposal.get("action") == "no_op":
         entry_id = _journal_nonmutation(
@@ -2419,8 +2431,37 @@ def _apply_edit(
     return response
 
 
+def _session_can_hold_a_note(
+    note_session: str, *, explicit_session: bool, session_ending: bool
+) -> bool:
+    """Whether a session-scoped note bound to ``note_session`` can still do anything.
+
+    A session note is injected only while that session is current and is deleted
+    when it ends, so binding one to a session that is not live wastes a daily edit
+    on something that is either never injected or removed within the same call:
+
+    * ``session_ending`` — the automatic end-of-session pass. The session-note
+      cleanup in the same worker deletes such a note seconds after it is written.
+    * ``explicit_session`` — ``/refine session <id>``. The user named a session to
+      *analyse*, normally a past one; the live session id is consulted only here,
+      so an automatic pass never reads that process-global value and cannot be
+      derailed by another channel writing its own id in between.
+    * an empty id — the note store cannot represent it, so nothing would match it.
+    """
+    if not note_session or session_ending:
+        return False
+    if not explicit_session:
+        return True
+    live_session, _ = resolve_session_id()
+    return note_session == journal.normalize_prompt_note_session_id(live_session)
+
+
 def _normalize_edit(
-    proposal: Dict[str, Any], session: str, *, explicit_session: bool = False
+    proposal: Dict[str, Any],
+    session: str,
+    *,
+    explicit_session: bool = False,
+    session_ending: bool = False,
 ) -> Dict[str, Any]:
     """Apply the boundary normalization every edit needs before guardrails run."""
     normalized = dict(
@@ -2436,19 +2477,11 @@ def _normalize_edit(
             if scope == "session"
             else ""
         )
-        if scope == "session" and (explicit_session or not note_session):
-            # ``/refine session <id>`` names a session the user wants *analysed*,
-            # which is normally not the live one. A note bound to it could never
-            # be injected (the hook matches only the current session) and never
-            # expire (that session will not end again), so it would hold a note
-            # slot forever after paying for one of the day's edits. The same is
-            # true for an id the note store cannot represent. Both go global.
-            #
-            # This is decided from the caller's intent, not by comparing against
-            # the last session id seen from a hook: that value is one process
-            # global shared by every channel, so an automatic pass for session A
-            # would promote its own note to a permanent global one whenever
-            # another channel happened to write its id in between.
+        if scope == "session" and not _session_can_hold_a_note(
+            note_session,
+            explicit_session=explicit_session,
+            session_ending=session_ending,
+        ):
             scope = "global"
             note_session = ""
         normalized = dict(
@@ -2469,6 +2502,7 @@ def _apply_transaction(
     started: float,
     llm_meta: Optional[Dict[str, Any]] = None,
     explicit_session: bool = False,
+    session_ending: bool = False,
 ) -> Dict[str, Any]:
     """Apply one multi-edit proposal as a sequence of independent durable edits.
 
@@ -2519,7 +2553,8 @@ def _apply_transaction(
         if not str(merged.get("pattern_fingerprint", "") or ""):
             merged["pattern_fingerprint"] = shared_fingerprint
         return _normalize_edit(
-            sanitize(merged), session, explicit_session=explicit_session
+            sanitize(merged), session, explicit_session=explicit_session,
+            session_ending=session_ending,
         )
 
     def edit_group(index: int) -> Dict[str, Any]:
@@ -2795,12 +2830,14 @@ def refine_run(
     auto: bool = False,
     dry_run: bool = False,
     explicit_session: bool = False,
+    session_ending: bool = False,
 ) -> Dict[str, Any]:
     """Serialize a run, reconcile approvals, and preserve every recovery id.
 
     ``explicit_session`` marks the ``/refine session <id>`` form, where the user
-    names a session to analyse rather than working in it. Only prompt-note scoping
-    reads it — see ``_normalize_edit``.
+    names a session to analyse rather than working in it; ``session_ending`` marks
+    the automatic end-of-session pass. Only prompt-note scoping reads either —
+    see ``_session_can_hold_a_note``.
     """
     started = time.time()
     with journal.mutation_lock():
@@ -2819,6 +2856,7 @@ def refine_run(
             return _refine_once(
                 llm, reason=scrub_text(reason), session_id=session_id,
                 auto=auto, dry_run=True, explicit_session=explicit_session,
+                session_ending=session_ending,
             )
 
         runs: List[Dict[str, Any]] = []
@@ -2832,7 +2870,7 @@ def refine_run(
                 break
             result = _refine_once(
                 llm, reason=run_reason, session_id=session_id, auto=auto,
-                explicit_session=explicit_session,
+                explicit_session=explicit_session, session_ending=session_ending,
             )
             runs.append(result)
             if not result.get("success") or not int(result.get("edits_applied", 0) or 0):

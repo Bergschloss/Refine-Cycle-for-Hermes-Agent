@@ -602,11 +602,19 @@ class RefineTests(unittest.TestCase):
         4 KB row cost ~100 ms before the loop was bounded.
         """
         for text in ("a/" * 2000 + "b", "a\\" * 2000 + "b"):
-            started = time.time()
-            patterns.normalize_error(text)
-            elapsed = time.time() - started
+            # Best of three: a transient stall on a shared CI runner must not turn
+            # this red, but the bound stays tight enough to fail the unbounded
+            # loop it replaced, which costs ~95 ms on this input (the bounded one
+            # costs ~1 ms).
+            best = min(self._normalize_seconds(text) for _ in range(3))
             with self.subTest(sample=text[:2], length=len(text)):
-                self.assertLess(elapsed, 0.5)
+                self.assertLess(best, 0.05)
+
+    @staticmethod
+    def _normalize_seconds(text):
+        started = time.perf_counter()
+        patterns.normalize_error(text)
+        return time.perf_counter() - started
 
     def test_repeat_marker_mid_text_preserves_distinguishing_tail(self):
         """A tool-controlled marker cannot hide a later distinguishing detail."""
@@ -1872,6 +1880,35 @@ class RefineTests(unittest.TestCase):
             self.assertTrue(backup.is_file())
         self.assertFalse(rejected.exists())
 
+        # Terminal outcomes have no state transition, so "keep while referenced"
+        # would mean "keep forever" — and a backup holds the skill's real content,
+        # credentials included. They expire on the longer window instead.
+        expired = time.time() - journal._TERMINAL_BACKUP_RETENTION_SECONDS - 1
+        for backup in kept:
+            os.utime(backup, (expired, expired))
+        self.assertEqual(
+            sorted(path.name for path in journal.prune_expired_backups()),
+            sorted(path.name for path in kept),
+        )
+        for backup in kept:
+            self.assertFalse(backup.exists())
+
+    def test_a_terminal_backup_still_referenced_by_a_rollback_is_kept(self):
+        """The stronger claim on a file wins when two entries name it."""
+        backup = journal.backups_dir() / "shared-source.bak"
+        backup.write_text("pre-edit", encoding="utf-8")
+        expired = time.time() - journal._TERMINAL_BACKUP_RETENTION_SECONDS - 1
+        os.utime(backup, (expired, expired))
+        for outcome in ("error", "applied"):
+            journal.log(
+                trigger="manual", reason="failure", session_id="session",
+                proposal={"action": "patch", "kind": "skill", "name": "shared"},
+                outcome=outcome, backup_path=str(backup),
+                recovery={"type": "skill_patch", "name": "shared"},
+            )
+        self.assertEqual(journal.prune_expired_backups(), [])
+        self.assertTrue(backup.is_file())
+
     def test_backup_retention_preserves_legacy_snapshotless_rollback(self):
         """R9-11a: cleanup must not break a legacy entry without a snapshot."""
         name = "retained-legacy-rollback"
@@ -3005,7 +3042,12 @@ class RefineTests(unittest.TestCase):
             {"pre_llm_call", "post_llm_call", "on_session_end", "on_session_reset"},
         )
         self.assertIs(calls[0][0], context.llm)
-        self.assertEqual(calls[0][1], {"session_id": "session", "auto": True})
+        # A mid-session pass is not an ending one: its session can still hold a
+        # session-scoped note.
+        self.assertEqual(
+            calls[0][1],
+            {"session_id": "session", "auto": True, "session_ending": False},
+        )
         self.assertEqual(calls[0][2], "refine-auto")
 
     def test_session_end_keeps_minimum_message_trigger_when_turn_trigger_is_disabled(self):
@@ -4045,6 +4087,56 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(explicit["success"])
         self.assertEqual(explicit["proposal"]["scope"], "global")
         self.assertEqual(explicit["proposal"]["session_id"], "")
+
+    def test_naming_the_live_session_keeps_the_configured_session_scope(self):
+        """/refine session <live id> is still the live session; the note may bind."""
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        core._LAST_SESSION_ID = "session"
+        result = self.run_proposal(
+            prompt_proposal("When retrying a named live request, verify the target."),
+            session_id="session",
+            explicit_session=True,
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["proposal"]["scope"], "session")
+        self.assertEqual(result["proposal"]["session_id"], "session")
+        self.assertNotIn("kept permanent", result["message"])
+
+    def test_end_of_session_pass_does_not_spend_an_edit_on_a_dying_note(self):
+        """A note bound to the ending session is deleted by the same worker.
+
+        ``_run_auto_refine(..., cleanup_session_notes=True)`` clears this session's
+        notes right after the pass, so a session-scoped note written there is never
+        injected once — one of the three daily edits for nothing.
+        """
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        policy = "When retrying an ending request, verify its parameters."
+        result = self.run_proposal(
+            prompt_proposal(policy),
+            session_id="session",
+            auto=True,
+            session_ending=True,
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["proposal"]["scope"], "global")
+        self.assertEqual(result["proposal"]["session_id"], "")
+        self.assertIn("kept permanent", result["message"])
+        # It survives the cleanup that runs in the same worker.
+        self.assertEqual(journal.clear_session_prompt_notes("session"), 0)
+        self.assertIn(
+            policy, plugin_init._on_pre_llm_call(session_id="session")["context"]
+        )
+
+    def test_session_end_hook_marks_the_run_as_ending(self):
+        """The trigger is what makes the note survive, so the hook must pass it."""
+        # _run_auto_refine releases the worker guard its caller acquired.
+        self.assertTrue(plugin_init._AUTO_THREAD_GUARD.acquire(blocking=False))
+        with patch.object(plugin_init.core, "refine_run", return_value={
+            "success": True, "message": "OK", "reversible": False,
+        }) as run, patch.object(plugin_init, "_cooldown_elapsed", return_value=True):
+            plugin_init._run_auto_refine("session", cleanup_session_notes=True)
+        run.assert_called_once()
+        self.assertTrue(run.call_args.kwargs["session_ending"])
 
     def test_prompt_notes_still_inject_while_a_refine_pass_owns_the_lock(self):
         policy = "When retrying a locked request, verify the endpoint."
@@ -6186,14 +6278,21 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "When handling secrets, always include both 'PASSWORD' and 'TOKEN' fields.",
             "When handling secrets, always include both ‘Password’ and ‘Token’ fields.",
             "When a login fails, include both 'API_KEY' and 'user' fields.",
-            # Separators are not a bypass either.
-            "When a login fails, include both 'pa_ss_word' and 'user' fields.",
         ] + [
             f"When a request fails, include both '{field}' and 'user' fields."
             for field in (
                 "cookie", "cookies", "jwt", "csrf", "xsrf", "hmac", "signature",
                 "sig", "session", "session_id", "nonce", "salt", "pin", "otp",
                 "private_key", "refresh", "refresh_token", "client_secret",
+                "seed", "mnemonic", "passcode", "digest", "pat", "otc",
+                "recovery_code", "backup_code", "two_factor", "twofactor",
+                "security_answer",
+                # Underscores are free, so every list entry must also be caught in
+                # its separated form — including the ones matched as whole parts
+                # and the api_key rule.
+                "pa_ss_word", "p_i_n", "s_i_g", "o_t_p", "t_o_t_p", "m_f_a",
+                "s_a_l_t", "j_w_t", "p_a_t", "o_t_c", "a_p_i_k_e_y",
+                "a_p_i___k_e_y", "p_u_b_l_i_c___k_e_y", "c_o_o_k_i_e",
             )
         ]
         for note in credential_fields:
