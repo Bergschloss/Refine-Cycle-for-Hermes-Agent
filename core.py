@@ -129,6 +129,31 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
     """
 )
 
+# A field-policy note may name the arguments a tool requires ("include both
+# 'path' and 'content' fields"), but naming a credential-shaped field turns
+# "supply the missing argument" into "put the password in the call". Such a note
+# cannot exfiltrate on its own — URLs, hosts, paths and shell syntax are rejected
+# above — yet it is persisted into the agent's own future system context, and both
+# the field name and the condition originate in an untrusted trajectory. So the
+# bounded identifier form stays, and credential words are kept out of it.
+_PROMPT_NOTE_QUOTED_FIELD = re.compile(r"['\"\u2018\u2019]([a-z_]{1,30})['\"\u2018\u2019]")
+_CREDENTIAL_FIELD_WORDS = (
+    "pass", "pwd", "secret", "token", "credential", "cred", "auth", "bearer", "otp",
+)
+
+
+def _prompt_note_credential_field(action: str) -> str:
+    """Return the first credential-shaped field name an action names, if any."""
+    for name in _PROMPT_NOTE_QUOTED_FIELD.findall(action):
+        if any(word in name for word in _CREDENTIAL_FIELD_WORDS):
+            return name
+        # ``key`` on its own is an ordinary argument name; ``api_key``,
+        # ``secret_key`` and ``accesskey`` are not.
+        if "key" in name and name not in ("key", "keys"):
+            return name
+    return ""
+
+
 # One canonical action list drives both model guidance and validator anti-drift tests.
 PROMPT_NOTE_ACTION_EXAMPLES = _llm.PROMPT_NOTE_ACTION_EXAMPLES
 
@@ -1182,6 +1207,8 @@ def _prompt_note_content_error(
         action_match = _PROMPT_NOTE_ACTION.match(line)
         if not action_match or not _PROMPT_NOTE_SAFE_ACTION.fullmatch(action_match.group(1)):
             return "Prompt note action must match an approved behavioral policy"
+        if _prompt_note_credential_field(action_match.group(1)):
+            return "Prompt note action cannot name a credential field to supply"
     rendered = "Refine notes:\n- " + content
     per_note_limit = max(
         1, config.prompt_notes_max_chars() // config.prompt_notes_max_count()
@@ -2368,15 +2395,28 @@ def _normalize_edit(proposal: Dict[str, Any], session: str) -> Dict[str, Any]:
     )
     if normalized.get("kind") == "prompt":
         scope = config.prompt_notes_default_scope()
+        note_session = (
+            journal.normalize_prompt_note_session_id(session)
+            if scope == "session"
+            else ""
+        )
+        if scope == "session":
+            # ``/refine session <id>`` analyses a session that is usually not the
+            # live one. A note bound to it could never be injected (the hook only
+            # matches the current session) and never cleaned up (that session will
+            # not end again), so it would occupy a note slot forever after paying
+            # for one of the day's edits. Store it globally instead.
+            live_session, _ = resolve_session_id()
+            if not note_session or note_session != journal.normalize_prompt_note_session_id(
+                live_session
+            ):
+                scope = "global"
+                note_session = ""
         normalized = dict(
             normalized,
             content=journal.normalize_prompt_note_content(normalized.get("content", "")),
             scope=scope,
-            session_id=(
-                journal.normalize_prompt_note_session_id(session)
-                if scope == "session"
-                else ""
-            ),
+            session_id=note_session,
         )
     return normalized
 

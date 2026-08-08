@@ -208,6 +208,7 @@ PROMPT_NOTE_ACTION_EXAMPLES = (
     "ask before retrying a third time",
     "check timing assumptions before rerunning",
     "mention which sections were skipped",
+    "include the required fields",
     "include the required parameters",
     "provide the missing fields",
 )

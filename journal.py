@@ -1519,16 +1519,29 @@ def skill_baseline(name: str) -> Optional[Dict[str, Any]]:
 
 
 _BACKUP_RETENTION_SECONDS = 30 * 86400
-_ROLLBACK_BACKUP_OUTCOMES = {
+# Outcomes whose backup is still the pre-edit copy someone may need.
+#
+# The first five can still lead to a rollback. ``error`` and ``conflict`` cannot,
+# and that is exactly why they are here: an ``error`` is recorded when the host
+# reported success but the target no longer matches the proposal, and a
+# ``conflict`` is recorded mid-transaction after a backup was already taken. In
+# both cases the skill may already be modified while ``/refine rollback`` is
+# unavailable, so the ``.bak`` file is the only faithful copy left — the journal
+# snapshot is stored scrubbed and can be redacted.
+_BACKUP_RETENTION_OUTCOMES = {
     "prepared", "pending_approval", "applied", "rollback_prepared", "pending_rollback",
+    "error", "conflict",
 }
 
 
 def prune_expired_backups() -> List[Path]:
     """Remove aged orphan ``.bak`` files without rewriting journal history.
 
-    A backup remains protected while an active journal state could still lead to
-    rollback. Comparing basenames preserves migration's legacy-path fallback,
+    A backup remains protected while any journal entry still needs it — either
+    because rollback is still possible or because the edit ended in a state where
+    the target may have changed and rollback is not available
+    (``_BACKUP_RETENTION_OUTCOMES``). Comparing basenames preserves migration's
+    legacy-path fallback,
     where append-only entries retain their former absolute path while the backup
     itself is copied into the active backup directory. Any unreadable journal or
     filesystem failure fails closed by retaining the candidate.
@@ -1547,7 +1560,7 @@ def prune_expired_backups() -> List[Path]:
         for entry in active_entries:
             proposal = entry.get("proposal")
             if (
-                entry.get("outcome") not in _ROLLBACK_BACKUP_OUTCOMES
+                entry.get("outcome") not in _BACKUP_RETENTION_OUTCOMES
                 or not isinstance(proposal, dict)
                 or proposal.get("kind") != "skill"
                 or proposal.get("action") != "patch"

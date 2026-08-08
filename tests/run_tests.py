@@ -539,6 +539,37 @@ class RefineTests(unittest.TestCase):
             patterns.fingerprint("http", "rate limited"),
             patterns.fingerprint("http", "permission denied"),
         )
+        # Relative paths still aggregate, because the last segment carries an
+        # extension — that is what tells a path from two words around a slash.
+        self.assertEqual(
+            patterns.fingerprint("open", "cannot open src/main.py"),
+            patterns.fingerprint("open", "cannot open src/util.py"),
+        )
+
+    def test_path_normalization_keeps_different_failures_apart(self):
+        """The other half of normalization: a path rule may not swallow prose.
+
+        A rule that accepts spaces or word-adjacent slashes merges errors that
+        differ only in the words *between* their paths. Those groups then reach
+        the recurrence threshold and refine spends an edit asserting that two
+        unrelated failures are one.
+        """
+        two_paths = patterns.normalize_error(
+            "no such file /tmp/a and permission denied /tmp/b"
+        )
+        self.assertEqual(two_paths.count("path"), 2)
+        self.assertIn("and permission denied", two_paths)
+        self.assertNotEqual(
+            patterns.fingerprint("fs", "no such file /tmp/a and permission denied /tmp/b"),
+            patterns.fingerprint("fs", "no such file /tmp/a and rate limited /tmp/c"),
+        )
+        # A slash inside a word is not a path separator.
+        self.assertNotEqual(
+            patterns.fingerprint("fs", "read/write error"),
+            patterns.fingerprint("fs", "read/execute error"),
+        )
+        self.assertEqual(patterns.normalize_error("read/write error"), "read/write error")
+        self.assertNotIn("path", patterns.normalize_error("rate limited 50/50 attempts"))
 
     def test_repeat_marker_mid_text_preserves_distinguishing_tail(self):
         """A tool-controlled marker cannot hide a later distinguishing detail."""
@@ -1768,6 +1799,41 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(referenced.is_file())
         self.assertTrue(fresh_orphan.is_file())
         self.assertTrue(old_other.is_file())
+
+    def test_backup_retention_keeps_error_and_conflict_pre_edit_copies(self):
+        """An outcome that cannot roll back is exactly when the .bak is the only copy.
+
+        ``error`` is recorded when the host reported success but the target no
+        longer matches, and ``conflict`` after a mid-transaction abort — in both
+        cases the skill may already be modified and ``/refine rollback`` is
+        unavailable, so pruning the backup would destroy the pre-edit content.
+        """
+        old_time = time.time() - journal._BACKUP_RETENTION_SECONDS - 1
+        kept = []
+        for outcome in ("error", "conflict"):
+            backup = journal.backups_dir() / f"{outcome}-source.bak"
+            backup.write_text(f"pre-edit {outcome}", encoding="utf-8")
+            os.utime(backup, (old_time, old_time))
+            journal.log(
+                trigger="manual", reason="failure", session_id="session",
+                proposal={"action": "patch", "kind": "skill", "name": f"skill-{outcome}"},
+                outcome=outcome, backup_path=str(backup),
+                recovery={"type": "skill_patch", "name": f"skill-{outcome}"},
+            )
+            kept.append(backup)
+        rejected = journal.backups_dir() / "rejected-source.bak"
+        rejected.write_text("never applied", encoding="utf-8")
+        os.utime(rejected, (old_time, old_time))
+        journal.log(
+            trigger="manual", reason="failure", session_id="session",
+            proposal={"action": "patch", "kind": "skill", "name": "skill-rejected"},
+            outcome="rejected", backup_path=str(rejected),
+            recovery={"type": "skill_patch", "name": "skill-rejected"},
+        )
+        self.assertEqual(journal.prune_expired_backups(), [rejected])
+        for backup in kept:
+            self.assertTrue(backup.is_file())
+        self.assertFalse(rejected.exists())
 
     def test_backup_retention_preserves_legacy_snapshotless_rollback(self):
         """R9-11a: cleanup must not break a legacy entry without a snapshot."""
@@ -3842,6 +3908,48 @@ class RefineTests(unittest.TestCase):
         self.assertNotIn(
             "reset request", plugin_init._on_pre_llm_call(session_id="session")["context"]
         )
+
+    def test_analysing_a_past_session_never_stores_a_note_bound_to_it(self):
+        """``/refine session <id>`` must not create an inert, uncleanable note.
+
+        A note scoped to a session that is not the live one can never be injected
+        (the hook matches only the current session) and never expires (that session
+        will not end again), so it would hold a note slot forever after spending one
+        of the day's edits. Such a note is stored globally instead.
+        """
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "No, that is not right; use the other endpoint instead", "", now - 7, 1),
+            ("session", "tool", "ERROR: request failed for /item/300", "http", now - 6, 1),
+            ("session", "assistant", "Retrying", "", now - 5, 1),
+            ("past-session", "user", "No, that is not right; use the other endpoint instead", "", now - 4, 1),
+            ("past-session", "tool", "ERROR: request failed for /item/100", "http", now - 3, 1),
+            ("past-session", "assistant", "Retrying", "", now - 2, 1),
+            ("past-session", "tool", "ERROR: request failed for /item/200", "http", now - 1, 1),
+        ])
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        policy = "When retrying a past request, verify the endpoint."
+        # The live session stays "session" (setUp notes it from the host hook).
+        result = self.run_proposal(prompt_proposal(policy), session_id="past-session")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["evidence"]["session_id"], "past-session")
+        self.assertEqual(result["proposal"]["scope"], "global")
+        self.assertEqual(result["proposal"]["session_id"], "")
+        stored = journal.load_prompt_notes()
+        self.assertEqual([note["scope"] for note in stored], ["global"])
+        self.assertFalse(stored[0].get("session_id", ""))
+        # It reaches the live session instead of being stranded on the dead one.
+        self.assertIn(policy, plugin_init._on_pre_llm_call(session_id="session")["context"])
+        self.assertEqual(journal.clear_session_prompt_notes("past-session"), 0)
+
+        # Analysing the live session still produces a session-scoped note.
+        live = self.run_proposal(
+            prompt_proposal("When retrying a live request, verify the target."),
+            session_id="session",
+        )
+        self.assertTrue(live["success"])
+        self.assertEqual(live["proposal"]["scope"], "session")
+        self.assertEqual(live["proposal"]["session_id"], "session")
 
     def test_prompt_notes_still_inject_while_a_refine_pass_owns_the_lock(self):
         policy = "When retrying a locked request, verify the endpoint."
@@ -5940,10 +6048,19 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                         f"When a request fails, {example}.", check_rendered_size=False
                     )
                 )
-        # The guidance subset IS in the prompt (anti-drift for the shorter list)
+        # The guidance subset is in the prompt AND passes the validator. Both
+        # halves matter: the prompt must never teach a form the validator rejects,
+        # which would surface only as unexplained no_op runs.
         for example in llm._PROMPT_NOTE_GUIDANCE_EXAMPLES:
             with self.subTest(guidance=example):
                 self.assertIn(example, llm.REFINE_SYSTEM_PROMPT)
+                self.assertIn(example, core.PROMPT_NOTE_ACTION_EXAMPLES)
+                self.assertIsNotNone(core._PROMPT_NOTE_SAFE_ACTION.fullmatch(example))
+                self.assertIsNone(
+                    core._prompt_note_content_error(
+                        f"When a request fails, {example}.", check_rendered_size=False
+                    )
+                )
 
     def test_live_rejected_proposal_now_accepted(self):
         """Round 6: the exact proposal from the live run must pass guardrails."""
@@ -5962,13 +6079,26 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 self.assertIsNotNone(
                     core._prompt_note_content_error(note, check_rendered_size=False)
                 )
-        # Actions that name bounded identifiers in a credential-related condition
-        # are safe: the action form is narrow (no free-text group), the condition
-        # is legitimate, and the field name is bounded to [a-z_]{1,30}. Previously
-        # rejected only because the action regex was too narrow; Round 8 widened it.
+        # Naming a credential-shaped field is rejected even though the action form
+        # itself is bounded: the note is persisted into the agent's own future
+        # system context, and it would turn "supply the missing argument" into
+        # "put the password in the call".
+        credential_fields = [
+            "When handling secrets, always include both ‘password’ and ‘token’ fields.",
+            "When a login fails, include both 'api_key' and 'user' fields.",
+            "When authorizing, always include both 'bearer' and 'scope' values.",
+        ]
+        for note in credential_fields:
+            with self.subTest(note=note):
+                error = core._prompt_note_content_error(note, check_rendered_size=False)
+                self.assertIsNotNone(error)
+                self.assertIn("credential field", error)
+        # Generic field policies stay accepted — including in a credential-adjacent
+        # condition — because they name no credential and no destination.
         now_accepted = [
             "When handling secrets, include the required fields.",
-            "When handling secrets, always include both ‘password’ and ‘token’ fields.",
+            "When calling write_file, always include both ‘path’ and ‘content’ fields.",
+            "When storing an entry, include both 'key' and 'value' fields.",
             "When a login request fails, include all required values.",
             "When signing in fails, provide the missing parameters.",
             "When OAuth fails, set all required values.",

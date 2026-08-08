@@ -733,11 +733,11 @@ def register(ctx) -> None:
         description=(
             "Self-improve skills/memory. "
             "Usage: /refine [reason|audit|status|dry-run|model [target|auto]|"
-            "session <session_id> [reason]|rollback <id>]"
+            "session <session_id>|rollback <id>]"
         ),
         args_hint=(
             "[reason | audit | status | dry-run | model [target|auto] | "
-            "session <session_id> [reason] | rollback <id>]"
+            "session <session_id> | rollback <id>]"
         ),
     )
     ctx.register_tool(

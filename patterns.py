@@ -20,6 +20,29 @@ try:
 except ImportError:
     from sanitization import scrub_text  # type: ignore
 
+# Path normalization has to collapse volatile detail (``/users/8821`` and
+# ``/users/9134`` are one failure) *without* merging errors that only look alike
+# after normalization. Three boundaries carry that second half:
+#   * ``(?<!\w)`` — a path starts at a word boundary, so ``read/write error`` and
+#     ``read/execute error`` stay two failures, and ``50/50 attempts`` stays a
+#     pair of numbers instead of becoming a path.
+#   * interior spaces are accepted only where the separator itself is unambiguous
+#     (``C:\Program Files\x``), never in a forward-slash path, so prose between two
+#     paths survives: ``no such file /tmp/a and permission denied /tmp/b``
+#     normalizes to two PATH tokens with ``and permission denied`` intact.
+#   * an unrooted path (``src/main.py``) is only recognized when its last segment
+#     carries an extension — that is what separates a real relative path from two
+#     prose words around a slash.
+_SEGMENT = r"[\w.\-]+"
+_SPACED_SEGMENT = rf"{_SEGMENT}(?: {_SEGMENT})*"
+# A drive letter or a backslash root: prose almost never contains a backslash or
+# a ``C:``, so segments here may carry interior spaces.
+_WINDOWS_PATH = rf"(?:[A-Za-z]:[\\/]|\\)(?:{_SPACED_SEGMENT}[\\/])*{_SEGMENT}"
+# Forward slashes appear in ordinary prose, so a POSIX path takes no spaces.
+_POSIX_PATH = rf"/(?:{_SEGMENT}/)*{_SEGMENT}"
+_RELATIVE_PATH = rf"{_SEGMENT}[\\/](?:{_SEGMENT}[\\/])*{_SEGMENT}\.[A-Za-z0-9]{{1,8}}"
+_PATH = re.compile(rf"(?<!\w)(?:{_WINDOWS_PATH}|{_POSIX_PATH}|{_RELATIVE_PATH})")
+
 # Order matters: timestamps and paths must be replaced before bare integers,
 # otherwise the digit rule eats the parts that make them recognizable.
 _NORMALIZERS = [
@@ -31,8 +54,9 @@ _NORMALIZERS = [
     (re.compile(r"'([^']*)'"), r"\1"),
     # URLs before paths (a URL contains slashes)
     (re.compile(r"https?://\S+"), "URL"),
-    # Filesystem paths, POSIX and Windows
-    (re.compile(r"(?:[A-Za-z]:)?[\\/](?:[\w.\- ]+[\\/])*[\w.\-]+"), "PATH"),
+    # Filesystem paths, POSIX and Windows — see _PATH below for the boundaries
+    # that keep this rule from merging genuinely different errors.
+    (_PATH, "PATH"),
     # UUIDs, then any long hex run (ids, hashes, object addresses)
     (re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b"), "X"),
     (re.compile(r"\b(?:0x)?[0-9a-fA-F]{8,}\b"), "X"),
