@@ -1,4 +1,4 @@
-# Refine Cycle
+# Refine Cycle for Hermes Agent
 
 ![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.jpg)
 
