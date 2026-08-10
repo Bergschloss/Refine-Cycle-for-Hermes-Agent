@@ -107,10 +107,10 @@ def _turn_interval_reached(session_id: str, assistant_turns: int) -> bool:
 def _mark_turn_attempt(session_id: str, assistant_turns: int) -> None:
     """Record the attempt point, keeping the per-session marks bounded."""
     with _AUTO_TURN_MARKS_LOCK:
-        if (
-            session_id not in _AUTO_TURN_MARKS
-            and len(_AUTO_TURN_MARKS) >= _AUTO_TURN_MARKS_MAX
-        ):
+        if session_id in _AUTO_TURN_MARKS:
+            # Re-insert at end so insertion order tracks recency (LRU).
+            del _AUTO_TURN_MARKS[session_id]
+        elif len(_AUTO_TURN_MARKS) >= _AUTO_TURN_MARKS_MAX:
             _AUTO_TURN_MARKS.pop(next(iter(_AUTO_TURN_MARKS)), None)
         _AUTO_TURN_MARKS[session_id] = assistant_turns
 

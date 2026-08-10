@@ -9251,6 +9251,24 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "~/my-refine",
         )
 
+    # ── §9 Round 10: _AUTO_TURN_MARKS LRU fix ────────────────────────────
+
+    def test_turn_marks_lru_evicts_idle_not_active(self):
+        """§9: touching a key makes it survive eviction over idle ones."""
+        plugin_init._AUTO_TURN_MARKS.clear()
+        # Fill to capacity
+        for i in range(plugin_init._AUTO_TURN_MARKS_MAX):
+            plugin_init._mark_turn_attempt(f"s{i}", i)
+        # Touch the oldest key (s0) — should move to end
+        plugin_init._mark_turn_attempt("s0", 999)
+        # Insert one more to trigger eviction
+        plugin_init._mark_turn_attempt("new_session", 1)
+        # s0 should survive (was touched), s1 should be evicted (oldest idle)
+        self.assertIn("s0", plugin_init._AUTO_TURN_MARKS)
+        self.assertNotIn("s1", plugin_init._AUTO_TURN_MARKS)
+        self.assertIn("new_session", plugin_init._AUTO_TURN_MARKS)
+        plugin_init._AUTO_TURN_MARKS.clear()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
