@@ -799,6 +799,19 @@ class RefineTests(unittest.TestCase):
             with self.subTest(safe=safe):
                 self.assertEqual(sanitization.scrub_text(safe), safe)
 
+    def test_numeric_metric_values_preserve_only_exact_allowlisted_keys(self):
+        raw = (
+            "max_tokens=131072 total_tokens: 150000 "
+            "api_token=123456789012 api_key=987654321098"
+        )
+        scrubbed = sanitization.scrub_text(raw)
+        self.assertIn("max_tokens=131072", scrubbed)
+        self.assertIn("total_tokens: 150000", scrubbed)
+        self.assertNotIn("123456789012", scrubbed)
+        self.assertNotIn("987654321098", scrubbed)
+        self.assertEqual(scrubbed.count("[REDACTED]"), 2)
+        self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
+
     def test_env_secret_redacts_through_leading_comments_and_spaces(self):
         """R9 §10: reproduce-checked, did not reproduce as a bug. A leading
         comment marker, leading whitespace, or extra spaces around '=' must

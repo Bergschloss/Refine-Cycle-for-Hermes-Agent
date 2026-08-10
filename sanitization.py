@@ -48,6 +48,13 @@ _ENV_SECRET = re.compile(
     r"(?m)^(\s*(?:export\s+|set\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*\s*=\s*)\S+$"
 )
 _NON_SECRETS = {"true", "false", "null", "none", "enabled", "disabled"}
+# Numeric values only avoid generic credential redaction for these exact telemetry
+# field names. Broad classes such as "token" and "key" still cover numeric API
+# credentials, which are just as sensitive as alphabetic ones.
+_NUMERIC_METRIC_KEYS = {
+    "max_tokens", "min_tokens", "total_tokens", "input_tokens", "output_tokens",
+    "prompt_tokens", "completion_tokens", "context_tokens", "cached_tokens",
+}
 
 
 def _replace_quoted(match: re.Match) -> str:
@@ -58,7 +65,7 @@ def _replace_quoted(match: re.Match) -> str:
 
 
 def _is_number(value: str) -> bool:
-    """Return True for integer and float literals so they are not redacted."""
+    """Return True for integer and float literals."""
     try:
         float(value)
         return True
@@ -68,10 +75,10 @@ def _is_number(value: str) -> bool:
 
 def _replace_unquoted(match: re.Match) -> str:
     value = match.group("value")
-    prefix = match.group("prefix").lower()
+    prefix = match.group("prefix")
+    key = re.sub(r"\s*[:=]\s*$", "", prefix).strip().lower()
     if value.lower() in _NON_SECRETS or (
-        _is_number(value)
-        and not any(word in prefix for word in ("password", "passwd", "secret", "key", "token", "authorization", "bearer"))
+        _is_number(value) and key in _NUMERIC_METRIC_KEYS
     ):
         return match.group(0)
     # Canonical markers are protected by scrub_text splitting and ``[`` is not
