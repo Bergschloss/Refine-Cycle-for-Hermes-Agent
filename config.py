@@ -50,8 +50,8 @@ def _load_raw_config() -> Optional[Dict[str, Any]]:
         return None
 
 
-def _get_refine_entry() -> Dict[str, Any]:
-    raw = _load_raw_config()
+def _refine_entry_from_raw(raw: Any) -> Dict[str, Any]:
+    """Extract the plugin entry from one already-loaded config snapshot."""
     if not isinstance(raw, dict) or not raw:
         return {}
     plugins_cfg = raw.get("plugins", {})
@@ -64,6 +64,10 @@ def _get_refine_entry() -> Dict[str, Any]:
     if not isinstance(entry, dict):
         return {}
     return entry
+
+
+def _get_refine_entry() -> Dict[str, Any]:
+    return _refine_entry_from_raw(_load_raw_config())
 
 
 def _parse_bool(value, default: bool, key_for_log: str) -> bool:
@@ -95,6 +99,21 @@ def _parse_bool(value, default: bool, key_for_log: str) -> bool:
 def get_bool(key: str, default: bool) -> bool:
     """Read a boolean config key with a default. Accepts 0/1 and string forms."""
     return _parse_bool(_get_refine_entry().get(key), default, key)
+
+
+def _get_fail_closed_bool(key: str, default: bool = True) -> bool:
+    """Read a trust/privacy switch from one config snapshot, failing closed.
+
+    Checking availability and then calling ``get_bool`` loads the file twice. An
+    editor can replace config.yaml between those reads: the first succeeds, the
+    second fails, and the ordinary ``True`` default silently re-enables the very
+    behavior this guard is meant to protect. Load once, parse that same object,
+    and return ``False`` if no mapping was available.
+    """
+    raw = _load_raw_config()
+    if not isinstance(raw, dict):
+        return False
+    return _parse_bool(_refine_entry_from_raw(raw).get(key), default, key)
 
 
 def get_int(key: str, default: int, min_val: int = 1) -> int:
@@ -154,9 +173,7 @@ def auto_enabled() -> bool:
     analysis they had turned off. An unreadable config therefore fails closed,
     and ``/refine status`` reports that as the reason.
     """
-    if not config_available():
-        return False
-    return get_bool("auto_enabled", True)
+    return _get_fail_closed_bool("auto_enabled")
 
 
 def auto_min_messages() -> int:
@@ -208,9 +225,7 @@ def reviewer_fallback_enabled() -> bool:
     check a YAML syntax error would silently re-enable a reviewer model call
     the user may have turned off, rather than reporting the config problem.
     """
-    if not config_available():
-        return False
-    return get_bool("reviewer_fallback_enabled", True)
+    return _get_fail_closed_bool("reviewer_fallback_enabled")
 
 
 def reviewer_min_messages() -> int:
@@ -232,9 +247,7 @@ def cross_session_enabled() -> bool:
     manual ``/refine`` run bypasses ``auto_enabled`` entirely so that gate does
     not cover this path either.
     """
-    if not config_available():
-        return False
-    return get_bool("cross_session_enabled", True)
+    return _get_fail_closed_bool("cross_session_enabled")
 
 
 def skip_session_sources() -> List[str]:
@@ -502,9 +515,7 @@ def prompt_notes_enabled() -> bool:
     manual ``/refine`` run bypasses ``auto_enabled`` entirely so that gate does
     not cover this path either.
     """
-    if not config_available():
-        return False
-    return get_bool("prompt_notes_enabled", True)
+    return _get_fail_closed_bool("prompt_notes_enabled")
 
 
 def prompt_notes_max_count() -> int:

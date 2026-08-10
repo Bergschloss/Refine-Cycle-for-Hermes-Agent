@@ -1435,21 +1435,26 @@ def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:
 
 
 def proposal_hash(proposal: Dict[str, Any]) -> str:
-    """Identify a proposal for dedup: same kind, action, name, and content.
+    """Identify a proposal by the storage operation it would actually perform.
 
-    ``action`` must be part of the key. Without it, a ``create`` and a later
-    ``patch`` of the same skill with identical content hash identically, so a
-    legitimate patch inside the dedup window could be silently rejected as a
-    duplicate of the create that came before it.
-
-    A memory proposal's storage target is a fixed ``"memory"`` (see
-    ``_apply_memory``), not carried as its own field on the proposal, so there
-    is no separate ``target`` field to add here.
+    Skill ``create`` and ``patch`` are distinct operations: a newly created skill
+    may legitimately need a patch with the same rendered content inside the dedup
+    window. Memory is different: both accepted actions call the same
+    ``MemoryStore.add("memory", content)`` append, and the proposal's ``name`` is
+    ignored by that store. Canonicalizing both fields prevents the model from
+    appending identical future-context text again merely by changing ``create``
+    to ``patch`` or choosing another unused name.
     """
+    kind = str(proposal.get("kind", ""))
+    action = str(proposal.get("action", ""))
+    name = str(proposal.get("name", ""))
+    if kind == "memory" and action in ("create", "patch"):
+        action = "append"
+        name = "memory"
     key = "|".join([
-        str(proposal.get("kind", "")),
-        str(proposal.get("action", "")),
-        str(proposal.get("name", "")),
+        kind,
+        action,
+        name,
         hashlib.sha1(str(proposal.get("content", "")).encode("utf-8", "replace")).hexdigest(),
     ])
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]

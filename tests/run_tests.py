@@ -5290,6 +5290,30 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             self.assertFalse(config.prompt_notes_enabled())
             self.assertFalse(config.reviewer_fallback_enabled())
 
+    def test_privacy_flags_parse_one_atomic_config_snapshot(self):
+        """A successful availability read followed by a failed reload must not open.
+
+        Config editors commonly replace YAML non-atomically. The old accessors
+        checked availability, loaded again through ``get_bool``, then used the
+        permissive default when that second read failed. Each guarded accessor
+        must decide from exactly one snapshot instead.
+        """
+        accessors = (
+            ("auto_enabled", config.auto_enabled),
+            ("cross_session_enabled", config.cross_session_enabled),
+            ("prompt_notes_enabled", config.prompt_notes_enabled),
+            ("reviewer_fallback_enabled", config.reviewer_fallback_enabled),
+        )
+        for key, accessor in accessors:
+            raw = {
+                "plugins": {"entries": {"refine": {key: False}}}
+            }
+            with self.subTest(key=key), patch.object(
+                config, "_load_raw_config", side_effect=[raw, None]
+            ) as load:
+                self.assertFalse(accessor())
+                load.assert_called_once_with()
+
     def test_readable_config_keeps_privacy_flag_defaults(self):
         """R9 §8: the fail-closed fix must not change behaviour on a readable config."""
         self.assertTrue(config.cross_session_enabled())
@@ -8485,6 +8509,29 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         with patch.object(journal, "_load_entries", return_value=entries):
             self.assertFalse(journal.was_applied_recently(patched, 7))
             self.assertTrue(journal.was_applied_recently(created, 7))
+
+    def test_dedup_hash_canonicalizes_memory_append_semantics(self):
+        """Memory create/patch and proposal names all map to one append target.
+
+        Both accepted actions call ``MemoryStore.add("memory", content)`` and the
+        proposal name is ignored. Treating either field as identity lets an
+        identical future-context entry bypass dedup and consume another edit.
+        """
+        created = {
+            "action": "create", "kind": "memory", "name": "first-name",
+            "content": "same future-context lesson",
+        }
+        patched = {
+            "action": "patch", "kind": "memory", "name": "different-name",
+            "content": "same future-context lesson",
+        }
+        self.assertEqual(journal.proposal_hash(created), journal.proposal_hash(patched))
+        entries = [{
+            "id": "e1", "ts": time.time() - 100,
+            "outcome": "applied", "proposal": created,
+        }]
+        with patch.object(journal, "_load_entries", return_value=entries):
+            self.assertTrue(journal.was_applied_recently(patched, 7))
 
     def test_dedup_hash_identical_proposals_still_collide(self):
         """R9 §5: adding action to the hash must not break the ordinary case."""
