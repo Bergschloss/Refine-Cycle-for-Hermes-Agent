@@ -8396,6 +8396,22 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         """R7-06: explicit correction with no patterns -> signal."""
         self.assertTrue(patterns.has_signal([], ["user correction"], min_count=2))
 
+    def test_signal_high_min_count_is_not_defeated_by_an_ordinary_pattern(self):
+        """R9 §7: session_threshold must scale with min_count, not be pinned to 2.
+
+        A caller asking for a strict threshold (min_count=100) must not have
+        its gate opened by any pattern that merely spans two sessions -- that
+        was the exact defect: session_threshold was clamped to a constant 2
+        regardless of what the caller requested.
+        """
+        ordinary_two_session = [{"count": 2, "sessions_seen": 2}]
+        self.assertFalse(patterns.has_signal(ordinary_two_session, [], min_count=100))
+        # A pattern that actually meets the high bar still opens the gate.
+        meets_high_bar = [{"count": 100, "sessions_seen": 1}]
+        self.assertTrue(patterns.has_signal(meets_high_bar, [], min_count=100))
+        wide_spread = [{"count": 1, "sessions_seen": 60}]
+        self.assertTrue(patterns.has_signal(wide_spread, [], min_count=100))
+
     # ── Traceback fingerprint collapse regression (H-8 / R8) ───────────────
 
     def test_tracebacks_differing_only_in_frame_paths_collapse_to_one_fingerprint(self):

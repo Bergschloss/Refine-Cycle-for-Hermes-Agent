@@ -280,10 +280,21 @@ def has_signal(
     corrections: List[Any],
     min_count: int = 2,
 ) -> bool:
-    """Return whether a repeated failure or explicit correction is present."""
+    """Return whether a repeated failure or explicit correction is present.
+
+    A pattern seen in several distinct sessions is stronger evidence than the
+    same count inside one session, so the cross-session threshold is derived
+    below ``min_count`` rather than equal to it. It must still scale with
+    ``min_count``: pinning it to a constant (as an earlier version did) meant a
+    caller asking for a strict threshold (``min_count=100``) still had its gate
+    opened by any ordinary two-session pattern, defeating the caller's request
+    entirely. Halving keeps the default (``min_count=2`` -> threshold ``2``)
+    and the ``min_count=3`` cross-session case byte-identical to before, while
+    a much higher ``min_count`` now requires a proportionally wider spread.
+    """
     if corrections:
         return True
-    session_threshold = min(max(1, min_count), 2)
+    session_threshold = max(1, min_count // 2 + 1)
     for entry in patterns or []:
         if (
             entry.get("count", 0) >= min_count
