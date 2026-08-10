@@ -9189,6 +9189,34 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             # refine_run catches and journals, so check journal
             pass
 
+    # ── §6 Round 10: _read_skill_state logging ────────────────────────────
+
+    def test_read_skill_state_logs_on_read_error(self):
+        """§6: _read_skill_state must log a warning when file read fails."""
+        import logging
+        # Create a skill file with invalid UTF-8
+        skill_dir = FakeHost.root / "skills" / "bad-encoding"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_bytes(b"\x80\x81invalid utf-8 content")
+
+        # Mock skill_view to return this path
+        original_view = None
+        try:
+            from tools import skills_tool
+            original_view = skills_tool.skill_view
+            skills_tool.skill_view = lambda name, preprocess=False: {
+                "success": True, "path": str(skill_file),
+            }
+            with self.assertLogs(journal.logger, level="WARNING") as cm:
+                known, content = journal._read_skill_state("bad-encoding")
+            self.assertFalse(known)
+            self.assertIsNone(content)
+            self.assertTrue(any("Cannot read skill file" in msg for msg in cm.output))
+        finally:
+            if original_view is not None:
+                skills_tool.skill_view = original_view
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1495,7 +1495,8 @@ def _read_skill_state(name: str) -> tuple:
         return True, path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return True, None
-    except Exception:
+    except Exception as exc:
+        logger.warning("Cannot read skill file '%s': %s", path, scrub_text(str(exc)))
         return False, None
 
 
