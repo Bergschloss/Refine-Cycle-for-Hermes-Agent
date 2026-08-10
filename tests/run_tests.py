@@ -5094,6 +5094,32 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("config_unreadable", status["blocker_codes"])
         self.assertNotIn("auto_disabled", status["blocker_codes"])
 
+    def test_unreadable_config_fails_closed_on_privacy_flags(self):
+        """R9 §8: cross_session/prompt_notes/reviewer_fallback must not fail open.
+
+        auto_enabled already failed closed on an unreadable config, but a
+        manual /refine bypasses auto_enabled entirely, so a YAML syntax error
+        used to silently re-enable cross-session aggregation, prompt-note
+        injection, and reviewer calls for a user who had turned them off.
+        """
+        FakeHost.entry_config().update({
+            "cross_session_enabled": True,
+            "prompt_notes_enabled": True,
+            "reviewer_fallback_enabled": True,
+        })
+        with patch.object(config, "_load_raw_config", return_value=None):
+            self.assertFalse(config.cross_session_enabled())
+            self.assertFalse(config.prompt_notes_enabled())
+            self.assertFalse(config.reviewer_fallback_enabled())
+
+    def test_readable_config_keeps_privacy_flag_defaults(self):
+        """R9 §8: the fail-closed fix must not change behaviour on a readable config."""
+        self.assertTrue(config.cross_session_enabled())
+        self.assertTrue(config.prompt_notes_enabled())
+        self.assertTrue(config.reviewer_fallback_enabled())
+        FakeHost.entry_config()["cross_session_enabled"] = False
+        self.assertFalse(config.cross_session_enabled())
+
     def test_status_reports_budget_exhausted_specifically(self):
         FakeHost.entry_config()["max_edits_per_day"] = 1
         self.assertTrue(self.run_proposal(skill_proposal("status-budget"))["success"])

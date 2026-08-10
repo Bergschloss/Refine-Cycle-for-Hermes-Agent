@@ -201,7 +201,15 @@ def min_signal_required() -> bool:
 
 
 def reviewer_fallback_enabled() -> bool:
-    """Allow a small reviewer call when the mechanical signal gate finds nothing."""
+    """Allow a small reviewer call when the mechanical signal gate finds nothing.
+
+    Fails closed on an unreadable config, matching ``auto_enabled``: a manual
+    ``/refine`` bypasses the ``auto_enabled`` gate entirely, so without this
+    check a YAML syntax error would silently re-enable a reviewer model call
+    the user may have turned off, rather than reporting the config problem.
+    """
+    if not config_available():
+        return False
     return get_bool("reviewer_fallback_enabled", True)
 
 
@@ -216,6 +224,16 @@ def reviewer_cooldown_minutes() -> int:
 
 
 def cross_session_enabled() -> bool:
+    """Aggregate failures across recent sessions.
+
+    Fails closed on an unreadable config, matching ``auto_enabled``: without
+    this check, a YAML syntax error would silently re-enable cross-session
+    aggregation for a user who had explicitly turned it off for privacy, and a
+    manual ``/refine`` run bypasses ``auto_enabled`` entirely so that gate does
+    not cover this path either.
+    """
+    if not config_available():
+        return False
     return get_bool("cross_session_enabled", True)
 
 
@@ -476,7 +494,16 @@ def legacy_journal_dir() -> Path:
 
 
 def prompt_notes_enabled() -> bool:
-    """Whether refine may persist and inject plugin-owned prompt notes."""
+    """Whether refine may persist and inject plugin-owned prompt notes.
+
+    Fails closed on an unreadable config, matching ``auto_enabled``: without
+    this check, a YAML syntax error would silently re-enable prompt-note
+    creation and injection for a user who had turned the feature off, and a
+    manual ``/refine`` run bypasses ``auto_enabled`` entirely so that gate does
+    not cover this path either.
+    """
+    if not config_available():
+        return False
     return get_bool("prompt_notes_enabled", True)
 
 
