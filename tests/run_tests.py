@@ -1381,20 +1381,49 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "unreliable — externally modified")
         self.assertNotIn("Candidates for removal", ledger.format_audit(rows))
 
-    def test_audit_unknown_skill_state_is_not_called_external(self):
-        """An uninspectable host state is unknown, not proof of modification."""
+    def test_audit_unknown_skill_state_suppresses_effectiveness_verdicts(self):
+        """Unknown host state is not external, but cannot support conclusions."""
         name = "uninspectable-external-check"
         created = self.run_proposal(skill_proposal(name))
         self.assertTrue(created["success"])
-        with patch.object(journal, "skill_baseline", return_value=None), patch.object(
-            ledger, "_count_uses_with_scope", return_value=(1, "since_exact")
-        ):
-            row = next(
-                r for r in ledger.audit([], journal_entries=journal.entries())
-                if r["name"] == name
-            )
-        self.assertFalse(row["externally_modified"])
-        self.assertEqual(row["verdict"], "working")
+        entries = journal.entries()
+
+        with patch.object(journal, "skill_baseline", return_value=None):
+            with patch.object(
+                ledger, "_count_uses_with_scope", return_value=(1, "since_exact")
+            ):
+                working = next(
+                    row for row in ledger.audit([], journal_entries=entries)
+                    if row["name"] == name
+                )
+                recurred = next(
+                    row for row in ledger.audit(
+                        [{
+                            "fingerprint": "deadbeef1234",
+                            "last_ts": time.time() + 1,
+                        }],
+                        journal_entries=entries,
+                    )
+                    if row["name"] == name
+                )
+            with patch.object(
+                ledger.time, "time", return_value=time.time() + 15 * 86400
+            ), patch.object(
+                ledger, "_count_uses_with_scope", return_value=(0, "since_exact")
+            ):
+                unused = next(
+                    row for row in ledger.audit([], journal_entries=entries)
+                    if row["name"] == name
+                )
+
+        self.assertTrue(recurred["pattern_recurred"])
+        for row in (working, recurred, unused):
+            self.assertFalse(row["externally_modified"])
+            self.assertTrue(row["attribution_unknown"])
+            self.assertEqual(row["verdict"], "unreliable — target state unavailable")
+            report = ledger.format_audit([row])
+            self.assertNotIn("Candidates for removal", report)
+            self.assertIn("could not be inspected", report)
 
     def test_audit_external_writer_check_is_not_confused_by_scrubbing(self):
         """R9 §9: a create whose content was scrubbed on the way in must not

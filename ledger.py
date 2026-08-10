@@ -447,6 +447,7 @@ def audit(
         # safer to act on than "working". Read-only: never reconcile, recreate,
         # revert, or re-apply the target here.
         externally_modified = False
+        attribution_unknown = False
         external_change = ""
         if meta.get("kind", "skill") == "skill" and outcome == "applied":
             intended_digest = intended_skill_digests.get(name)
@@ -456,15 +457,20 @@ def audit(
                     if skill_baselines is None
                     else skill_baselines.get(name)
                 )
-                if current_baseline is not None:
-                    if current_baseline.get("exists") is False:
-                        external_change = "removed"
-                    elif (
-                        current_baseline.get("exists") is True
-                        and current_baseline.get("sha256")
-                        and current_baseline["sha256"] != intended_digest
-                    ):
+                if current_baseline is None:
+                    attribution_unknown = True
+                    verdict = "unreliable — target state unavailable"
+                elif current_baseline.get("exists") is False:
+                    external_change = "removed"
+                elif (
+                    current_baseline.get("exists") is True
+                    and current_baseline.get("sha256")
+                ):
+                    if current_baseline["sha256"] != intended_digest:
                         external_change = "modified"
+                else:
+                    attribution_unknown = True
+                    verdict = "unreliable — target state unavailable"
                 if external_change:
                     externally_modified = True
                     verdict = f"unreliable — externally {external_change}"
@@ -480,6 +486,7 @@ def audit(
             "pattern_recurred": recurred,
             "verdict": verdict,
             "externally_modified": externally_modified,
+            "attribution_unknown": attribution_unknown,
             "journal_id": meta.get("journal_id", ""),
             "outcome": outcome,
             "reported_model": (
@@ -532,11 +539,17 @@ def format_audit(rows: List[Dict[str, Any]]) -> str:
                 "      ⚠ modified or removed since refine's edit by something else "
                 "(e.g. Hermes background review) — verdict is not reliable"
             )
+        elif row.get("attribution_unknown"):
+            lines.append(
+                "      ⚠ current skill state could not be inspected — "
+                "effectiveness and removal conclusions are suppressed"
+            )
 
     candidates = [
         row for row in rows
         if row["verdict"] in ("unused", "did not help")
         and not row.get("externally_modified")
+        and not row.get("attribution_unknown")
     ]
     if candidates:
         lines.extend(["", "Candidates for removal:"])
