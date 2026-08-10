@@ -9296,6 +9296,15 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         twice = sanitization.sanitize(once)
         self.assertEqual(once, twice)
 
+    # ── §11 Round 10: extract_patterns limit drift ────────────────────────
+
+    def test_extract_patterns_default_equals_format_limit(self):
+        """§11: extract_patterns default limit must equal FORMAT_PATTERNS_LIMIT."""
+        self.assertEqual(
+            patterns.extract_patterns.__defaults__[0],
+            patterns.FORMAT_PATTERNS_LIMIT,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

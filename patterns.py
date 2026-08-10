@@ -196,8 +196,11 @@ def fingerprint(tool_name: str, content: str) -> str:
     return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:12]
 
 
+FORMAT_PATTERNS_LIMIT = 8
+
+
 def extract_patterns(
-    items: Iterable[Dict[str, Any]], limit: Optional[int] = 10
+    items: Iterable[Dict[str, Any]], limit: Optional[int] = FORMAT_PATTERNS_LIMIT
 ) -> List[Dict[str, Any]]:
     """Group error occurrences into counted patterns.
 
@@ -303,8 +306,6 @@ def has_signal(
             return True
     return False
 
-
-FORMAT_PATTERNS_LIMIT = 8
 
 
 def format_patterns(

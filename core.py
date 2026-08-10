@@ -689,7 +689,7 @@ def collect_cross_session_patterns(
 
         full_audit = since_ts is not None and max_rows is None and max_sessions is None
         result = patterns.extract_patterns(
-            iter_items(), limit=None if full_audit else 10
+            iter_items(), limit=None if full_audit else patterns.FORMAT_PATTERNS_LIMIT
         )
         if max_rows is not None and rows_seen >= max_rows:
             logger.warning(
