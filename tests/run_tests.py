@@ -771,6 +771,23 @@ class RefineTests(unittest.TestCase):
             with self.subTest(control=repr(control)):
                 self.assertIsNone(_extract_first_json_object(text))
 
+    def test_get_llm_logs_and_falls_back_when_context_property_raises(self):
+        secret = "api_key=property-secret-123456"
+
+        class BrokenContext:
+            @property
+            def llm(self):
+                raise RuntimeError(secret)
+
+        with self.assertLogs(plugin_init.logger, "WARNING") as logs:
+            resolved = plugin_init._get_llm(BrokenContext())
+        self.assertIsInstance(resolved, PluginLlm)
+        self.assertEqual(resolved.plugin_id, "refine")
+        output = "\n".join(logs.output)
+        self.assertIn("host-provided refine LLM", output)
+        self.assertNotIn(secret, output)
+        self.assertIn("[REDACTED]", output)
+
     def test_env_secret_bare_token_and_secret_redacted(self):
         """Wave 3.3: bare TOKEN=, SECRET=, KEY=, PASSWD= are redacted."""
         self.assertIn("[REDACTED]", sanitization.scrub_text("TOKEN=123456"))

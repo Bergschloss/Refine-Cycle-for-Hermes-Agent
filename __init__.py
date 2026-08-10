@@ -64,8 +64,11 @@ def _get_llm(ctx) -> PluginLlm:
         llm = ctx.llm
         if llm is not None:
             return llm
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "Cannot use the host-provided refine LLM; using a plugin client: %s",
+            core.scrub_text(str(exc)),
+        )
     return PluginLlm(plugin_id="refine")
 
 
