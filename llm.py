@@ -86,11 +86,14 @@ def _safe_trajectory_record(line: str) -> str:
     # Never manufacture a trusted opener around payload text. Current rendering
     # emits one complete physical line per record; any other reserved-tag shape
     # is foreign or legacy malformed input and is safer to omit than to repair.
+    preview = re.sub(
+        r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+", " ", scrub_text(line[:80])
+    )
     logger.warning(
         "Omitted malformed trajectory record containing boundary tags "
         "(len=%d, first 80 chars: %s)",
         len(line),
-        line[:80],
+        preview,
     )
     return _TRAJECTORY_OMITTED
 
@@ -461,6 +464,7 @@ def _propose_structured(
     )
     system_prompt = scrub_text(REFINE_SYSTEM_PROMPT)
     call_started = time.time()
+    schema_meta_recorded = False
     try:
         result = llm.complete_structured(
             system_prompt=system_prompt,
@@ -468,6 +472,7 @@ def _propose_structured(
             **common,
         )
         _record_call_meta(result, call_started)
+        schema_meta_recorded = True
         reply = _salvage_parsed(result, requested_max_tokens=max_tokens)
         if reply.failure:
             raise ValueError(
@@ -478,10 +483,12 @@ def _propose_structured(
         )
         return reply.parsed
     except PluginLlmTrustError:
-        _record_call_meta(None, call_started)
+        if not schema_meta_recorded:
+            _record_call_meta(None, call_started)
         raise
     except Exception as first_exc:
-        _record_call_meta(None, call_started)
+        if not schema_meta_recorded:
+            _record_call_meta(None, call_started)
         logger.warning(
             "json_schema proposal failed (%s); falling back to json_mode",
             scrub_text(str(first_exc)),
@@ -624,6 +631,7 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
     )
     try:
         call_started = time.time()
+        schema_meta_recorded = False
         _reviewer_used_json_mode = False
         try:
             result = llm.complete_structured(
@@ -637,16 +645,19 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                 **resolved_target,
             )
             _record_call_meta(result, call_started)
+            schema_meta_recorded = True
             reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
             if reply.failure:
                 raise ValueError(
                     f"Reviewer json_schema parse failed: {reply.failure} — {reply.detail}"
                 )
         except PluginLlmTrustError:
-            _record_call_meta(None, call_started)
+            if not schema_meta_recorded:
+                _record_call_meta(None, call_started)
             raise
         except Exception as schema_exc:
-            _record_call_meta(None, call_started)
+            if not schema_meta_recorded:
+                _record_call_meta(None, call_started)
             logger.warning(
                 "Reviewer json_schema failed (%s); falling back to json_mode",
                 scrub_text(str(schema_exc)),

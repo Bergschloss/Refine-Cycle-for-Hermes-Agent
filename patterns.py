@@ -204,8 +204,8 @@ def extract_patterns(
 ) -> List[Dict[str, Any]]:
     """Group error occurrences into counted patterns.
 
-    ``limit=None`` returns every pattern and is used by the post-edit audit;
-    interactive refine runs retain the small default prompt budget.
+    ``limit=None`` returns every pattern and is used by the post-edit audit and
+    signal gating. Prompt rendering separately retains the small interactive budget.
     """
     grouped: Dict[str, Dict[str, Any]] = {}
 
@@ -278,6 +278,39 @@ def merge_patterns(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _pattern_has_signal(entry: Dict[str, Any], *, min_count: int, session_cap: int) -> bool:
+    session_threshold = min(session_cap, max(1, min_count // 2 + 1))
+    return (
+        entry.get("count", 0) >= min_count
+        or entry.get("sessions_seen", 1) >= session_threshold
+    )
+
+
+def prioritize_signal_patterns(
+    patterns: List[Dict[str, Any]],
+    *,
+    min_count: int,
+    session_cap: int,
+    limit: int = FORMAT_PATTERNS_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Keep bounded evidence while ensuring the rendered set can open the gate.
+
+    Cross-session aggregation may need every observed pattern to decide whether a
+    durable signal exists, but evidence and prompt payloads must remain bounded.
+    Put qualifying patterns first, then fill the remaining display budget in the
+    established relevance order. Calling ``has_signal()`` on this result keeps
+    the decision tied to data the proposal model can actually inspect.
+    """
+    if limit <= 0:
+        return []
+    return sorted(
+        patterns or [],
+        key=lambda entry: not _pattern_has_signal(
+            entry, min_count=min_count, session_cap=session_cap
+        ),
+    )[:limit]
+
+
 def has_signal(
     patterns: List[Dict[str, Any]],
     corrections: List[Any],
@@ -302,12 +335,8 @@ def has_signal(
     """
     if corrections:
         return True
-    session_threshold = min(session_cap, max(1, min_count // 2 + 1))
     for entry in patterns or []:
-        if (
-            entry.get("count", 0) >= min_count
-            or entry.get("sessions_seen", 1) >= session_threshold
-        ):
+        if _pattern_has_signal(entry, min_count=min_count, session_cap=session_cap):
             return True
     return False
 

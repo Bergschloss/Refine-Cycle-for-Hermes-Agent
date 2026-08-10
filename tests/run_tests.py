@@ -9186,19 +9186,55 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(len(model.calls), 2)
 
     def test_fallback_exception_chains_first_cause(self):
-        """§5: when both json_schema and json_mode fail, __cause__ is the first error."""
+        """§5: when both transports fail, the fallback preserves the schema cause."""
         model = MockLlm(
             MockResult(None, text="garbled"),  # json_schema → malformed
             RuntimeError("json_mode also failed"),  # json_mode raises
         )
-        try:
-            core.refine_run(model)
-        except RuntimeError as exc:
-            self.assertIsInstance(exc.__cause__, ValueError)
-            self.assertIn("json_schema parse failed", str(exc.__cause__))
-        else:
-            # refine_run catches and journals, so check journal
-            pass
+        llm._call_meta.value = {}
+        with self.assertRaises(RuntimeError) as raised:
+            llm._propose_structured(
+                model,
+                "Propose one minimal edit.",
+                [PluginLlmTextInput(text="evidence")],
+            )
+        self.assertIsInstance(raised.exception.__cause__, ValueError)
+        self.assertIn("json_schema parse failed", str(raised.exception.__cause__))
+
+    def test_proposal_fallback_records_schema_metadata_once(self):
+        """§5: a parse-triggered retry records each proposal transport once."""
+        schema_result = MockResult(None, text="garbled")
+        json_result = MockResult({
+            "action": "no_op", "kind": "memory", "reason": "nothing durable",
+        })
+        model = MockLlm(schema_result, json_result)
+        llm._call_meta.value = {}
+        with patch.object(llm, "_record_call_meta", wraps=llm._record_call_meta) as recorded:
+            proposal = llm._propose_structured(
+                model,
+                "Propose one minimal edit.",
+                [PluginLlmTextInput(text="evidence")],
+            )
+        self.assertEqual(proposal["action"], "no_op")
+        self.assertEqual(recorded.call_count, 2)
+        self.assertIs(recorded.call_args_list[0].args[0], schema_result)
+        self.assertIs(recorded.call_args_list[1].args[0], json_result)
+
+    def test_reviewer_fallback_records_schema_metadata_once(self):
+        """§5: a parse-triggered retry records each reviewer transport once."""
+        schema_result = MockResult(None, text="garbled")
+        json_result = MockResult({
+            "shouldRefine": False,
+            "rationale": "No durable lesson.",
+            "instructions": "",
+        })
+        model = MockLlm(schema_result, json_result)
+        with patch.object(llm, "_record_call_meta", wraps=llm._record_call_meta) as recorded:
+            review = llm.review_fallback(model, "evidence")
+        self.assertFalse(review["should_refine"])
+        self.assertEqual(recorded.call_count, 2)
+        self.assertIs(recorded.call_args_list[0].args[0], schema_result)
+        self.assertIs(recorded.call_args_list[1].args[0], json_result)
 
     # ── §6 Round 10: _read_skill_state logging ────────────────────────────
 
@@ -9347,6 +9383,51 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         )
         self.assertTrue(result)
 
+    def test_cross_session_signal_is_bounded_and_shown_to_the_model(self):
+        """The gate and proposal use the same bounded, signal-prioritized patterns."""
+        now = time.time()
+        rows = []
+        labels = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")
+        for sequence, label in enumerate(labels):
+            for session_number in range(1, 25):
+                rows.append((
+                    f"broad-{session_number}", "tool",
+                    f"ERROR: {label} request failed", "http",
+                    now - (sequence * 100 + session_number), 1,
+                ))
+        for occurrence in range(100):
+            rows.append((
+                "frequent-session", "tool", "ERROR: frequent timeout", "http",
+                now - 10000 - occurrence, 1,
+            ))
+        rows.extend([
+            ("session", "user", "Routine context", "", now + 1, 1),
+            ("session", "assistant", "Routine response", "", now + 2, 1),
+            ("session", "assistant", "Still routine", "", now + 3, 1),
+        ])
+        FakeHost.make_db(rows)
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "min_pattern_count": 100,
+        })
+
+        all_patterns = core.collect_cross_session_patterns()
+        displayed = patterns.prioritize_signal_patterns(
+            all_patterns, min_count=100, session_cap=25
+        )
+        self.assertEqual(len(displayed), patterns.FORMAT_PATTERNS_LIMIT)
+        self.assertTrue(
+            patterns.has_signal(displayed, [], min_count=100, session_cap=25)
+        )
+
+        model = MockLlm({"action": "no_op", "reason": "No edit is needed."})
+        result = core.refine_run(model)
+
+        self.assertEqual(len(model.calls), 1)
+        self.assertNotIn("error_patterns", result["evidence"])
+        prompt = model.calls[0]["input"][0].text
+        self.assertIn("frequent timeout", prompt)
+
     # ── §14 Round 10: contract test for single-line trajectory records ────
 
     def test_one_line_collapses_all_unicode_line_boundaries(self):
@@ -9376,13 +9457,20 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             self.assertNotIn(ch, full_line, f"Separator U+{ord(ch):04X} in record")
 
     def test_safe_trajectory_record_warns_on_malformed(self):
-        """§14: _safe_trajectory_record logs a warning when it omits a record."""
+        """§14: omitted malformed records are warned about without leaking credentials."""
         import llm as llm_mod
-        malformed = "<untrusted_tool_result>no role prefix</untrusted_tool_result>"
+        secret = "1234567890"
+        malformed = (
+            "<untrusted_tool_result>authorization: "
+            f"{secret}</untrusted_tool_result>"
+        )
         with self.assertLogs(llm_mod.logger, level="WARNING") as cm:
             result = llm_mod._safe_trajectory_record(malformed)
         self.assertEqual(result, llm_mod._TRAJECTORY_OMITTED)
-        self.assertTrue(any("malformed trajectory record" in msg for msg in cm.output))
+        logged = "\n".join(cm.output)
+        self.assertIn("malformed trajectory record", logged)
+        self.assertNotIn(secret, logged)
+        self.assertIn("[REDACTED]", logged)
 
 
 if __name__ == "__main__":

@@ -687,10 +687,10 @@ def collect_cross_session_patterns(
                     "ts": row["timestamp"] or 0,
                 }
 
-        full_audit = since_ts is not None and max_rows is None and max_sessions is None
-        result = patterns.extract_patterns(
-            iter_items(), limit=None if full_audit else patterns.FORMAT_PATTERNS_LIMIT
-        )
+        # Signal gating must see every observed pattern. Prompt construction applies
+        # FORMAT_PATTERNS_LIMIT separately at its rendering boundary, so truncating
+        # here cannot hide a qualifying lower-ranked failure from has_signal().
+        result = patterns.extract_patterns(iter_items(), limit=None)
         if max_rows is not None and rows_seen >= max_rows:
             logger.warning(
                 "Cross-session row limit reached (%d); interactive evidence may be truncated",
@@ -1818,8 +1818,17 @@ def _refine_once(
             "evidence": evidence,
         }
 
-    error_patterns = patterns.merge_patterns(
+    all_error_patterns = patterns.merge_patterns(
         evidence.get("error_patterns", []), collect_cross_session_patterns()
+    )
+    # Keep the complete aggregation local to signal selection. Evidence is
+    # returned through several tool-result paths and rendered to the proposal
+    # model, so it must remain bounded and include the pattern that opens the
+    # gate instead of exposing an arbitrary full cross-session history.
+    error_patterns = patterns.prioritize_signal_patterns(
+        all_error_patterns,
+        min_count=_min_pattern_count,
+        session_cap=config.cross_session_max_sessions(),
     )
     evidence["error_patterns"] = error_patterns
     corrections = evidence.get("user_corrections", [])
