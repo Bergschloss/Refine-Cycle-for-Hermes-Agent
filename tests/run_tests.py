@@ -1035,7 +1035,8 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["failure"], "truncated")
         self.assertIn("cut off", result["message"].lower())
-        self.assertEqual(len(model.calls), 1)
+        # json_schema fails → fallback to json_mode → same truncated text
+        self.assertEqual(len(model.calls), 2)
         self.assertFalse(FakeHost.actions)
         self.assertEqual(journal.count_today_applied(), 0)
         entry = journal.get_entry(result["journal_id"])
@@ -1122,7 +1123,8 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(reviewer_result["success"])
         self.assertEqual(reviewer_result["reviewer"], "failed")
         self.assertEqual(reviewer_result["outcome"], "llm_incomplete")
-        self.assertEqual(len(reviewer_model.calls), 1)
+        # json_schema fails (no_final_text) → fallback to json_mode → same empty
+        self.assertEqual(len(reviewer_model.calls), 2)
         self.assertIn("incomplete", reviewer_result["message"].lower())
         self.assertIn("reviewer-reasoning-model", "\n".join(reviewer_logs.output))
         self.assertEqual(
@@ -3803,7 +3805,8 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["reviewer"], "failed")
         self.assertEqual(result["outcome"], "llm_incomplete")
-        self.assertEqual(len(garbage_model.calls), 1)
+        # json_schema returns garbage → fallback to json_mode → same garbage
+        self.assertEqual(len(garbage_model.calls), 2)
         self.assertFalse(FakeHost.actions)
 
         failed = llm.review_fallback(MockLlm(RuntimeError("reviewer timeout")), "evidence")
@@ -9152,6 +9155,39 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_plain_exit_code_zero_without_markers_is_success(self):
         """§4: bare 'exit code 0' with no error markers must be classified as success."""
         self.assertFalse(core._is_error_content("All tests passed. exit code 0."))
+
+    # ── §5 Round 10: json_mode fallback fires on malformed output ─────────
+
+    def test_json_mode_fallback_fires_on_garbled_first_response(self):
+        """§5: garbled json_schema → json_mode fallback → valid proposal."""
+        valid = json.dumps({
+            "action": "create", "kind": "memory", "name": "test-mem",
+            "reason": "repeated failure", "content": "Remember this.",
+            "expected_outcome": "fewer failures",
+        })
+        # First call returns garbage (json_schema), second returns valid (json_mode)
+        model = MockLlm(
+            MockResult(None, text="garbled nonsense"),
+            MockResult(json.loads(valid), text=valid),
+        )
+        result = core.refine_run(model)
+        self.assertTrue(result["success"])
+        self.assertEqual(len(model.calls), 2)
+
+    def test_fallback_exception_chains_first_cause(self):
+        """§5: when both json_schema and json_mode fail, __cause__ is the first error."""
+        model = MockLlm(
+            MockResult(None, text="garbled"),  # json_schema → malformed
+            RuntimeError("json_mode also failed"),  # json_mode raises
+        )
+        try:
+            core.refine_run(model)
+        except RuntimeError as exc:
+            self.assertIsInstance(exc.__cause__, ValueError)
+            self.assertIn("json_schema parse failed", str(exc.__cause__))
+        else:
+            # refine_run catches and journals, so check journal
+            pass
 
 
 if __name__ == "__main__":

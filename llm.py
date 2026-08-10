@@ -456,11 +456,14 @@ def _propose_structured(
         )
         _record_call_meta(result, call_started)
         reply = _salvage_parsed(result, requested_max_tokens=max_tokens)
-        if not reply.failure:
-            _call_meta.value["output_mode"] = (
-                "json_schema_salvage" if reply.salvaged else "json_schema"
+        if reply.failure:
+            raise ValueError(
+                f"json_schema parse failed: {reply.failure} — {reply.detail}"
             )
-        return reply.parsed or _incomplete_proposal(reply)
+        _call_meta.value["output_mode"] = (
+            "json_schema_salvage" if reply.salvaged else "json_schema"
+        )
+        return reply.parsed
     except PluginLlmTrustError:
         _record_call_meta(None, call_started)
         raise
@@ -481,9 +484,9 @@ def _propose_structured(
         except PluginLlmTrustError:
             _record_call_meta(None, call_started)
             raise
-        except Exception:
+        except Exception as fallback_exc:
             _record_call_meta(None, call_started)
-            raise
+            raise fallback_exc from first_exc
         _record_call_meta(result, call_started)
         reply = _salvage_parsed(result, requested_max_tokens=max_tokens)
         if not reply.failure:
@@ -620,6 +623,12 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                 max_tokens=REVIEWER_MAX_TOKENS,
                 **resolved_target,
             )
+            _record_call_meta(result, call_started)
+            reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
+            if reply.failure:
+                raise ValueError(
+                    f"Reviewer json_schema parse failed: {reply.failure} — {reply.detail}"
+                )
         except PluginLlmTrustError:
             _record_call_meta(None, call_started)
             raise
@@ -646,11 +655,11 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
             except PluginLlmTrustError:
                 _record_call_meta(None, call_started)
                 raise
-            except Exception:
+            except Exception as fallback_exc:
                 _record_call_meta(None, call_started)
-                raise
-        _record_call_meta(result, call_started)
-        reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
+                raise fallback_exc from schema_exc
+            _record_call_meta(result, call_started)
+            reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
         if not reply.failure:
             if _reviewer_used_json_mode:
                 _call_meta.value["output_mode"] = (
