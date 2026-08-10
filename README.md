@@ -2,11 +2,17 @@
 
 ![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.jpg)
 
-**Self-improvement loop for Hermes Agent** — the agent reads its own trajectory,
-finds repeated failures and reusable tactics, then proposes the **smallest
-possible edit**: an agent-created skill, a memory entry, or a bounded,
-plugin-owned prompt note. Every mutation is prepared in a durable journal before
-it runs and has conflict-aware recovery metadata.
+**A measurement layer for Hermes Agent's self-improvement.** Hermes already
+learns from the conversation in front of it. Refine Cycle asks a different
+question: *what keeps breaking across many sessions, and did fixing it actually
+help?*
+
+It reads the agent's own trajectory, normalizes errors into comparable shapes,
+counts how often each shape recurs **and in how many separate sessions**, then
+proposes the **smallest possible edit** — an agent-created skill, a memory entry,
+or a bounded, plugin-owned prompt note. Every mutation is prepared in a durable
+journal before it runs, carries conflict-aware recovery metadata, and is later
+graded on whether the failure it targeted actually stopped.
 
 This is a port of the `/refine` concept from
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
@@ -15,17 +21,59 @@ plugin only loads when it is explicitly enabled.
 
 ---
 
+## How this differs from Hermes's built-in self-improvement
+
+Hermes ships its own background review: after a turn or a session it looks at the
+current conversation and saves what is worth keeping — a useful tactic, a user
+preference, a correction. It answers **"is there something here worth
+remembering?"**
+
+Refine Cycle answers a different question, over a different window, and then
+checks its own work:
+
+| | Hermes background review | Refine Cycle |
+|---|---|---|
+| **Trigger** | anything worth keeping | the same failure, at least twice |
+| **Window** | the current session | many sessions |
+| **Evidence** | the conversation as written | errors normalized to invariant shapes and fingerprinted, so `HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` count as one failure |
+| **Threshold** | qualitative judgement | a mechanical signal gate: recurrence count *and* distinct-session count |
+| **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning` |
+| **Blast radius** | host policy | 3 edits/day, dedup window, cooldown, per-edit journal, per-edit rollback |
+
+The two are complementary, not alternatives. Hermes captures fresh experience;
+Refine Cycle hunts chronic failures and measures whether its own fixes held.
+
+Both can write to the same skills and memory, so the plugin is built to notice
+that: a skill patch is refused outright when the target changed after planning,
+and `/refine audit` reports when an entry it created was modified by something
+else — because an effectiveness verdict on a file someone else edited is not a
+verdict worth trusting.
+
+---
+
 ## Why
 
-Modern agent harnesses ship static skills and prompts that never adapt to what
-the agent learns while running. Refine Cycle closes that loop:
+An agent that fixes the same problem every week is not learning. The hard part is
+not noticing a failure — it is knowing which failures are *chronic*, and knowing
+whether a fix worked.
 
-- **Repeated failures** (for example, the same tool call fails the same way
-twice) can produce a narrowly targeted skill, memory entry, or prompt note.
-- **Reusable tactics** (a workflow that worked and the user had to explain) can
-be captured so the agent does not need to be re-taught.
-- **Ambiguous trajectories** can receive one conservative reviewer pass rather
-than silently ending at the mechanical signal gate.
+That needs three things a single-session review cannot give you:
+
+- **Comparable failures.** Raw error strings never repeat exactly. Volatile parts
+  — ids, paths, ports, timestamps — have to collapse before "again" means
+  anything, while genuinely different errors must stay apart. That is what
+  fingerprinting buys.
+- **A window wider than one conversation.** A pattern seen in four separate
+  sessions is stronger evidence than the same thing twice in one. Refine Cycle
+  counts both, and weighs distinct sessions separately.
+- **A verdict afterwards.** An edit is a hypothesis with a falsifiable
+  `expected_outcome`. Refine Cycle records it, then checks whether the fingerprint
+  recurred and whether the skill was used at all — and says `working`,
+  `did not help`, `unused`, or `churning`.
+
+Ambiguous trajectories still get one conservative reviewer pass rather than
+silently ending at the mechanical gate, so a real lesson with no repeat count is
+not lost.
 
 The base system prompt is never touched. Only **agent-created** skills and
 memory entries are editable; built-in, pinned, and hub-installed skills remain
