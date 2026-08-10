@@ -204,6 +204,8 @@ toward the budget it reports.
 /refine status
 /refine dry-run
 /refine dry-run focus on Gmail API failures
+/refine dry-run session <session_id>
+/refine session <session_id>
 /refine model
 /refine model your-cheap-model
 /refine model your-provider/your-cheap-model
@@ -211,12 +213,14 @@ toward the budget it reports.
 /refine rollback 1f2a3b4c5d6e
 ```
 
-`audit`, `status`, `dry-run`, `model`, and `rollback <12-character-id>` are
-exact subcommands. `status` reports whether automatic refinement is active,
-which session and database source would be analyzed, configured source skips,
-what blocks refinement, which model it will use, and the active journal/migration
-state. `dry-run [reason]` runs the normal proposal path and journals the preview
-without applying an edit or consuming the daily edit budget.
+`audit`, `status`, `dry-run`, `model`, `session <session_id>`, and
+`rollback <12-character-id>` are exact subcommands. `status` reports whether
+automatic refinement is active, which session and database source would be
+analyzed, configured source skips, what blocks refinement, which model it will
+use, and the active journal/migration state. `dry-run [reason]` runs the normal
+proposal path and journals the preview without applying an edit or consuming the
+daily edit budget. `dry-run session <session_id>` previews one exact historical
+session after confirming it through the read-only Hermes sessions table.
 
 `model` shows or sets the model refine asks for. Bare `model` prints the
 effective target and whether host trust allows it; `model <name>` or
@@ -391,7 +395,16 @@ as negative examples.
 ### Agent-invocable tool
 
 The agent gets a `refine_run` tool (toolset `refine`) and may trigger the same
-serialized flow with an optional reason.
+serialized flow with an optional `reason`. It also accepts `session_id` for one
+exact historical session and `dry_run: true` to preview without applying. The
+handler validates an explicit session against the read-only sessions table
+before any model call and forwards all three arguments to `core.refine_run`.
+
+The tool must run inside an active Hermes gateway turn: it reuses the
+host-provided `ctx.llm`, which carries that turn's active runtime routing. An
+external script that constructs `PluginLlm(plugin_id="refine")` is not
+equivalent; outside a gateway turn it can fall back to a configured provider
+instead of the active model.
 
 ### Which model refine uses
 
@@ -432,8 +445,11 @@ plugins:
         model: your-cheap-model
 ```
 
-Model availability depends on provider, account, and region; a `403 RegionError`
-is a provider restriction, not a plugin defect.
+Model availability depends on provider, account, and region. A `403 RegionError`
+identifies the provider that actually received the request; check
+`llm_meta.reported_provider` and `reported_model`. If an autorun unexpectedly
+reports a fallback provider, invoke the registered tool inside an active gateway
+turn rather than constructing a standalone plugin client.
 
 Both `allow_*` flags are fail-closed in Hermes: with them off, a pinned value is
 refused rather than applied. Leave `provider`/`model` unset to inherit the live

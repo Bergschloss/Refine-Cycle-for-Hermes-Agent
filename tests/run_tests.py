@@ -51,10 +51,19 @@ class MockUsage:
 
 
 class MockResult:
-    def __init__(self, parsed=None, *, text="", output_tokens=None, model="test-model"):
+    def __init__(
+        self,
+        parsed=None,
+        *,
+        text="",
+        output_tokens=None,
+        model="test-model",
+        provider=None,
+    ):
         self.parsed = parsed
         self.text = text
         self.model = model
+        self.provider = provider
         if output_tokens is not None:
             self.usage = MockUsage(output_tokens)
 
@@ -2568,8 +2577,10 @@ class RefineTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)  # only the "audit logging failures" call
 
     def test_session_subcommand_routes_an_explicit_historical_session(self):
-        """The command contract has no session id, so /refine session must supply it."""
+        """An explicit historical session keeps the registered host LLM."""
         # 'session' exists in the synthetic fixture DB built by setUp.
+        session_client = object()
+        plugin_init._REGISTERED_LLM = session_client
         with patch.object(plugin_init.core, "refine_run", return_value={
             "success": True, "message": "OK", "journal_id": "abcdef123456",
             "reversible": False,
@@ -2577,6 +2588,7 @@ class RefineTests(unittest.TestCase):
         }) as run:
             output = plugin_init._handle_refine_command("session session")
         run.assert_called_once()
+        self.assertIs(run.call_args.kwargs["llm"], session_client)
         self.assertEqual(run.call_args.kwargs["session_id"], "session")
         # Marks the run as "a session the user named", which keeps a prompt note
         # from being bound to a session that may not be live.
@@ -2618,6 +2630,58 @@ class RefineTests(unittest.TestCase):
             run.call_args.kwargs["reason"], "session handling keeps failing"
         )
         self.assertIsNone(run.call_args.kwargs.get("session_id"))
+
+    def test_dry_run_session_routes_registered_llm_and_exact_session(self):
+        session_client = object()
+        plugin_init._REGISTERED_LLM = session_client
+        with patch.object(plugin_init.core, "refine_run", return_value={
+            "success": True,
+            "outcome": "dry_run",
+            "proposal": {"action": "no_op", "reason": "nothing"},
+            "evidence": {"session_id": "session", "session_id_source": "explicit"},
+        }) as run:
+            output = plugin_init._handle_refine_command("dry-run session session")
+        run.assert_called_once_with(
+            llm=session_client,
+            reason="",
+            session_id="session",
+            auto=False,
+            dry_run=True,
+            explicit_session=True,
+        )
+        self.assertIn("Dry run", output)
+
+    def test_dry_run_session_requires_one_known_safe_selector(self):
+        with patch.object(plugin_init.core, "refine_run") as run:
+            bare = plugin_init._handle_refine_command("dry-run session")
+            unknown = plugin_init._handle_refine_command(
+                "dry-run session no-such-session"
+            )
+            invalid = plugin_init._handle_refine_command(
+                "dry-run session sk-" + "b" * 32
+            )
+        run.assert_not_called()
+        self.assertIn("/refine dry-run session <session_id>", bare)
+        self.assertIn("No session", unknown)
+        self.assertIn("not a usable session id", invalid)
+
+    def test_dry_run_session_prose_remains_a_reason(self):
+        with patch.object(plugin_init.core, "refine_run", return_value={
+            "success": True,
+            "outcome": "dry_run",
+            "proposal": {"action": "no_op", "reason": "nothing"},
+            "evidence": {},
+        }) as run:
+            plugin_init._handle_refine_command(
+                "dry-run session handling keeps failing"
+            )
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.kwargs["reason"],
+            "session handling keeps failing"
+        )
+        self.assertIsNone(run.call_args.kwargs["session_id"])
+        self.assertFalse(run.call_args.kwargs["explicit_session"])
 
     def test_ledger_uses_only_supported_post_edit_evidence(self):
         created = time.time() - 30 * 86400
@@ -6710,6 +6774,47 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         for call in run.call_args_list:
             self.assertIs(call.kwargs["llm"], session_client)
 
+    def test_refine_run_tool_forwards_explicit_dry_run_contract(self):
+        session_client = object()
+        plugin_init._REGISTERED_LLM = session_client
+        with patch.object(plugin_init.core, "refine_run", return_value={
+            "success": True, "outcome": "dry_run",
+        }) as run:
+            result = json.loads(plugin_init._handle_refine_run({
+                "reason": "autorun",
+                "session_id": "session",
+                "dry_run": True,
+            }))
+        self.assertTrue(result["success"])
+        run.assert_called_once_with(
+            llm=session_client,
+            reason="autorun",
+            session_id="session",
+            auto=False,
+            dry_run=True,
+            explicit_session=True,
+        )
+
+    def test_refine_run_tool_rejects_bad_sessions_before_model_call(self):
+        with patch.object(plugin_init.core, "refine_run") as run:
+            invalid = json.loads(plugin_init._handle_refine_run({
+                "session_id": "sk-" + "b" * 32,
+                "dry_run": True,
+            }))
+            unknown = json.loads(plugin_init._handle_refine_run({
+                "session_id": "no-such-session",
+                "dry_run": True,
+            }))
+        run.assert_not_called()
+        self.assertIn("usable session token", invalid["error"])
+        self.assertIn("No session", unknown["error"])
+
+    def test_refine_run_schema_exposes_historical_dry_run_fields(self):
+        properties = plugin_init.REFINE_RUN_SCHEMA["parameters"]["properties"]
+        self.assertEqual(properties["session_id"]["type"], "string")
+        self.assertEqual(properties["dry_run"]["type"], "boolean")
+        self.assertIn("active host-provided LLM", plugin_init.REFINE_RUN_SCHEMA["description"])
+
     def test_session_client_falls_back_when_host_gave_none(self):
         plugin_init._REGISTERED_LLM = None
         sentinel = object()
@@ -7183,6 +7288,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             {"action": "no_op", "reason": "nothing", "evidence": [],
              "kind": "", "name": "", "content": ""},
             model="actual-host-model",
+            provider="actual-host-provider",
             output_tokens=100,
         ))
         core.refine_run(model, session_id="session")
@@ -7190,6 +7296,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         latest = entries[-1] if entries else {}
         meta = latest.get("llm_meta", {})
         self.assertEqual(meta.get("requested_model"), "test-model-x")
+        self.assertEqual(meta.get("reported_provider"), "actual-host-provider")
         self.assertEqual(meta.get("reported_model"), "actual-host-model")
         self.assertEqual(meta.get("target_source"), "config")
         self.assertIsInstance(meta.get("latency_ms"), int)

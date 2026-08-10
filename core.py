@@ -1881,7 +1881,8 @@ def _refine_once(
                 "requested_model": _run_target.get("model", ""),
                 "target_source": _run_target_source,
                 **{k: v for k, v in reviewer_call_meta.items() if k in (
-                    "reported_model", "latency_ms", "output_tokens", "output_mode"
+                    "reported_provider", "reported_model", "latency_ms",
+                    "output_tokens", "output_mode"
                 )},
             }
             if _run_target_issues:
@@ -2043,7 +2044,8 @@ def _refine_once(
         "target_source": _run_target_source,
         "signal_path": _signal_path,
         **{k: v for k, v in llm_meta.items() if k in (
-            "reported_model", "latency_ms", "output_tokens", "output_mode"
+            "reported_provider", "reported_model", "latency_ms",
+            "output_tokens", "output_mode"
         )},
     }
     if _run_target_issues:

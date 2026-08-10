@@ -48,8 +48,8 @@ _CHARS_PER_TOKEN = 3
 _PROPOSAL_ENVELOPE_TOKENS = 1024
 
 # Last LLM call metadata — set by _propose_structured and review_fallback so
-# core.py can read reported_model, output_tokens and latency after calling
-# propose(). Thread-local because the gateway may run concurrent refine passes.
+# core.py can read reported_provider, reported_model, output_tokens and latency
+# after calling propose(). Thread-local because the gateway may run concurrent refine passes.
 _call_meta = threading.local()
 # A schema rejection applies to one proposal only. Semantic retries reuse the
 # working JSON transport instead of retrying the known-bad schema path.
@@ -68,6 +68,9 @@ def _record_call_meta(result: Any, started: float) -> None:
     meta["latency_ms"] = int(meta.get("latency_ms", 0) or 0) + int(
         (time.time() - started) * 1000
     )
+    provider = getattr(result, "provider", None)
+    if provider:
+        meta["reported_provider"] = str(provider)
     model = getattr(result, "model", None)
     if model:
         meta["reported_model"] = str(model)

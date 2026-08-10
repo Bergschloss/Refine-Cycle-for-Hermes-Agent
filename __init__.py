@@ -293,6 +293,25 @@ _MODEL_SUBCOMMAND = "model"
 _SESSION_SUBCOMMAND = "session"
 
 
+def _explicit_session_status(value: Any) -> tuple[str, str]:
+    """Validate one historical-session selector before any model call.
+
+    Returns ``(normalized_id, lookup_status)``. ``lookup_status`` is
+    ``invalid`` when the value is not one safe token; otherwise it is the
+    status returned by the read-only sessions-table lookup.
+    """
+    if not isinstance(value, str):
+        return "", "invalid"
+    selector = value.strip()
+    if not selector or " " in selector:
+        return "", "invalid"
+    session_id = journal.normalize_prompt_note_session_id(selector)
+    if not session_id:
+        return "", "invalid"
+    _, lookup_status = core._get_session_source_status(session_id)
+    return session_id, lookup_status
+
+
 def _is_model_target(remainder: str) -> bool:
     """Whether text is exactly ``<model>`` or ``<provider>/<model>``.
 
@@ -462,9 +481,45 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
 
     if args == "dry-run" or args.startswith("dry-run "):
         dry_reason = args[7:].strip()  # len("dry-run") == 7
+        dry_session = ""
+        if dry_reason == _SESSION_SUBCOMMAND:
+            return (
+                "Usage: /refine dry-run session <session_id>\n"
+                "Previews that exact session without applying an edit.\n"
+                f"Find ids in the sessions table of {config.state_db_path()}"
+            )
+        if dry_reason.startswith(_SESSION_SUBCOMMAND + " "):
+            selector = dry_reason[len(_SESSION_SUBCOMMAND):].strip()
+            # A single token after ``dry-run session`` is an explicit selector.
+            # Prose remains a reason, matching the ordinary session subcommand.
+            if " " not in selector:
+                dry_session, lookup_status = _explicit_session_status(selector)
+                if lookup_status == "invalid":
+                    return (
+                        "❌ That is not a usable session id.\n"
+                        "Usage: /refine dry-run session <session_id>\n"
+                        f"Find ids in the sessions table of {config.state_db_path()}"
+                    )
+                if lookup_status == "error":
+                    return (
+                        "❌ Cannot read the sessions table to confirm that session.\n"
+                        f"Checked: {config.state_db_path()}"
+                    )
+                if lookup_status != "ok":
+                    return (
+                        f"❌ No session '{core.scrub_text(dry_session)}' exists.\n"
+                        "Usage: /refine dry-run session <session_id>\n"
+                        f"Find ids in the sessions table of {config.state_db_path()}"
+                    )
+                dry_reason = ""
         try:
             result = core.refine_run(
-                llm=_session_llm(), reason=dry_reason, auto=False, dry_run=True
+                llm=_session_llm(),
+                reason=dry_reason,
+                session_id=dry_session or None,
+                auto=False,
+                dry_run=True,
+                explicit_session=bool(dry_session),
             )
         except Exception as exc:
             logger.exception("refine dry-run failed")
@@ -537,18 +592,16 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         # failing" stays a free-form reason. A single token is still confirmed
         # against the sessions table, so a one-word reason reports "not found"
         # instead of silently analysing the wrong session or spending a pass.
-        explicit_session = journal.normalize_prompt_note_session_id(remainder)
-        if " " not in remainder and not explicit_session:
-            # A lone token that cannot be an id is refused rather than run as a
-            # reason: falling through would analyse the *current* session and
-            # could spend one of the day's edits on a request that named another.
-            return (
-                "❌ That is not a usable session id.\n"
-                "Usage: /refine session <session_id>\n"
-                f"Find ids in the sessions table of {config.state_db_path()}"
-            )
-        if explicit_session and " " not in remainder:
-            _, lookup_status = core._get_session_source_status(explicit_session)
+        if " " not in remainder:
+            explicit_session, lookup_status = _explicit_session_status(remainder)
+            if lookup_status == "invalid":
+                # A lone token that cannot be an id is refused rather than run as
+                # a reason: falling through would analyse the *current* session.
+                return (
+                    "❌ That is not a usable session id.\n"
+                    "Usage: /refine session <session_id>\n"
+                    f"Find ids in the sessions table of {config.state_db_path()}"
+                )
             if lookup_status == "error":
                 return (
                     "❌ Cannot read the sessions table to confirm that session.\n"
@@ -652,9 +705,44 @@ def _format_run_result(result: Dict[str, Any]) -> str:
 
 
 def _handle_refine_run(args: dict, **kw) -> str:
-    reason = args.get("reason", "") if isinstance(args, dict) else ""
+    payload = args if isinstance(args, dict) else {}
+    reason = payload.get("reason", "")
+    dry_run = payload.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return json.dumps({
+            "success": False,
+            "error": "dry_run must be a boolean.",
+        })
+
+    session_id = ""
+    supplied_session = payload.get("session_id")
+    if supplied_session not in (None, ""):
+        session_id, lookup_status = _explicit_session_status(supplied_session)
+        if lookup_status == "invalid":
+            return json.dumps({
+                "success": False,
+                "error": "session_id must be one usable session token.",
+            })
+        if lookup_status == "error":
+            return json.dumps({
+                "success": False,
+                "error": "Cannot read the sessions table to confirm session_id.",
+            })
+        if lookup_status != "ok":
+            return json.dumps({
+                "success": False,
+                "error": f"No session '{core.scrub_text(session_id)}' exists.",
+            })
+
     try:
-        result = core.refine_run(llm=_session_llm(), reason=reason, auto=False)
+        result = core.refine_run(
+            llm=_session_llm(),
+            reason=reason,
+            session_id=session_id or None,
+            auto=False,
+            dry_run=dry_run,
+            explicit_session=bool(session_id),
+        )
     except Exception as exc:
         logger.exception("refine_run tool failed")
         return json.dumps({"success": False, "error": core.scrub_text(str(exc))})
@@ -742,8 +830,9 @@ def _on_session_end(
 REFINE_RUN_SCHEMA = {
     "name": "refine_run",
     "description": (
-        "Trigger a self-improvement pass over recent repeated failures or explicit corrections. "
-        "Mutations are serialized, journaled, and reversible when applied."
+        "Trigger a self-improvement pass over recent repeated failures or explicit corrections "
+        "using the active host-provided LLM. Mutations are serialized, journaled, and reversible "
+        "when applied. Use dry_run with an explicit historical session before autorun apply."
     ),
     "parameters": {
         "type": "object",
@@ -751,7 +840,21 @@ REFINE_RUN_SCHEMA = {
             "reason": {
                 "type": "string",
                 "description": "Optional issue or area to focus on; passed to the proposal model.",
-            }
+            },
+            "session_id": {
+                "type": "string",
+                "description": (
+                    "Optional exact historical session id to analyze. It must exist in the "
+                    "read-only Hermes sessions table."
+                ),
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": (
+                    "Preview and journal the proposal without applying edits or consuming the "
+                    "daily edit budget."
+                ),
+            },
         },
         "required": [],
     },
@@ -772,12 +875,12 @@ def register(ctx) -> None:
         _handle_refine_command,
         description=(
             "Self-improve skills/memory. "
-            "Usage: /refine [reason|audit|status|dry-run|model [target|auto]|"
-            "session <session_id>|rollback <id>]"
+            "Usage: /refine [reason|audit|status|dry-run [session <session_id>|reason]|"
+            "model [target|auto]|session <session_id>|rollback <id>]"
         ),
         args_hint=(
-            "[reason | audit | status | dry-run | model [target|auto] | "
-            "session <session_id> | rollback <id>]"
+            "[reason | audit | status | dry-run [session <session_id> | reason] | "
+            "model [target|auto] | session <session_id> | rollback <id>]"
         ),
     )
     ctx.register_tool(
