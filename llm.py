@@ -807,14 +807,21 @@ def _overview_text(value: Any) -> str:
     return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _untrusted_json_record(label: str, content: Any) -> str:
-    """Encode model/file-derived text so it cannot create prompt sections."""
+def _untrusted_json_record(
+    label: str, content: Any, *, escape_tags: bool = False
+) -> str:
+    """Encode model/file-derived text so it cannot create prompt sections.
+
+    Escaping markup is opt-in: reviewer text has no semantic markup, while a
+    current skill must retain its literal content for a complete replacement.
+    """
     safe_content = scrub_text(str(content))
-    return json.dumps(
+    record = json.dumps(
         {"type": label, "chars": len(safe_content), "content": safe_content},
         ensure_ascii=True,
         separators=(",", ": "),
     )
+    return record.replace("<", "&lt;").replace(">", "&gt;") if escape_tags else record
 
 
 def _semantic_failure(reason: str, failure: str = "malformed") -> Dict[str, Any]:
@@ -1266,7 +1273,9 @@ def propose(
     )
     context_block = run_context.strip() or "(none)"
     reviewer_block = (
-        _untrusted_json_record("reviewer_recommendation", reviewer_context)
+        _untrusted_json_record(
+            "reviewer_recommendation", reviewer_context, escape_tags=True
+        )
         if reviewer_context.strip()
         else "(none)"
     )
