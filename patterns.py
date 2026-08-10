@@ -299,7 +299,13 @@ FORMAT_PATTERNS_LIMIT = 8
 def format_patterns(
     patterns: List[Dict[str, Any]], limit: int = FORMAT_PATTERNS_LIMIT
 ) -> str:
-    """Render patterns as a compact block for the proposal prompt."""
+    """Render patterns as a compact block for the proposal prompt.
+
+    ``sample`` is raw error content, the same text ``fingerprint()`` hashed —
+    but this function only renders it for display, never re-fingerprints it.
+    Escaping ``<``/``>`` here cannot change any fingerprint: fingerprinting
+    already happened in ``extract_patterns`` before this function ever runs.
+    """
     if not patterns:
         return "  (none)"
     lines = []
@@ -317,7 +323,7 @@ def format_patterns(
                     r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+",
                     " ",
                     scrub_text(str(entry.get("sample") or "")),
-                )[:160],
+                )[:160].replace("<", "&lt;").replace(">", "&gt;"),
                 fp=scrub_text(str(entry.get("fingerprint", ""))),
             )
         )

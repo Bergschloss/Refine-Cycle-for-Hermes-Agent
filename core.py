@@ -27,12 +27,35 @@ _UNTRUSTED_TOOL_TAG = re.compile(
 
 
 def _strip_untrusted_tags(text: str) -> str:
-    """Remove forged boundary tags until nested syntax reaches a fixed point."""
+    """Remove forged boundary tags until nested syntax reaches a fixed point.
+
+    Used only on the fingerprinting path (pattern extraction), never on the
+    prompt-rendering path: changing what this function returns changes every
+    fingerprint computed from its output, silently re-partitioning pattern
+    history. Prompt-facing text is neutralized separately by
+    ``_escape_foreign_tags``, which cannot change a fingerprint because
+    fingerprinting never calls it.
+    """
     previous = None
     while previous != text:
         previous = text
         text = _UNTRUSTED_TOOL_TAG.sub("", text)
     return text
+
+
+def _escape_foreign_tags(text: str) -> str:
+    """Neutralize every tag-like construct before text reaches the model.
+
+    ``_strip_untrusted_tags`` only recognizes spellings of the plugin's own
+    boundary tag. A tool result can carry any other tag — ``<system>``,
+    ``<instruction>``, a zero-width-obfuscated variant of the boundary itself —
+    and models routinely privilege an inner tag over the surrounding context.
+    Escaping every ``<``/``>`` removes the ambiguity entirely: nothing inside
+    the escaped text can be parsed as a tag, forged or genuine, while the
+    literal boundary tags added by the caller (outside this function's input)
+    remain real markup.
+    """
+    return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
 _RECORD_SEPARATOR = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
@@ -1653,10 +1676,14 @@ def _refine_once(
         content = _one_line(str(message["content"])[:400])
         if role == "tool":
             # Tool metadata is untrusted too: keep the complete physical record
-            # inside one plugin-owned boundary after removing forged variants.
+            # inside one plugin-owned boundary after removing forged variants
+            # of that boundary, then escaping every remaining tag so no other
+            # markup (<system>, <instruction>, ...) can be parsed as a tag at
+            # all. Escaping happens only here, on the prompt-rendering path —
+            # never on the fingerprinting path — so pattern history is unaffected.
             tool_name = _one_line(message.get("tool_name", ""))[:120]
             record = f"tool={tool_name or '?'} | {content}"
-            safe_record = _strip_untrusted_tags(record)
+            safe_record = _escape_foreign_tags(_strip_untrusted_tags(record))
             lines.append(
                 f"[tool] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
             )
