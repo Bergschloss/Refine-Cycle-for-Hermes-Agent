@@ -9134,6 +9134,25 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         twice = sanitization.scrub_text(once)
         self.assertEqual(once, twice)
 
+    # ── §4 Round 10: exit code 0 must not suppress error heuristic ────────
+
+    def test_exit_code_zero_does_not_mask_traceback(self):
+        """§4: text with Traceback and 'exit code 0' must be classified as error."""
+        text = "An unexpected error occurred. Traceback (most recent call last): ValueError: boom ... exit code 0."
+        self.assertTrue(core._is_error_content(text))
+
+    def test_exit_code_zero_does_not_mask_failed(self):
+        """§4: text with 'failed' and 'exit code 0' must be classified as error."""
+        self.assertTrue(core._is_error_content("Task failed with exception. Exit code 0."))
+
+    def test_json_error_null_with_exit_code_zero_is_success(self):
+        """§4: JSON {error: null, exit_code: 0} must still be classified as success."""
+        self.assertFalse(core._is_error_content('{"success": true, "error": null, "exit_code": 0}'))
+
+    def test_plain_exit_code_zero_without_markers_is_success(self):
+        """§4: bare 'exit code 0' with no error markers must be classified as success."""
+        self.assertFalse(core._is_error_content("All tests passed. exit code 0."))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -413,7 +413,10 @@ def _structured_error_status(content: str) -> Optional[bool]:
     ]
     if any(code != 0 for code in codes):
         return True
-    return False if codes else None
+    # An explicit exit-code 0 is evidence of success, but it must not mask
+    # textual error markers (Traceback, Error:, etc.) that appear alongside it.
+    # Return None so _is_error_content falls through to the heuristic.
+    return None
 
 
 def _is_error_content(content: str) -> bool:
