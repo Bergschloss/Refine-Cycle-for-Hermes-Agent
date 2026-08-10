@@ -9116,6 +9116,24 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         fp = patterns.fingerprint("my_tool", "connection refused after 30s timeout")
         self.assertEqual(fp, "c7784ca94cf6")
 
+    # ── §3 Round 10: numeric Authorization/Bearer redaction ───────────────
+
+    def test_numeric_authorization_redacted(self):
+        """§3: numeric tokens after 'authorization:' must be redacted."""
+        self.assertIn("[REDACTED]", sanitization.scrub_text("authorization: 12345678"))
+        self.assertNotIn("12345678", sanitization.scrub_text("authorization: 12345678"))
+
+    def test_numeric_bearer_redacted(self):
+        """§3: numeric tokens after 'bearer:' must be redacted."""
+        self.assertIn("[REDACTED]", sanitization.scrub_text("bearer: 12345678"))
+        self.assertNotIn("12345678", sanitization.scrub_text("bearer: 12345678"))
+
+    def test_numeric_authorization_idempotent(self):
+        """§3: scrubbing authorization twice equals scrubbing once."""
+        once = sanitization.scrub_text("authorization: 12345678")
+        twice = sanitization.scrub_text(once)
+        self.assertEqual(once, twice)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -71,7 +71,7 @@ def _replace_unquoted(match: re.Match) -> str:
     prefix = match.group("prefix").lower()
     if value.lower() in _NON_SECRETS or (
         _is_number(value)
-        and not any(word in prefix for word in ("password", "passwd", "secret", "key", "token"))
+        and not any(word in prefix for word in ("password", "passwd", "secret", "key", "token", "authorization", "bearer"))
     ):
         return match.group(0)
     # Canonical markers are protected by scrub_text splitting and ``[`` is not
