@@ -1372,7 +1372,7 @@ def is_reversible(entry: Optional[Dict[str, Any]]) -> bool:
         # Ask the restore path itself rather than checking for a path string, so
         # "reversible" cannot promise more than rollback can actually deliver.
         return snapshot_before_content(entry) is not None
-    if kind in ("memory", "user"):
+    if kind == "memory":
         return bool(entry.get("recovery"))
     if kind == "prompt":
         recovery = entry.get("recovery", {})
@@ -1442,10 +1442,9 @@ def proposal_hash(proposal: Dict[str, Any]) -> str:
     legitimate patch inside the dedup window could be silently rejected as a
     duplicate of the create that came before it.
 
-    A memory proposal's storage target is derived from ``kind`` (``"user"`` vs
-    ``"memory"``) rather than carried as its own field, so ``kind`` already
-    discriminates every real memory-target distinction; there is no separate
-    ``target`` field on a real proposal to add here.
+    A memory proposal's storage target is a fixed ``"memory"`` (see
+    ``_apply_memory``), not carried as its own field on the proposal, so there
+    is no separate ``target`` field to add here.
     """
     key = "|".join([
         str(proposal.get("kind", "")),
@@ -1759,7 +1758,7 @@ def target_matches_applied(entry: Dict[str, Any]) -> Optional[bool]:
     if kind == "skill":
         known, content = _read_skill_state(str(proposal.get("name", "")))
         return (content == str(proposal.get("content", ""))) if known else None
-    if kind in ("memory", "user"):
+    if kind == "memory":
         recovery = entry.get("recovery", {})
         values = _memory_entries(str(recovery.get("target", "memory")))
         if values is None:
@@ -1804,7 +1803,7 @@ def rollback_target_matches(entry: Dict[str, Any]) -> Optional[bool]:
             return None
         known, current = _read_skill_state(name)
         return (current == expected) if known else None
-    if kind in ("memory", "user"):
+    if kind == "memory":
         recovery = entry.get("recovery", {})
         values = _memory_entries(str(recovery.get("target", "memory")))
         if values is None:

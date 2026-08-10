@@ -1621,6 +1621,32 @@ class RefineTests(unittest.TestCase):
             "action": "create", "kind": "skill", "name": "x", "content": "body"
         }))
 
+    def test_kind_user_is_consistently_unreachable(self):
+        """R9 §6: kind="user" must be rejected everywhere, not handled in some
+        places and rejected in others.
+
+        REFINE_PROPOSAL_SCHEMA constrains kind to skill/memory/prompt, so the
+        model can never propose kind="user". Dead branches in _apply_memory
+        and rollback dispatch that special-cased it were removed rather than
+        made reachable, since there is no schema path that would ever produce
+        such a proposal.
+        """
+        self.assertIn("kind", llm.REFINE_PROPOSAL_SCHEMA["properties"])  # sanity: property exists
+        self.assertNotIn("user", llm.REFINE_PROPOSAL_SCHEMA["properties"]["kind"]["enum"])
+        error = core._validate_proposal({
+            "action": "create", "kind": "user", "name": "dummy", "content": "test",
+        })
+        self.assertIsNotNone(error)
+        self.assertIn("Unsupported kind", error)
+        # _apply_memory always targets "memory", never "user", regardless of
+        # what a hand-built proposal (bypassing validation) might carry.
+        FakeHost.memory_entries.clear()
+        core._apply_memory({
+            "action": "create", "kind": "user", "content": "unreachable in practice",
+        })
+        self.assertIn("unreachable in practice", FakeHost.memory_entries)
+        self.assertNotIn("unreachable in practice", FakeHost.user_entries)
+
     def test_backup_and_prepare_failures_abort_before_mutation(self):
         name = "backup-fail"
         original = skill_content(name)

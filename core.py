@@ -1364,7 +1364,12 @@ def _apply_skill(proposal: Dict[str, Any]) -> Dict[str, Any]:
 def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
     from tools.memory_tool import MemoryStore
 
-    target = "user" if proposal.get("kind") == "user" else "memory"
+    # ``kind`` is constrained to skill/memory/prompt by REFINE_PROPOSAL_SCHEMA's
+    # enum, so a proposal reaching this function is always kind="memory" and the
+    # store target is always "memory". A "user" memory target existed only in
+    # dead branches nothing could reach; removed rather than resurrected, since
+    # there is no schema path that lets the model ever request it.
+    target = "memory"
     if proposal.get("action") not in ("create", "patch"):
         return {"success": False, "error": f"Unknown memory action: {proposal.get('action')}"}
     store = MemoryStore()
@@ -2305,7 +2310,9 @@ def _apply_edit(
         name = prompt_note["id"]
         recovery = {"type": "prompt_note", "note_id": prompt_note["id"]}
     else:
-        target = "user" if kind == "user" else "memory"
+        # kind is validated to "memory" here; see _apply_memory for why "user"
+        # is unreachable rather than a second real target.
+        target = "memory"
         memory_recovery = journal.memory_recovery(target, proposal["content"])
         if memory_recovery is None:
             error = f"Cannot capture {target} memory recovery state; mutation aborted"
@@ -3004,7 +3011,7 @@ def refine_rollback(entry_id: str) -> Dict[str, Any]:
         kind = entry.get("proposal", {}).get("kind", "skill")
         if kind == "skill":
             result = journal.rollback_skill(entry_id)
-        elif kind in ("memory", "user"):
+        elif kind == "memory":
             result = journal.rollback_memory(entry_id)
         elif kind == "prompt":
             result = journal.rollback_prompt_note(entry_id)
