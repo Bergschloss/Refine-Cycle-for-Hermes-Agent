@@ -9305,6 +9305,29 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             patterns.FORMAT_PATTERNS_LIMIT,
         )
 
+    # ── §12 Round 10: deferred session-end queue drain ────────────────────
+
+    def test_deferred_sessions_drained_when_auto_disabled(self):
+        """§12: _finish_auto_worker drains all pending sessions even when auto is off."""
+        # Defer two sessions
+        with plugin_init._AUTO_PENDING_LOCK:
+            plugin_init._AUTO_PENDING_SESSION_ENDS.clear()
+            plugin_init._AUTO_PENDING_SESSION_ENDS.add("deferred_a")
+            plugin_init._AUTO_PENDING_SESSION_ENDS.add("deferred_b")
+        # Simulate auto disabled
+        original = config.auto_enabled
+        config.auto_enabled = lambda: False
+        # Acquire the guard so _finish_auto_worker can release it
+        plugin_init._AUTO_THREAD_GUARD.acquire(blocking=False)
+        try:
+            plugin_init._finish_auto_worker()
+        finally:
+            config.auto_enabled = original
+        # Both should be drained
+        with plugin_init._AUTO_PENDING_LOCK:
+            remaining = set(plugin_init._AUTO_PENDING_SESSION_ENDS)
+        self.assertEqual(remaining, set(), f"Sessions stranded: {remaining}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

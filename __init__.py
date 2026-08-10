@@ -40,14 +40,23 @@ def _defer_session_end(session_id: str) -> None:
 
 
 def _finish_auto_worker() -> None:
-    """Release one worker slot, then start one coalesced session-end fallback."""
+    """Release one worker slot, then drain coalesced session-end entries."""
     _AUTO_THREAD_GUARD.release()
-    with _AUTO_PENDING_LOCK:
-        session_id = next(iter(_AUTO_PENDING_SESSION_ENDS), None)
-        if session_id is not None:
-            _AUTO_PENDING_SESSION_ENDS.remove(session_id)
-    if session_id is not None:
+    while True:
+        with _AUTO_PENDING_LOCK:
+            session_id = next(iter(_AUTO_PENDING_SESSION_ENDS), None)
+            if session_id is not None:
+                _AUTO_PENDING_SESSION_ENDS.remove(session_id)
+        if session_id is None:
+            break
+        if not config.auto_enabled():
+            # Auto is disabled — clean up prompt notes and continue draining
+            # instead of delegating to _on_session_end (which would return
+            # synchronously without continuing the chain).
+            _clear_session_prompt_notes(session_id, timeout=_HOST_PATH_LOCK_TIMEOUT)
+            continue
         _on_session_end(session_id=session_id)
+        break
 
 
 def _get_llm(ctx) -> PluginLlm:
