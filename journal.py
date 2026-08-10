@@ -1435,8 +1435,21 @@ def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:
 
 
 def proposal_hash(proposal: Dict[str, Any]) -> str:
+    """Identify a proposal for dedup: same kind, action, name, and content.
+
+    ``action`` must be part of the key. Without it, a ``create`` and a later
+    ``patch`` of the same skill with identical content hash identically, so a
+    legitimate patch inside the dedup window could be silently rejected as a
+    duplicate of the create that came before it.
+
+    A memory proposal's storage target is derived from ``kind`` (``"user"`` vs
+    ``"memory"``) rather than carried as its own field, so ``kind`` already
+    discriminates every real memory-target distinction; there is no separate
+    ``target`` field on a real proposal to add here.
+    """
     key = "|".join([
         str(proposal.get("kind", "")),
+        str(proposal.get("action", "")),
         str(proposal.get("name", "")),
         hashlib.sha1(str(proposal.get("content", "")).encode("utf-8", "replace")).hexdigest(),
     ])

@@ -8292,6 +8292,28 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         with patch.object(journal, "_load_entries", return_value=entries):
             self.assertFalse(journal.was_applied_recently(different, 7))
 
+    def test_dedup_hash_distinguishes_create_from_patch(self):
+        """R9 §5: a create and a later patch of the same skill/content must not
+        hash identically, or a legitimate patch inside the window would be
+        silently rejected as a duplicate of its own preceding create."""
+        created = {"action": "create", "kind": "skill", "name": "dedup-cp", "content": "same"}
+        patched = {"action": "patch", "kind": "skill", "name": "dedup-cp", "content": "same"}
+        self.assertNotEqual(journal.proposal_hash(created), journal.proposal_hash(patched))
+        entries = [{
+            "id": "e1", "ts": time.time() - 100,
+            "outcome": "applied",
+            "proposal": created,
+        }]
+        with patch.object(journal, "_load_entries", return_value=entries):
+            self.assertFalse(journal.was_applied_recently(patched, 7))
+            self.assertTrue(journal.was_applied_recently(created, 7))
+
+    def test_dedup_hash_identical_proposals_still_collide(self):
+        """R9 §5: adding action to the hash must not break the ordinary case."""
+        a = {"action": "create", "kind": "skill", "name": "dedup-same", "content": "x"}
+        b = {"action": "create", "kind": "skill", "name": "dedup-same", "content": "x"}
+        self.assertEqual(journal.proposal_hash(a), journal.proposal_hash(b))
+
     def test_dedup_older_than_window_returns_false(self):
         """R7-05: identical but older than within_days returns False."""
         proposal = {"action": "create", "kind": "skill", "name": "dedup-old", "content": "x"}
