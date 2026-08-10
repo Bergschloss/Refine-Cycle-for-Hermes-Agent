@@ -1335,22 +1335,25 @@ def finalize(
     error: str = "",
     pending_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Append a new durable state for a logical record."""
-    entry = get_entry(entry_id)
-    if not entry:
-        raise KeyError(f"Prepared journal entry {entry_id} not found")
-    updated = dict(entry)
-    updated["outcome"] = outcome
-    updated["error"] = scrub_text(error)
-    if pending_id is not None:
-        updated["pending_id"] = scrub_text(str(pending_id))
-        recovery = dict(updated.get("recovery", {}))
-        recovery["pending_id"] = updated["pending_id"]
-        updated["recovery"] = recovery
-    updated["finalized_ts"] = time.time()
-    _validate_journal_transition(entry, updated)
-    _append_entry(updated)
-    return sanitize(updated)
+    """Append one durable state transition for a logical record atomically."""
+    # get_entry() and _append_entry() must share one re-entrant lock: otherwise
+    # two threads can both validate the same prepared state before either writes.
+    with mutation_lock():
+        entry = get_entry(entry_id)
+        if not entry:
+            raise KeyError(f"Prepared journal entry {entry_id} not found")
+        updated = dict(entry)
+        updated["outcome"] = outcome
+        updated["error"] = scrub_text(error)
+        if pending_id is not None:
+            updated["pending_id"] = scrub_text(str(pending_id))
+            recovery = dict(updated.get("recovery", {}))
+            recovery["pending_id"] = updated["pending_id"]
+            updated["recovery"] = recovery
+        updated["finalized_ts"] = time.time()
+        _validate_journal_transition(entry, updated)
+        _append_entry(updated)
+        return sanitize(updated)
 
 
 def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:

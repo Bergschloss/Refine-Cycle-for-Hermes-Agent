@@ -8436,6 +8436,46 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(finalized["recovery"]["pending_id"], "pending-1")
         self.assertEqual(journal._load_entries_safe()[1], "ok")
 
+    def test_concurrent_finalize_allows_one_terminal_transition(self):
+        entry_id = journal.prepare(
+            trigger="manual", reason="seed", session_id="session",
+            proposal=skill_proposal("concurrent-finalize"),
+            recovery={"type": "skill_create", "name": "concurrent-finalize"},
+        )
+        barrier = threading.Barrier(3)
+        results = []
+        errors = []
+        result_lock = threading.Lock()
+
+        def worker():
+            barrier.wait()
+            try:
+                result = journal.finalize(entry_id, "applied")
+            except ValueError as exc:
+                with result_lock:
+                    errors.append(str(exc))
+            else:
+                with result_lock:
+                    results.append(result)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        records = journal.entries()
+        self.assertEqual(
+            sum(
+                record.get("id") == entry_id and record.get("outcome") == "applied"
+                for record in records
+            ),
+            1,
+        )
+
     def test_reviewer_semantic_schema_failures_are_explicit(self):
         malformed = (
             {},
