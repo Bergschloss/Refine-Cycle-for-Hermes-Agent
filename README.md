@@ -165,7 +165,7 @@ hermes gateway restart
 
 ```
 hermes plugins list
-# refine  0.1.0  Self-improvement loop ...  user  enabled
+# refine  0.1.0  Self-improvement loop ...  enabled
 ```
 
 Then check that automatic refinement can actually run:
@@ -247,9 +247,9 @@ a refinement about drift. Use `/refine drift` or `/refine model auto` to undo.
 ### Automatic refinement
 
 Automatic refinement is **enabled by default** (`auto_enabled: true`). After
-installation, the plugin begins analyzing sessions and proposing improvements
-without additional configuration. To disable it, set `auto_enabled: false` in
-`plugins.entries.refine`.
+enabling the plugin and restarting Hermes, it begins analyzing sessions and
+proposing improvements without additional configuration. To disable it, set
+`auto_enabled: false` in `plugins.entries.refine`.
 
 `post_llm_call` counts the assistant messages in the history Hermes supplies and
 starts at most one background refinement attempt once that count has grown by
@@ -455,7 +455,7 @@ All keys live under `plugins.entries.refine`:
 | `auto_cooldown_minutes` | int | `20` | Minimum durable journal-derived gap between automatic attempts. |
 | `max_edits_per_run` | int | `1` | Maximum proposal passes per run. |
 | `max_edits_per_proposal` | int | `3` | Maximum inseparable edits one proposal may apply as a single transaction. `1` disables transactions. |
-| `max_edits_per_day` | int | `3` | Maximum applied, pending, or prepared **edits** per UTC day. This is the blast-radius limit and is re-checked before every edit. |
+| `max_edits_per_day` | int | `3` | Maximum applied, pending, prepared, rollback-prepared, or pending-rollback **edits** per UTC day. This is the blast-radius limit and is re-checked before every edit. |
 | `only_agent_created` | bool | `true` | Only patch agent-created skills. |
 | `journal_dir` | path | `<HERMES_HOME>/refine` | Journal, lock, ledger, backups, prompt notes, and the `/refine model` override. An empty value uses this default. |
 | `overview_max_entries` | int | `40` | Existing skills and memory snippets listed per kind in a proposal prompt. |
@@ -617,7 +617,8 @@ cd <HERMES_HOME>/plugins/refine
 python -m tests.run_tests
 ```
 
-The stdlib-only suite installs a fake Hermes host before importing the plugin.
+The regression suite uses only the Python standard library and a fake Hermes
+host. It installs that fake host before importing the plugin.
 Every database, journal, backup, skill, memory file, ledger, and lock lives
 under a fresh `TemporaryDirectory`; running the suite cannot touch live Hermes
 or profile state. It covers proposal completion, host action mapping,
