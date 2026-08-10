@@ -2236,6 +2236,23 @@ class RefineTests(unittest.TestCase):
         # But actual nonnumeric secrets still are
         self.assertIn("[REDACTED]", sanitization.scrub_text("token=abcSecretValue123"))
 
+    def test_bearer_redaction_preserves_json_quoting(self):
+        """R9 §4: the quote around a Bearer token must survive redaction, not
+        just the token being gone -- otherwise the surrounding JSON breaks."""
+        result = sanitization.scrub_text('{"auth": "Bearer 12345678"}')
+        self.assertEqual(result, '{"auth": "Bearer [REDACTED]"}')
+        json.loads(result)  # must not raise
+        # Single-quoted form keeps its own quotes, not the double-quote default.
+        result_single = sanitization.scrub_text("Bearer '12345678'")
+        self.assertEqual(result_single, "Bearer '[REDACTED]'")
+        # Unquoted form redacts cleanly with no stray quote introduced.
+        result_bare = sanitization.scrub_text("Bearer abc12345")
+        self.assertEqual(result_bare, "Bearer [REDACTED]")
+        # The token itself never survives in any form.
+        for text in (result, result_single, result_bare):
+            self.assertNotIn("12345678", text)
+            self.assertNotIn("abc12345", text)
+
     def test_scrub_text_does_not_produce_double_bracket_marker(self):
         """Wave 1.4: [REDACTED]] corruption must not occur in any secret form."""
         cases = [

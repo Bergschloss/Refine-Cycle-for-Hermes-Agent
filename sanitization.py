@@ -38,7 +38,9 @@ _UNQUOTED_SECRET = re.compile(
     rf"(?i)(?P<prefix>\b{_SECRET_KEY}\b\s*[:=]\s*)"
     r"(?P<value>[^\s,;\}\]\[]{6,})"
 )
-_BEARER = re.compile(r"(?i)\bbearer\s+[\"']?[A-Za-z0-9_.+/=-]{8,}[\"']?")
+_BEARER = re.compile(
+    r"(?i)(?P<label>\bbearer\s+)(?P<quote>[\"']?)[A-Za-z0-9_.+/=-]{8,}(?P<close>[\"']?)"
+)
 _URL_CREDENTIALS = re.compile(
     r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/?#]+@(?=[^\s/?#]+(?:[/?#]|\s|$))"
 )
@@ -83,7 +85,10 @@ def _scrub_chunk(text: str) -> str:
         text = pattern.sub(_REDACTED, text)
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
     text = _ENV_SECRET.sub(r"\1[REDACTED]", text)
-    text = _BEARER.sub("Bearer [REDACTED]", text)
+    text = _BEARER.sub(
+        lambda m: f"{m.group('label')}{m.group('quote')}{_REDACTED}{m.group('close')}",
+        text,
+    )
     text = _QUOTED_SECRET.sub(_replace_quoted, text)
     return _UNQUOTED_SECRET.sub(_replace_unquoted, text)
 
