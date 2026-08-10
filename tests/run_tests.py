@@ -1442,6 +1442,19 @@ class RefineTests(unittest.TestCase):
             self.assertNotIn("Candidates for removal", report)
             self.assertIn("could not be inspected", report)
 
+    def test_audit_missing_intended_digest_suppresses_effectiveness_verdicts(self):
+        """A standalone ledger record cannot prove which skill state refine intended."""
+        name = "missing-intended-digest"
+        ledger.record_edit(skill_proposal(name), "rotated-journal-entry")
+        row = next(
+            item for item in ledger.audit([], journal_entries=[])
+            if item["name"] == name
+        )
+        self.assertTrue(row["attribution_unknown"])
+        self.assertFalse(row["externally_modified"])
+        self.assertEqual(row["verdict"], "unreliable — intended state unknown")
+        self.assertNotIn("Candidates for removal", ledger.format_audit([row]))
+
     def test_audit_external_writer_check_is_not_confused_by_scrubbing(self):
         """R9 §9: a create whose content was scrubbed on the way in must not
         be reported as externally modified -- the journaled proposal.content
@@ -1482,6 +1495,26 @@ class RefineTests(unittest.TestCase):
 
     def test_ledger_reports_churn_and_loads_legacy_stats(self):
         created = time.time() - (30 * 86400)
+        legacy_content = skill_content("legacy-skill", "# Legacy")
+        churning_content = skill_content("churning-skill", "# Churning")
+        FakeHost.add_skill("legacy-skill", legacy_content)
+        FakeHost.add_skill("churning-skill", churning_content)
+        journal_entries = [
+            {
+                "id": "legacy-entry", "ts": created, "outcome": "applied",
+                "proposal": {
+                    "name": "legacy-skill", "kind": "skill", "action": "create",
+                    "content": legacy_content,
+                },
+            },
+            {
+                "id": "churning-entry", "ts": created + 1, "outcome": "applied",
+                "proposal": {
+                    "name": "churning-skill", "kind": "skill", "action": "patch",
+                    "content": churning_content,
+                },
+            },
+        ]
         ledger.stats_path().write_text(json.dumps({
             "legacy-skill": {
                 "created_ts": created,
@@ -1506,7 +1539,10 @@ class RefineTests(unittest.TestCase):
         }), encoding="utf-8")
         FakeHost.usage_counts["churning-skill"] = 2
 
-        rows = {row["name"]: row for row in ledger.audit([])}
+        rows = {
+            row["name"]: row
+            for row in ledger.audit([], journal_entries=journal_entries)
+        }
         self.assertEqual(rows["legacy-skill"]["version"], 1)
         self.assertEqual(rows["legacy-skill"]["updated_ts"], created)
         ledger.record_edit(
@@ -2461,13 +2497,22 @@ class RefineTests(unittest.TestCase):
 
     def test_ledger_uses_only_supported_post_edit_evidence(self):
         created = time.time() - 30 * 86400
+        content = skill_content("old-skill", "# Guidance")
+        FakeHost.add_skill("old-skill", content)
+        journal_entries = [{
+            "id": "abcdef123456", "ts": created, "outcome": "applied",
+            "proposal": {
+                "name": "old-skill", "kind": "skill", "action": "create",
+                "content": content,
+            },
+        }]
         base = {
             "created_ts": created, "journal_id": "abcdef123456", "kind": "skill",
             "action": "create", "pattern_fingerprint": "deadbeef1234",
         }
         FakeHost.usage_counts["old-skill"] = 4
         ledger._save_stats({"old-skill": base})
-        row = ledger.audit([])[0]
+        row = ledger.audit([], journal_entries=journal_entries)[0]
         self.assertEqual(row["usage_scope"], "all_time")
         self.assertEqual(row["verdict"], "unclear")
 
@@ -2475,7 +2520,7 @@ class RefineTests(unittest.TestCase):
         original = usage.get_usage_count
         usage.get_usage_count = lambda name, since_ts=None: 2
         try:
-            row = ledger.audit([])[0]
+            row = ledger.audit([], journal_entries=journal_entries)[0]
         finally:
             usage.get_usage_count = original
         self.assertEqual(row["usage_scope"], "since_exact")
@@ -8363,17 +8408,28 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(merged["backfill"]["reported_model"], "GPT-4")
 
         created = time.time() - 30 * 86400
+        content = skill_content("no-fingerprint", "# Guidance")
+        FakeHost.add_skill("no-fingerprint", content)
+        journal_entries = [{
+            "id": "no-fp", "ts": created, "outcome": "applied",
+            "proposal": {
+                "name": "no-fingerprint", "kind": "skill", "action": "create",
+                "content": content,
+            },
+        }]
         ledger._save_stats({"no-fingerprint": {
             "created_ts": created, "updated_ts": created, "journal_id": "no-fp",
             "name": "no-fingerprint", "kind": "skill", "action": "create",
             "pattern_fingerprint": "", "outcome": "applied",
         }})
         with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
-            row = ledger.audit([])[0]
+            row = ledger.audit([], journal_entries=journal_entries)[0]
         self.assertEqual(row["verdict"], "working")
         self.assertIsNone(row["pattern_recurred"])
         with patch.object(ledger, "_count_uses_with_scope", return_value=(0, "since_exact")):
-            self.assertNotEqual(ledger.audit([])[0]["verdict"], "working")
+            self.assertNotEqual(
+                ledger.audit([], journal_entries=journal_entries)[0]["verdict"], "working"
+            )
 
     def test_reported_model_survives_record_without_metadata(self):
         proposal = {"name": "kept-model", "kind": "skill", "action": "create"}
@@ -8617,18 +8673,29 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_approximate_usage_cannot_prove_working_or_unused(self):
         created = time.time() - 30 * 86400
+        content = skill_content("approx-skill", "# Guidance")
+        FakeHost.add_skill("approx-skill", content)
+        journal_entries = [{
+            "id": "abcdef123456", "ts": created, "outcome": "applied",
+            "proposal": {
+                "name": "approx-skill", "kind": "skill", "action": "create",
+                "content": content,
+            },
+        }]
         ledger._save_stats({"approx-skill": {
             "created_ts": created, "updated_ts": created,
             "journal_id": "abcdef123456", "kind": "skill", "action": "create",
             "pattern_fingerprint": "deadbeef1234", "outcome": "applied",
         }})
         with patch.object(ledger, "_count_uses_with_scope", return_value=(3, "since_approx")):
-            row = ledger.audit([])[0]
+            row = ledger.audit([], journal_entries=journal_entries)[0]
         self.assertEqual(row["uses"], 3)
         self.assertEqual(row["verdict"], "unclear")
         with patch.object(ledger, "_count_uses_with_scope", return_value=(0, "since_approx")):
             self.assertNotIn("approx-skill", ledger.unused_skills())
-            self.assertEqual(ledger.audit([])[0]["verdict"], "unclear")
+            self.assertEqual(
+                ledger.audit([], journal_entries=journal_entries)[0]["verdict"], "unclear"
+            )
 
     def test_auto_lock_skip_and_cleanup_failure_are_visible_in_status(self):
         FakeHost.entry_config()["auto_enabled"] = True

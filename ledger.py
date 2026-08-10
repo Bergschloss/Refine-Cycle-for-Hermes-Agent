@@ -474,6 +474,9 @@ def audit(
                 if external_change:
                     externally_modified = True
                     verdict = f"unreliable — externally {external_change}"
+            else:
+                attribution_unknown = True
+                verdict = "unreliable — intended state unknown"
 
         rows.append({
             "name": name,
