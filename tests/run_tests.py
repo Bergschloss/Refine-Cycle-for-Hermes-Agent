@@ -2710,13 +2710,14 @@ class RefineTests(unittest.TestCase):
 
     def test_matching_target_does_not_bypass_unresolved_approval(self):
         name = "already-matching"
-        content = skill_content(name, "# Guidance\n\nAlready current.")
-        FakeHost.add_skill(name, content)
+        original = skill_content(name, "# Guidance\n\nOriginal content.")
+        replacement = skill_content(name, "# Guidance\n\nApproved replacement.")
+        FakeHost.add_skill(name, original)
         FakeHost.stage_writes = True
         pending = self.run_proposal({
             "action": "patch", "kind": "skill", "name": name,
-            "content": content, "reason": "verify approval ordering", "evidence": [],
-            "refine_baseline": baseline_for(content),
+            "content": replacement, "reason": "verify approval ordering", "evidence": [],
+            "refine_baseline": baseline_for(original),
         })
         entry = journal.get_entry(pending["journal_id"])
         core.refine_audit()
@@ -5239,6 +5240,96 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         )
         self.assertTrue(result["success"])
         self.assertEqual(FakeHost.skills[name], replacement)
+
+    def test_same_content_patch_is_rejected_without_budget_or_churn(self):
+        """A verified no-op patch is traceable but never treated as an edit."""
+        name = "same-content-patch"
+        content = skill_content(name, "# Guidance\n\nKeep the exact content.")
+        created = self.run_proposal(skill_proposal(
+            name, "# Guidance\n\nKeep the exact content."
+        ))
+        self.assertTrue(created["success"])
+        actions_before = list(FakeHost.actions)
+        backups_before = set(journal.backups_dir().glob("*.bak"))
+        budget_before = journal.count_today_applied()
+        stats_before = dict(ledger.load_stats()[name])
+        entries_before = len(journal.entries())
+
+        rejected = self.run_proposal({
+            "action": "patch", "kind": "skill", "name": name,
+            "content": content, "reason": "No bytes actually changed.",
+            "evidence": [], "refine_baseline": baseline_for(content),
+        })
+
+        self.assertFalse(rejected["success"])
+        self.assertEqual(rejected["outcome"], "rejected")
+        self.assertEqual(rejected["edits_applied"], 0)
+        self.assertIn("already matches", rejected["message"])
+        self.assertNotIn("journal_id", rejected)
+        self.assertIn("record_id", rejected)
+        self.assertEqual(FakeHost.skills[name], content)
+        self.assertEqual(FakeHost.actions, actions_before)
+        self.assertEqual(set(journal.backups_dir().glob("*.bak")), backups_before)
+        self.assertEqual(journal.count_today_applied(), budget_before)
+        self.assertEqual(ledger.load_stats()[name], stats_before)
+        self.assertEqual(len(journal.entries()), entries_before + 1)
+        refusal = journal.get_entry(rejected["record_id"])
+        self.assertEqual(refusal["outcome"], "rejected")
+        self.assertFalse(refusal.get("backup_path"))
+        self.assertIn("already matches", refusal["error"])
+
+        # Equality with the historical create remains legal when the verified
+        # current target differs: this is a real restoration, not a no-op.
+        external = skill_content(name, "# Guidance\n\nExternal replacement.")
+        FakeHost.add_skill(name, external)
+        restored = self.run_proposal({
+            "action": "patch", "kind": "skill", "name": name,
+            "content": content, "reason": "Restore the prior guidance.",
+            "evidence": [], "refine_baseline": baseline_for(external),
+        })
+        self.assertTrue(restored["success"])
+        self.assertEqual(FakeHost.skills[name], content)
+        self.assertEqual(journal.count_today_applied(), budget_before + 1)
+        self.assertEqual(ledger.load_stats()[name]["version"], 2)
+
+    def test_transaction_rejects_same_content_patch_before_any_edit(self):
+        """An unchanged later patch cannot leave an inseparable partial apply."""
+        name = "txn-unchanged-patch"
+        original = skill_content(name, "# Guidance\n\nAlready correct.")
+        FakeHost.add_skill(name, original)
+        other = skill_proposal("txn-before-unchanged")
+        multi = {
+            "action": "multi", "kind": "", "name": "", "content": "",
+            "summary": "Both edits are required", "reason": "test",
+            "evidence": [],
+            "edits": [
+                other,
+                {
+                    "action": "patch", "kind": "skill", "name": name,
+                    "content": original, "reason": "test", "evidence": [],
+                    "refine_baseline": baseline_for(original),
+                },
+            ],
+        }
+
+        result = core._apply_transaction(
+            multi, trigger="manual", safe_reason="test",
+            session="session", started=time.time()
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertIn("unchanged edit(s) at index [1]", result["message"])
+        self.assertNotIn(other["name"], FakeHost.skills)
+        self.assertEqual(FakeHost.skills[name], original)
+        self.assertEqual(FakeHost.actions, [])
+        self.assertEqual(list(journal.backups_dir().glob("*.bak")), [])
+        self.assertEqual(journal.count_today_applied(), 0)
+        self.assertEqual(len(journal.entries()), 2)
+        self.assertTrue(
+            all(entry["outcome"] == "rejected" for entry in journal.entries())
+        )
 
     def test_transaction_rejects_all_when_later_patch_lacks_baseline(self):
         """R7-02: a transaction with one no-baseline skill patch applies zero edits."""

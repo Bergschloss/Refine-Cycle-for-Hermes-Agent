@@ -1532,6 +1532,16 @@ def _skill_baseline_conflict(
     return None
 
 
+def _skill_patch_matches_baseline(proposal: Dict[str, Any]) -> bool:
+    """Whether a verified patch would write the exact bytes it was planned from."""
+    baseline = proposal.get("refine_baseline")
+    return bool(
+        isinstance(baseline, dict)
+        and journal.content_digest(str(proposal.get("content", "")))
+        == str(baseline.get("sha256", ""))
+    )
+
+
 def _journal_nonmutation(**kwargs: Any) -> Optional[str]:
     """Write a non-mutating journal entry. Accepts all journal.log kwargs including llm_meta."""
     try:
@@ -2311,6 +2321,32 @@ def _apply_edit(
             if entry_id:
                 result["record_id"] = entry_id
             return result
+        if _skill_patch_matches_baseline(proposal):
+            unchanged_error = (
+                f"Skill '{name}': patch content already matches the verified "
+                "current content"
+            )
+            entry_id = _journal_nonmutation(
+                trigger=trigger,
+                reason=safe_reason,
+                session_id=session,
+                proposal=proposal,
+                outcome="rejected",
+                error=unchanged_error,
+                group=group,
+                llm_meta=llm_meta,
+            )
+            result = {
+                "success": False,
+                "outcome": "rejected",
+                "message": f"Proposal rejected by guardrails: {unchanged_error}",
+                "proposal": proposal,
+                "reversible": False,
+                "edits_applied": 0,
+            }
+            if entry_id:
+                result["record_id"] = entry_id
+            return result
         captured = journal.prepare_skill_recovery(name)
         if captured is None:
             error = f"Cannot create durable backup for skill '{name}'; mutation aborted"
@@ -2775,7 +2811,11 @@ def _apply_transaction(
     # was built from content that no longer matches the live host state. This
     # prevents a partial apply where edit #1 succeeds but edit #2 would conflict.
     # Also rejects patches with missing or malformed baselines (fail closed).
+    # Also classify verified no-op patches here: discovering one only inside
+    # _apply_edit could let an earlier edit land before this inseparable
+    # transaction is rejected.
     stale_edits: List[int] = []
+    unchanged_edits: List[int] = []
     for index, edit in enumerate(edits):
         normalized = edit_proposal(edit)
         if (
@@ -2785,6 +2825,8 @@ def _apply_transaction(
             conflict = _skill_baseline_conflict(normalized)
             if conflict:
                 stale_edits.append(index)
+            elif _skill_patch_matches_baseline(normalized):
+                unchanged_edits.append(index)
     if stale_edits:
         conflict_msg = (
             f"Transaction rejected: entry changed during refinement planning "
@@ -2818,6 +2860,34 @@ def _apply_transaction(
             "success": False,
             "outcome": "failed",
             "message": conflict_msg,
+            "proposal": proposal,
+            "results": [],
+            "recoveries": [],
+            "journal_ids": [],
+            "reversible": False,
+            "edits_applied": 0,
+        }
+
+    if unchanged_edits:
+        unchanged_msg = (
+            "Transaction rejected: patch content already matches the verified "
+            f"target (unchanged edit(s) at index {unchanged_edits})"
+        )
+        for index, edit in enumerate(edits):
+            _journal_nonmutation(
+                trigger=trigger,
+                reason=safe_reason,
+                session_id=session,
+                proposal=edit_proposal(edit),
+                outcome="rejected",
+                error=unchanged_msg,
+                group=edit_group(index),
+                llm_meta=llm_meta,
+            )
+        return {
+            "success": False,
+            "outcome": "failed",
+            "message": unchanged_msg,
             "proposal": proposal,
             "results": [],
             "recoveries": [],
