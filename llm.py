@@ -27,8 +27,19 @@ logger = logging.getLogger(__name__)
 # same source of truth: JSON-escaped Markdown tokenizes worse than prose, and
 # under-budgeting silently truncates the proposals this limit permits.
 MAX_CONTENT_CHARS = 15000
-MAX_EXPECTED_OUTCOME_CHARS = 300
-MAX_SUMMARY_CHARS = 300
+# Durable proposal feedback is kept independently of configurable prompt overview
+# lines. Both fields are journaled and later shown to the model, so one limit
+# prevents storage and rendering from silently drifting apart.
+MAX_PERSISTED_PROPOSAL_TEXT_CHARS = 300
+# History must replay both durable fields even when overview_max_chars is set to
+# its valid minimum of one. The floor is derived from their shared storage cap
+# plus the bounded status/version/label scaffolding of one multi-edit line.
+_HISTORY_RENDER_SCAFFOLD_CHARS = len(
+    f"{'unknown':<20} — expects:  — {'multi':<6} {'v' + ('9' * 19)} — reason: "
+)
+HISTORY_RENDER_MIN_CHARS = (
+    2 * MAX_PERSISTED_PROPOSAL_TEXT_CHARS + _HISTORY_RENDER_SCAFFOLD_CHARS
+)
 TRAJECTORY_MAX_CHARS = 8000
 _CHARS_PER_TOKEN = 3
 _PROPOSAL_ENVELOPE_TOKENS = 1024
@@ -787,7 +798,17 @@ def normalize_expected_outcome(value: Any) -> str:
     """Return a compact, sanitized prediction or an empty optional value."""
     if not isinstance(value, str):
         return ""
-    return scrub_text(value).strip()[:MAX_EXPECTED_OUTCOME_CHARS]
+    return scrub_text(value).strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
+
+
+def normalize_summary(value: Any) -> str:
+    """Return a compact, sanitized transaction summary for durable storage."""
+    return scrub_text(str(value)).strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
+
+
+def refinement_history_max_chars(configured_chars: int) -> int:
+    """Keep history fields renderable without widening configured overviews."""
+    return max(configured_chars, HISTORY_RENDER_MIN_CHARS)
 
 
 def _normalize_fields(parsed: Dict[str, Any]) -> Tuple[str, str, str, str, str]:
@@ -922,28 +943,37 @@ def _render_refinement_history(
         proposal = record.get("proposal", {})
         if not isinstance(proposal, dict):
             continue
-        outcome = _overview_text(record.get("outcome", "")) or "unknown"
+        outcome = _overview_text(record.get("outcome", ""))[:20] or "unknown"
         reason = _overview_text(record.get("reason", "")) or _overview_text(
             proposal.get("reason", "")
         ) or "—"
-        expected = _overview_text(proposal.get("expected_outcome", "")) or "—"
+        expected = (
+            _overview_text(proposal.get("expected_outcome", ""))[
+                :MAX_PERSISTED_PROPOSAL_TEXT_CHARS
+            ]
+            or "—"
+        )
         try:
             version = int(record.get("version", proposal.get("version", 0)) or 0)
         except (TypeError, ValueError):
             version = 0
-        version_text = f"v{version}" if version >= 1 else "—"
+        version_text = f"v{version}"[:20] if version >= 1 else "—"
 
         # Multi-edit transactions carry kind/name per sub-edit; use summary.
         action = proposal.get("action", "")
         edits = proposal.get("edits")
         if action == "multi" or (isinstance(edits, list) and edits):
             kind = "multi"
-            summary = _overview_text(proposal.get("summary", ""))
+            summary = _overview_text(proposal.get("summary", ""))[
+                :MAX_PERSISTED_PROPOSAL_TEXT_CHARS
+            ]
             edit_count = len(edits) if isinstance(edits, list) else 0
             name = summary or f"{edit_count} edits"
         else:
-            kind = _overview_text(proposal.get("kind", "")) or "—"
-            name = _overview_text(proposal.get("name", "")) or "—"
+            kind = _overview_text(proposal.get("kind", ""))[:20] or "—"
+            name = _overview_text(proposal.get("name", ""))[
+                :MAX_PERSISTED_PROPOSAL_TEXT_CHARS
+            ] or "—"
 
         line = (
             f"{outcome:<10} — expects: {expected} — {kind:<6} {name} "
@@ -1133,7 +1163,7 @@ def _finalize_edits(
     shared_expected = normalize_expected_outcome(parsed.get("expected_outcome"))
     shared_evidence = _ensure_list(parsed.get("evidence"))
     shared_fingerprint = _valid_fingerprint(parsed.get("pattern_fingerprint"))
-    summary = scrub_text(str(parsed.get("summary", ""))).strip()[:MAX_SUMMARY_CHARS]
+    summary = normalize_summary(parsed.get("summary", ""))
 
     edits: List[Dict[str, Any]] = []
     claimed: set = set()
@@ -1283,7 +1313,7 @@ def propose(
     history_lines = _render_refinement_history(
         refinement_history,
         max_entries=history_max_entries,
-        max_chars=overview_max_chars,
+        max_chars=refinement_history_max_chars(overview_max_chars),
     )
     history_block = (
         "\n=== PREVIOUS REFINEMENTS ===\n" + history_lines + "\n"

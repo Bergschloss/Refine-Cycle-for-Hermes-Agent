@@ -2055,6 +2055,8 @@ def _refine_once(
             proposal.get("expected_outcome")
         ),
     )
+    if "summary" in proposal:
+        proposal["summary"] = _llm.normalize_summary(proposal["summary"])
     _offered_fps = {
         str(pattern.get("fingerprint", ""))
         for pattern in error_patterns[:patterns.FORMAT_PATTERNS_LIMIT]
@@ -2772,9 +2774,7 @@ def _apply_transaction(
             "edits_applied": 0,
         }
     group_id = uuid.uuid4().hex[:12]
-    summary = scrub_text(str(proposal.get("summary", ""))).strip()[
-        : _llm.MAX_SUMMARY_CHARS
-    ]
+    summary = _llm.normalize_summary(proposal.get("summary", ""))
     shared_reason = scrub_text(str(proposal.get("reason", "")))
     shared_expected = _llm.normalize_expected_outcome(proposal.get("expected_outcome"))
     shared_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")

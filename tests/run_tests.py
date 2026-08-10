@@ -1259,11 +1259,64 @@ class RefineTests(unittest.TestCase):
         result = self.run_proposal(proposal)
         entry = journal.get_entry(result["journal_id"])
         stored = entry["proposal"]["expected_outcome"]
-        self.assertLessEqual(len(stored), llm.MAX_EXPECTED_OUTCOME_CHARS)
+        self.assertLessEqual(len(stored), llm.MAX_PERSISTED_PROPOSAL_TEXT_CHARS)
         self.assertNotIn(secret, stored)
         audit = core.refine_audit()
         self.assertNotIn(secret, audit["report"])
         self.assertIn("[REDACTED]", audit["report"])
+
+    def test_multi_text_fields_share_storage_cap_and_history_render_floor(self):
+        expected = "expected-" + ("x" * 400)
+        summary = "summary-" + ("y" * 400)
+        capped_expected = expected[:llm.MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
+        capped_summary = summary[:llm.MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
+        proposal = multi_proposal(
+            skill_proposal("capped-multi-skill"),
+            memory_edit("Capped transaction lesson.", name="capped-multi-memory"),
+            summary=summary,
+        )
+        proposal["expected_outcome"] = expected
+
+        finalized = llm.propose(MockLlm(proposal), "evidence", [], [])
+        self.assertEqual(finalized["expected_outcome"], capped_expected)
+        self.assertEqual(finalized["summary"], capped_summary)
+
+        dry_run = self.run_proposal(proposal, dry_run=True)
+        entry = journal.get_entry(dry_run["journal_id"])
+        self.assertEqual(dry_run["proposal"]["summary"], capped_summary)
+        self.assertEqual(entry["proposal"]["expected_outcome"], capped_expected)
+        self.assertEqual(entry["proposal"]["summary"], capped_summary)
+
+        FakeHost.entry_config()["overview_max_chars"] = 1
+        model = MockLlm({"action": "no_op", "reason": "none"})
+        llm.propose(
+            model,
+            "evidence",
+            [],
+            [],
+            refinement_history=[{
+                "outcome": "applied",
+                "reason": "completed",
+                "proposal": {
+                    "action": "multi",
+                    "summary": capped_summary,
+                    "expected_outcome": capped_expected,
+                    "edits": [{}, {}],
+                },
+            }],
+        )
+        history_block = model.calls[0]["input"][0].text.split(
+            "=== PREVIOUS REFINEMENTS ===\n", 1
+        )[1].split("\n=== RECENT TRAJECTORY ===", 1)[0]
+        self.assertIn(capped_expected, history_block)
+        self.assertIn(capped_summary, history_block)
+        self.assertGreater(llm.refinement_history_max_chars(1), 1)
+        self.assertTrue(
+            all(
+                len(line) <= llm.refinement_history_max_chars(1)
+                for line in history_block.splitlines()
+            )
+        )
 
     def test_ledger_versions_edits_without_bumping_on_reconciliation(self):
         name = "versioned-skill"
