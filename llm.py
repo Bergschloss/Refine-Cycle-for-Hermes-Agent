@@ -86,11 +86,24 @@ def _safe_trajectory_record(line: str) -> str:
     # Never manufacture a trusted opener around payload text. Current rendering
     # emits one complete physical line per record; any other reserved-tag shape
     # is foreign or legacy malformed input and is safer to omit than to repair.
+    logger.warning(
+        "Omitted malformed trajectory record containing boundary tags "
+        "(len=%d, first 80 chars: %s)",
+        len(line),
+        line[:80],
+    )
     return _TRAJECTORY_OMITTED
 
 
 def _bounded_trajectory(text: str) -> str:
-    """Keep complete canonical records within the hard trajectory character cap."""
+    """Keep complete canonical records within the hard trajectory character cap.
+
+    INVARIANT: this function splits on ``\\n`` and assumes one record per
+    physical line. The guarantee is enforced by ``core._one_line()`` which
+    collapses every Unicode line boundary (\\r, \\n, \\v, \\f, \\x1c-\\x1e,
+    \\x85, \\u2028, \\u2029) before building a record. If that invariant
+    breaks, _safe_trajectory_record will emit a warning and omit the record.
+    """
     limit = max(0, int(TRAJECTORY_MAX_CHARS))
     if limit == 0:
         return ""

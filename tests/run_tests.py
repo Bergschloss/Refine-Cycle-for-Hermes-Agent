@@ -9347,6 +9347,43 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         )
         self.assertTrue(result)
 
+    # ── §14 Round 10: contract test for single-line trajectory records ────
+
+    def test_one_line_collapses_all_unicode_line_boundaries(self):
+        """§14: _one_line must collapse every separator that split('\\n') acts on."""
+        # Every Unicode line boundary that could split a record
+        separators = "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+        text = "before" + separators + "after"
+        result = core._one_line(text)
+        # No separator should survive
+        for ch in separators:
+            self.assertNotIn(ch, result, f"Separator U+{ord(ch):04X} survived")
+        # Both parts should be present
+        self.assertIn("before", result)
+        self.assertIn("after", result)
+
+    def test_trajectory_record_is_single_line(self):
+        """§14: a rendered trajectory record contains no line boundary."""
+        separators = "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+        # Simulate what core does for a tool message
+        content = "line 1" + separators + "line 2" + separators + "line 3"
+        rendered_content = core._one_line(str(content)[:400])
+        tool_name = core._one_line("my_tool")[:120]
+        record = f"tool={tool_name} | {rendered_content}"
+        safe_record = core._escape_foreign_tags(core._strip_untrusted_tags(record))
+        full_line = f"[tool] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
+        for ch in separators:
+            self.assertNotIn(ch, full_line, f"Separator U+{ord(ch):04X} in record")
+
+    def test_safe_trajectory_record_warns_on_malformed(self):
+        """§14: _safe_trajectory_record logs a warning when it omits a record."""
+        import llm as llm_mod
+        malformed = "<untrusted_tool_result>no role prefix</untrusted_tool_result>"
+        with self.assertLogs(llm_mod.logger, level="WARNING") as cm:
+            result = llm_mod._safe_trajectory_record(malformed)
+        self.assertEqual(result, llm_mod._TRAJECTORY_OMITTED)
+        self.assertTrue(any("malformed trajectory record" in msg for msg in cm.output))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
