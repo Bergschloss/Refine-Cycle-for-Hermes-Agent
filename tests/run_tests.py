@@ -1201,6 +1201,88 @@ class RefineTests(unittest.TestCase):
             reconciled_stats["updated_ts"], patched_stats["updated_ts"]
         )
 
+    def test_audit_flags_a_skill_modified_by_something_other_than_refine(self):
+        """R9 §9: a skill whose current content no longer matches what refine
+        last applied must be flagged, and its verdict marked unreliable rather
+        than credited to refine (e.g. Hermes's own background review edited
+        the same skill after refine did)."""
+        name = "externally-touched-skill"
+        created = self.run_proposal(skill_proposal(name))
+        self.assertTrue(created["success"])
+        # Something other than refine changes the skill afterwards, with no
+        # corresponding refine journal entry.
+        FakeHost.skills[name] = skill_content(name, "# Guidance\n\nRewritten by someone else.")
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(1, "since_exact")):
+            row = next(
+                r for r in ledger.audit([], journal_entries=journal.entries())
+                if r["name"] == name
+            )
+        self.assertTrue(row["externally_modified"])
+        self.assertNotIn(row["verdict"], ("working", "did not help"))
+        self.assertIn("unreliable", row["verdict"])
+
+    def test_audit_does_not_flag_unchanged_skill_content(self):
+        """R9 §9: unchanged content is not flagged, and the normal verdict stands."""
+        name = "unchanged-skill"
+        created = self.run_proposal(skill_proposal(name))
+        self.assertTrue(created["success"])
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(1, "since_exact")):
+            row = next(
+                r for r in ledger.audit([], journal_entries=journal.entries())
+                if r["name"] == name
+            )
+        self.assertFalse(row["externally_modified"])
+        self.assertEqual(row["verdict"], "working")
+
+    def test_audit_does_not_flag_refines_own_later_patch(self):
+        """R9 §9: refine patching its own skill again is not "external"."""
+        name = "self-patched-skill"
+        created = self.run_proposal(skill_proposal(name))
+        self.assertTrue(created["success"])
+        patched = self.run_proposal({
+            "action": "patch", "kind": "skill", "name": name,
+            "content": skill_content(name, "# Guidance\n\nRefine's own second edit."),
+            "reason": "A repeated failure needs a narrower instruction.",
+            "evidence": [],
+            "refine_baseline": baseline_for(FakeHost.skills[name]),
+        })
+        self.assertTrue(patched["success"])
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(1, "since_exact")):
+            row = next(
+                r for r in ledger.audit([], journal_entries=journal.entries())
+                if r["name"] == name
+            )
+        self.assertFalse(row["externally_modified"])
+
+    def test_audit_external_writer_check_does_not_crash_on_missing_skill(self):
+        """R9 §9: a skill that no longer exists on the host must not crash the
+        detection; existing behaviour (usage unavailable) is preserved."""
+        name = "deleted-elsewhere-skill"
+        created = self.run_proposal(skill_proposal(name))
+        self.assertTrue(created["success"])
+        del FakeHost.skills[name]
+        rows = ledger.audit([], journal_entries=journal.entries())
+        row = next(r for r in rows if r["name"] == name)
+        self.assertIn("externally_modified", row)
+        self.assertFalse(row["externally_modified"])
+
+    def test_audit_external_writer_check_is_not_confused_by_scrubbing(self):
+        """R9 §9: a create whose content was scrubbed on the way in must not
+        be reported as externally modified -- the journaled proposal.content
+        used to compute the intended digest is already the scrubbed text that
+        actually landed on the host, so the two digests must still agree."""
+        name = "redacted-external-check"
+        secret = "ghp_" + "Z" * 36
+        created = self.run_proposal(skill_proposal(name, f"# Guidance\n\n{secret}"))
+        self.assertTrue(created["success"])
+        self.assertNotIn(secret, FakeHost.skills[name])
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(1, "since_exact")):
+            row = next(
+                r for r in ledger.audit([], journal_entries=journal.entries())
+                if r["name"] == name
+            )
+        self.assertFalse(row["externally_modified"])
+
     def test_ledger_refuses_to_overwrite_on_read_failure(self):
         """Wave 1.2: corrupted or locked ledger must not be wiped by record_edit."""
         path = ledger.stats_path()

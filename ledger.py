@@ -316,6 +316,40 @@ def _merge_journal_stats(
     return merged
 
 
+def _latest_applied_skill_digests(
+    journal_entries: Optional[List[Dict[str, Any]]],
+) -> Dict[str, str]:
+    """Map skill name -> digest of the plugin's own last applied content.
+
+    Hermes's own background review can edit the same skills refine does. If it
+    edits one after refine did, a later ``working``/``did not help`` verdict on
+    that skill would silently be crediting refine for the host's change. This
+    lets ``audit()`` compare what refine last intended to leave behind against
+    what is actually on disk now, without assuming refine owns every mutation.
+    """
+    latest: Dict[str, Tuple[float, str]] = {}
+    for entry in journal_entries or []:
+        if not isinstance(entry, dict) or entry.get("outcome") != "applied":
+            continue
+        proposal = entry.get("proposal")
+        if not isinstance(proposal, dict):
+            continue
+        if proposal.get("kind") != "skill" or proposal.get("action") not in ("create", "patch"):
+            continue
+        name = str(proposal.get("name", "")).strip()
+        content = proposal.get("content")
+        if not name or not isinstance(content, str):
+            continue
+        try:
+            ts = float(entry.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        existing = latest.get(name)
+        if existing is None or ts >= existing[0]:
+            latest[name] = (ts, journal.content_digest(content))
+    return {name: digest for name, (_, digest) in latest.items()}
+
+
 def audit(
     current_patterns: Optional[List[Dict[str, Any]]] = None,
     *,
@@ -328,6 +362,7 @@ def audit(
     now = time.time()
     rows: List[Dict[str, Any]] = []
     merged_stats = _merge_journal_stats(load_stats(), journal_entries)
+    intended_skill_digests = _latest_applied_skill_digests(journal_entries)
     for key, meta in sorted(merged_stats.items()):
         # Legacy rows have no explicit name; their key is the name.
         name = str(meta.get("name") or key)
@@ -392,6 +427,26 @@ def audit(
         if version >= 3 and verdict == "unclear":
             verdict = "churning"
 
+        # A skill can be edited by something other than refine -- Hermes's own
+        # background review writes to the same skills. If the host's current
+        # content no longer matches what refine last applied, a "working" or
+        # "did not help" verdict here would be crediting refine for an outcome
+        # it does not own. Read-only: never reconciled, reverted, or re-applied.
+        externally_modified = False
+        if meta.get("kind", "skill") == "skill" and outcome == "applied":
+            intended_digest = intended_skill_digests.get(name)
+            if intended_digest:
+                current_baseline = journal.skill_baseline(name)
+                if (
+                    current_baseline is not None
+                    and current_baseline.get("exists")
+                    and current_baseline.get("sha256")
+                    and current_baseline["sha256"] != intended_digest
+                ):
+                    externally_modified = True
+                    if verdict in ("working", "did not help"):
+                        verdict = "unreliable — externally modified"
+
         rows.append({
             "name": name,
             "kind": meta.get("kind", "skill"),
@@ -402,6 +457,7 @@ def audit(
             "usage_scope": usage_scope,
             "pattern_recurred": recurred,
             "verdict": verdict,
+            "externally_modified": externally_modified,
             "journal_id": meta.get("journal_id", ""),
             "outcome": outcome,
             "reported_model": (
@@ -449,6 +505,11 @@ def format_audit(rows: List[Dict[str, Any]]) -> str:
         reported_model = str(row.get("reported_model", "") or "")
         if reported_model:
             lines.append(f"      model: {reported_model[:40]}")
+        if row.get("externally_modified"):
+            lines.append(
+                "      ⚠ modified since refine's edit by something else "
+                "(e.g. Hermes background review) — verdict is not reliable"
+            )
 
     candidates = [row for row in rows if row["verdict"] in ("unused", "did not help")]
     if candidates:
