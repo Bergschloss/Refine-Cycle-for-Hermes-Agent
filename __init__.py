@@ -133,23 +133,31 @@ def _run_auto_refine(session_id: str, *, cleanup_session_notes: bool = False) ->
                 _clear_session_prompt_notes(session_id)
             return
         with journal.try_mutation_lock() as acquired:
-            if not acquired:
-                message = "Automatic refine skipped because the mutation lock is busy"
-                logger.warning(message)
-                core.note_auto_event("mutation_lock_busy", message)
-            elif _cooldown_elapsed():
-                core.refine_run(
-                    llm=_session_llm(),
-                    session_id=session_id,
-                    auto=True,
-                    # The same worker clears this session's notes below, so a
-                    # session-scoped note written here would not survive the call.
-                    session_ending=cleanup_session_notes,
-                )
-            if cleanup_session_notes:
-                _clear_session_prompt_notes(
-                    session_id, timeout=None if acquired else 0.0
-                )
+            try:
+                if not acquired:
+                    message = "Automatic refine skipped because the mutation lock is busy"
+                    logger.warning(message)
+                    core.note_auto_event("mutation_lock_busy", message)
+                elif _cooldown_elapsed():
+                    core.refine_run(
+                        llm=_session_llm(),
+                        session_id=session_id,
+                        auto=True,
+                        # The same worker clears this session's notes below, so a
+                        # session-scoped note written here would not survive the call.
+                        session_ending=cleanup_session_notes,
+                    )
+            finally:
+                # Cleanup must always run, even if refine_run raised above.
+                # Kept inside the ``with`` block deliberately: the mutation lock
+                # is reentrant per thread, so when ``acquired`` is True this is a
+                # free nested acquisition, not a second wait. When ``acquired``
+                # is False, timeout=0.0 makes the attempt non-blocking instead of
+                # queuing behind whoever holds it.
+                if cleanup_session_notes:
+                    _clear_session_prompt_notes(
+                        session_id, timeout=None if acquired else 0.0
+                    )
     except Exception:
         logger.exception("refine auto hook failed")
     finally:
