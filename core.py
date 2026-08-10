@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -110,6 +111,24 @@ _HTTP_STATUS_REFERENCE = re.compile(
 )
 _OVERRIDE_INTENT = re.compile(
     r"(?i)\b(?:ignore|disregard|override|bypass|skip|forget|regardless of|instead of)\b"
+)
+# Narrow pattern for skill/memory bodies: matches imperative override phrasing
+# that targets guidance/instructions/prompt (not benign uses like "skip the cache"
+# or "instead of retrying"). Wider _OVERRIDE_INTENT is too broad for Markdown bodies.
+_CONTEXT_OVERRIDE_INTENT = re.compile(
+    r"(?i)\b(?:ignore|disregard|override|bypass|forget)\b"
+    r"(?:\s+\w+){0,4}\s+"
+    r"(?:all\s+)?(?:previous|prior|above|preceding|earlier|system|initial)?\s*"
+    r"(?:instruction|guidance|prompt|rule|policy|directive|constraint|context)"
+)
+_CONTEXT_CONTROL_TAGS = re.compile(
+    r"(?i)<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result"
+    r"|assistant_response|developer|user_context|prompt)[^>]*>"
+)
+_AGENT_IMPERSONATION = re.compile(
+    r"(?i)(?:^|\n)\s*(?:you\s+are\s+now|from\s+now\s+on\s+you\s+are"
+    r"|your\s+new\s+(?:role|identity|instruction)\s+is"
+    r"|system\s*:\s*(?:you|ignore|disregard|override))"
 )
 _HIGHER_PRIORITY_GUIDANCE = re.compile(
     r"(?i)\b(?:developer|system|prompt|instruction|guidance|constraint|policy|rule|guardrail)\b"
@@ -1306,6 +1325,32 @@ def _skill_content_error(name: str, content: str) -> Optional[str]:
     return None
 
 
+def _skill_or_memory_injection_error(content: str) -> Optional[str]:
+    """Reject skill/memory content that could restructure future agent context.
+
+    This is deliberately narrower than the prompt-note gate: skill bodies
+    legitimately contain code, URLs, angle-bracket generics, and words like
+    "skip" or "instead of". We reject only:
+    1. Context-control tags that a model would parse as structural markup.
+    2. Imperative override phrasing targeted at guidance/instructions.
+    3. Agent-impersonation patterns.
+    4. Unicode categories that can restructure rendering (Cc/Cf/Cs/Co/Cn),
+       except newline/tab/carriage-return which are normal in Markdown.
+    """
+    if _CONTEXT_CONTROL_TAGS.search(content):
+        return "Content contains context-control markup that could restructure agent context"
+    if _CONTEXT_OVERRIDE_INTENT.search(content):
+        return "Content contains imperative override phrasing targeting prior guidance"
+    if _AGENT_IMPERSONATION.search(content):
+        return "Content contains agent-impersonation or role-reassignment phrasing"
+    for ch in content:
+        if ch in ("\n", "\r", "\t"):
+            continue
+        if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
+            return "Content contains control or non-character codepoints"
+    return None
+
+
 def _prompt_note_content_error(
     content: str, *, check_rendered_size: bool = True
 ) -> Optional[str]:
@@ -1382,6 +1427,10 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
         return f"{action.title()} requires non-empty content"
     if len(content) > _llm.MAX_CONTENT_CHARS:
         return f"Content too large ({len(content)} chars; max {_llm.MAX_CONTENT_CHARS})"
+    if kind in ("skill", "memory"):
+        injection_error = _skill_or_memory_injection_error(content)
+        if injection_error:
+            return injection_error
     if kind == "prompt":
         if not config.prompt_notes_enabled():
             return "Prompt notes are disabled"
