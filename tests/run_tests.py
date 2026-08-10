@@ -9328,6 +9328,25 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             remaining = set(plugin_init._AUTO_PENDING_SESSION_ENDS)
         self.assertEqual(remaining, set(), f"Sessions stranded: {remaining}")
 
+    # ── §13 Round 10: cross-session threshold clamp ───────────────────────
+
+    def test_has_signal_clamps_threshold_to_session_cap(self):
+        """§13: with session_cap=25, min_count=100 opens the gate at 25 sessions."""
+        # Without clamp: threshold would be 51 (min_count // 2 + 1) → unreachable
+        result = patterns.has_signal(
+            [{"count": 25, "sessions_seen": 25}], [],
+            min_count=100, session_cap=25,
+        )
+        self.assertTrue(result)
+
+    def test_has_signal_existing_min_count_3_unchanged(self):
+        """§13: the existing min_count=3, sessions_seen=2 case still passes."""
+        result = patterns.has_signal(
+            [{"count": 1, "sessions_seen": 2}], [],
+            min_count=3, session_cap=25,
+        )
+        self.assertTrue(result)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

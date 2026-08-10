@@ -282,6 +282,7 @@ def has_signal(
     patterns: List[Dict[str, Any]],
     corrections: List[Any],
     min_count: int = 2,
+    session_cap: int = 25,
 ) -> bool:
     """Return whether a repeated failure or explicit correction is present.
 
@@ -294,10 +295,14 @@ def has_signal(
     entirely. Halving keeps the default (``min_count=2`` -> threshold ``2``)
     and the ``min_count=3`` cross-session case byte-identical to before, while
     a much higher ``min_count`` now requires a proportionally wider spread.
+
+    ``session_cap`` bounds the threshold to what the cross-session query can
+    actually return (default ``cross_session_max_sessions = 25``). Without this
+    clamp, ``min_count > 50`` would make ``session_threshold`` unreachable.
     """
     if corrections:
         return True
-    session_threshold = max(1, min_count // 2 + 1)
+    session_threshold = min(session_cap, max(1, min_count // 2 + 1))
     for entry in patterns or []:
         if (
             entry.get("count", 0) >= min_count

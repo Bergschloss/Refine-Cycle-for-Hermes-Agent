@@ -1866,7 +1866,8 @@ def _refine_once(
     reviewer_context = ""
     _signal_path = "gate_disabled"
     if _min_signal_required and not patterns.has_signal(
-        error_patterns, corrections, min_count=_min_pattern_count
+        error_patterns, corrections, min_count=_min_pattern_count,
+        session_cap=config.cross_session_max_sessions(),
     ):
         _signal_path = "no_signal"
         should_review = (
