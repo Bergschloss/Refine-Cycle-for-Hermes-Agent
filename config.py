@@ -40,6 +40,19 @@ def state_db_path() -> Path:
     return hermes_home() / "state.db"
 
 
+def _resolve_hermes_home_placeholder(value: str) -> str:
+    """Replace the documented <HERMES_HOME> pseudo-variable with the real path.
+
+    README documents ``journal_dir: "<HERMES_HOME>/refine-data"`` as valid
+    configuration. On Windows, angle brackets in paths are syntactically
+    illegal and cause silent OSError when mkdir() is called. Substitution
+    happens once here; all config path readers route through this helper.
+    """
+    if "<HERMES_HOME>" in value:
+        return value.replace("<HERMES_HOME>", str(hermes_home()))
+    return value
+
+
 def _load_raw_config() -> Optional[Dict[str, Any]]:
     """Load the full Hermes config.yaml."""
     try:
@@ -487,7 +500,8 @@ def journal_dir() -> Path:
     default = hermes_home() / "refine"
     configured = get_str("journal_dir", "").strip()
     if configured:
-        return Path(os.path.expandvars(os.path.expanduser(configured)))
+        resolved = _resolve_hermes_home_placeholder(configured)
+        return Path(os.path.expandvars(os.path.expanduser(resolved)))
     if _RUNTIME_JOURNAL_DIR is not None:
         marker = _RUNTIME_JOURNAL_COMMIT_MARKER
         if marker is not None and marker.is_file():

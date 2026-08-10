@@ -9217,6 +9217,29 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             if original_view is not None:
                 skills_tool.skill_view = original_view
 
+    # ── §7 Round 10: <HERMES_HOME> placeholder substitution ───────────────
+
+    def test_hermes_home_placeholder_resolved_in_journal_dir(self):
+        """§7: journal_dir with <HERMES_HOME> resolves to hermes_home()."""
+        resolved = config._resolve_hermes_home_placeholder("<HERMES_HOME>/refine-data")
+        self.assertNotIn("<HERMES_HOME>", resolved)
+        self.assertIn(str(config.hermes_home()), resolved)
+
+    def test_hermes_home_placeholder_absolute_path_untouched(self):
+        """§7: an absolute configured path without the placeholder is unchanged."""
+        if os.name == "nt":
+            path = r"C:\custom\refine"
+        else:
+            path = "/custom/refine"
+        self.assertEqual(config._resolve_hermes_home_placeholder(path), path)
+
+    def test_hermes_home_placeholder_not_present_passthrough(self):
+        """§7: text without <HERMES_HOME> passes through unchanged."""
+        self.assertEqual(
+            config._resolve_hermes_home_placeholder("~/my-refine"),
+            "~/my-refine",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
