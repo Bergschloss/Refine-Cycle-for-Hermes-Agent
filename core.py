@@ -1248,7 +1248,35 @@ def refine_audit() -> Dict[str, Any]:
             logger.error("Audit pattern collection failed: %s", scrub_text(str(exc)))
             current = None
             complete = False
-    rows = ledger.audit(current, journal_entries=journal_entries)
+
+    # Pattern collection can be unbounded, so never hold the mutation lock over
+    # it. Refresh afterward and capture every attribution input under one lock:
+    # a concurrent refine then cannot publish a newer skill/journal generation
+    # between the intended-content snapshot and the target baseline read.
+    try:
+        with journal.mutation_lock():
+            journal_entries = journal.entries()
+            stats_snapshot = ledger.load_stats()
+            skill_baselines = ledger.snapshot_skill_baselines(journal_entries)
+    except Exception as exc:
+        safe_error = scrub_text(str(exc))
+        logger.error("Audit attribution snapshot failed: %s", safe_error)
+        return {
+            "success": False,
+            "complete": False,
+            "rows": [],
+            "report": (
+                "Audit incomplete: refinement state could not be read "
+                "consistently; no conclusions were drawn."
+            ),
+        }
+
+    rows = ledger.audit(
+        current,
+        journal_entries=journal_entries,
+        stats_snapshot=stats_snapshot,
+        skill_baselines=skill_baselines,
+    )
     report = ledger.format_audit(rows)
     if not complete:
         report = (

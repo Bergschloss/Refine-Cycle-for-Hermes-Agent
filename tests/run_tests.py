@@ -1278,6 +1278,81 @@ class RefineTests(unittest.TestCase):
             )
         self.assertFalse(row["externally_modified"])
 
+    def test_audit_snapshot_does_not_mislabel_concurrent_refine_patch(self):
+        """A refine patch landing during pattern collection stays refine-owned."""
+        name = "concurrent-audit-skill"
+        created = self.run_proposal(skill_proposal(name))
+        self.assertTrue(created["success"])
+        patch_proposal = {
+            "action": "patch",
+            "kind": "skill",
+            "name": name,
+            "content": skill_content(
+                name, "# Guidance\n\nRefine's concurrent second edit."
+            ),
+            "reason": "A repeated failure needs a narrower instruction.",
+            "evidence": [],
+            "refine_baseline": baseline_for(FakeHost.skills[name]),
+        }
+        collection_entered = threading.Event()
+        release_collection = threading.Event()
+        patch_finished = threading.Event()
+        audit_result = {}
+        patch_result = {}
+        errors = []
+
+        def collect(*args, **kwargs):
+            if "max_rows" in kwargs and kwargs["max_rows"] is None:
+                collection_entered.set()
+                if not release_collection.wait(5):
+                    raise AssertionError("audit pattern collection was not released")
+            return []
+
+        def audit_worker():
+            try:
+                audit_result.update(core.refine_audit())
+            except BaseException as exc:
+                errors.append(exc)
+
+        def patch_worker():
+            try:
+                patch_result.update(self.run_proposal(patch_proposal))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                patch_finished.set()
+
+        audit_thread = threading.Thread(target=audit_worker)
+        patch_thread = threading.Thread(target=patch_worker)
+        with patch.object(
+            core, "collect_cross_session_patterns", side_effect=collect
+        ), patch.object(
+            ledger, "_count_uses_with_scope", return_value=(1, "since_exact")
+        ):
+            try:
+                audit_thread.start()
+                self.assertTrue(collection_entered.wait(2))
+                patch_thread.start()
+                self.assertTrue(
+                    patch_finished.wait(5),
+                    "concurrent refine was blocked by audit pattern collection",
+                )
+            finally:
+                release_collection.set()
+                patch_thread.join(5)
+                audit_thread.join(5)
+
+        self.assertFalse(patch_thread.is_alive())
+        self.assertFalse(audit_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(patch_result["success"])
+        row = next(
+            item for item in audit_result["rows"] if item["name"] == name
+        )
+        self.assertFalse(row["externally_modified"])
+        self.assertNotIn("externally", row["verdict"])
+        self.assertEqual(row["journal_id"], patch_result["journal_id"])
+
     def test_audit_external_writer_check_handles_missing_skill(self):
         """R9 §9: known external removal invalidates every effectiveness verdict."""
         name = "deleted-elsewhere-skill"

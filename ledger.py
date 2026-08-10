@@ -350,10 +350,22 @@ def _latest_applied_skill_digests(
     return {name: digest for name, (_, digest) in latest.items()}
 
 
+def snapshot_skill_baselines(
+    journal_entries: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Capture current targets for one journal generation under the caller's lock."""
+    return {
+        name: journal.skill_baseline(name)
+        for name in _latest_applied_skill_digests(journal_entries)
+    }
+
+
 def audit(
     current_patterns: Optional[List[Dict[str, Any]]] = None,
     *,
     journal_entries: Optional[List[Dict[str, Any]]] = None,
+    stats_snapshot: Optional[Dict[str, Any]] = None,
+    skill_baselines: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     patterns_available = current_patterns is not None
     by_fingerprint = {
@@ -361,7 +373,8 @@ def audit(
     }
     now = time.time()
     rows: List[Dict[str, Any]] = []
-    merged_stats = _merge_journal_stats(load_stats(), journal_entries)
+    stats = stats_snapshot if stats_snapshot is not None else load_stats()
+    merged_stats = _merge_journal_stats(stats, journal_entries)
     intended_skill_digests = _latest_applied_skill_digests(journal_entries)
     for key, meta in sorted(merged_stats.items()):
         # Legacy rows have no explicit name; their key is the name.
@@ -438,7 +451,11 @@ def audit(
         if meta.get("kind", "skill") == "skill" and outcome == "applied":
             intended_digest = intended_skill_digests.get(name)
             if intended_digest:
-                current_baseline = journal.skill_baseline(name)
+                current_baseline = (
+                    journal.skill_baseline(name)
+                    if skill_baselines is None
+                    else skill_baselines.get(name)
+                )
                 if current_baseline is not None:
                     if current_baseline.get("exists") is False:
                         external_change = "removed"
