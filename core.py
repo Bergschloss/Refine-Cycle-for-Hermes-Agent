@@ -1131,27 +1131,13 @@ def refine_status() -> Dict[str, Any]:
                   "in plugins.entries.refine.llm stays in effect after that"
             ),
         })
-    # A value the host will refuse is dropped before the call, so it can only be
-    # noticed here. Reported per field, because the denied one may be either.
-    if target["source"] in ("command", "config"):
-        if target["model"] and not model_allowed:
-            warnings.append({
-                "code": "model_override_trust_denied",
-                "message": (
-                    f"Model {target['model']} is set but host trust denies model "
-                    "overrides, so it is dropped before the call; set "
-                    "plugins.entries.refine.llm.allow_model_override to apply it"
-                ),
-            })
-        if target["provider"] and not provider_allowed:
-            warnings.append({
-                "code": "provider_override_trust_denied",
-                "message": (
-                    f"Provider {target['provider']} is set but host trust denies "
-                    "provider overrides, so it is dropped before the call; set "
-                    "plugins.entries.refine.llm.allow_provider_override to apply it"
-                ),
-            })
+    # A value the host will refuse is dropped before the call. Use the same
+    # messages the run journals so status cannot drift from failure diagnostics.
+    for field, message in config.llm_target_trust_denials(target).items():
+        warnings.append({
+            "code": f"{field}_override_trust_denied",
+            "message": message,
+        })
 
     # Session identity — what /refine would analyse if triggered now.
     sid, sid_source = resolve_session_id()
@@ -1759,6 +1745,9 @@ def _refine_once(
             if _effective.get("model") and config.llm_allow_model_override():
                 _run_target["model"] = _effective["model"]
         _run_target_issues = [str(i) for i in _effective.get("issues", []) if i]
+        _run_target_issues.extend(
+            config.llm_target_trust_denials(_effective).values()
+        )
     except Exception:
         _run_target = {}
         _run_target_source = "unknown"
@@ -1766,7 +1755,7 @@ def _refine_once(
     _run_target_unusable = bool(
         _run_target_issues
         and not _run_target
-        and _run_target_source in ("unknown", "host_default")
+        and _run_target_source in ("unknown", "host_default", "command", "config")
     )
 
     _min_signal_required = config.min_signal_required()
@@ -2076,6 +2065,16 @@ def _refine_once(
     _run_llm_meta["grounded"] = bool(
         _proposal_fp and _proposal_fp in _offered_fps
     )
+    evidence_summary = {
+        "session_id": session,
+        "session_id_source": session_source,
+        "session_source": session_db_source,
+        "source_lookup_status": source_lookup_status,
+        "messages": len(evidence.get("messages", [])),
+        "errors": evidence.get("error_count", 0),
+        "fingerprint_offered": _run_llm_meta["fingerprint_offered"],
+        "grounded": _run_llm_meta["grounded"],
+    }
     failure = scrub_text(str(proposal.get("failure", "")).strip())
     if failure:
         failure_messages = {
@@ -2114,23 +2113,13 @@ def _refine_once(
             "llm_called": True,
             "failure": failure,
             "proposal": proposal,
-            "evidence": evidence,
+            "evidence": evidence_summary,
+            "llm_meta": _run_llm_meta,
             "reversible": False,
         }
         if entry_id:
             response["journal_id"] = entry_id
         return response
-    evidence_summary = {
-        "session_id": session,
-        "session_id_source": session_source,
-        "session_source": session_db_source,
-        "source_lookup_status": source_lookup_status,
-        "messages": len(evidence.get("messages", [])),
-        "errors": evidence.get("error_count", 0),
-        "fingerprint_offered": _run_llm_meta["fingerprint_offered"],
-        "grounded": _run_llm_meta["grounded"],
-    }
-
     if _run_target_unusable and proposal.get("action") == "no_op":
         failure_message = "The configured refine model target is unusable."
         entry_id = _journal_nonmutation(

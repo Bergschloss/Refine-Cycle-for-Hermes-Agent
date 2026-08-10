@@ -173,6 +173,12 @@ def _pinned_target() -> Dict[str, str]:
         target["provider"] = provider
     if model and config.llm_allow_model_override():
         target["model"] = model
+    denials = config.llm_target_trust_denials(effective)
+    if denials:
+        logger.warning(
+            "Refine target fields were not sent: %s",
+            scrub_text("; ".join(denials.values())),
+        )
     return target
 
 

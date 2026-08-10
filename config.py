@@ -361,6 +361,33 @@ def llm_allow_provider_override() -> bool:
     )
 
 
+def llm_target_trust_denials(target: Dict[str, Any]) -> Dict[str, str]:
+    """Explain every explicit target field that the host trust policy drops.
+
+    Command and config targets are deliberately not sent unless their matching
+    allow flag is enabled. Keep these messages here because status reports the
+    same dropped fields that a refinement run journals.
+    """
+    if target.get("source") not in ("command", "config"):
+        return {}
+    denials: Dict[str, str] = {}
+    model = str(target.get("model", "") or "")
+    provider = str(target.get("provider", "") or "")
+    if model and not llm_allow_model_override():
+        denials["model"] = (
+            f"Model {model} is set but host trust denies model overrides, so it is "
+            "dropped before the call; set "
+            "plugins.entries.refine.llm.allow_model_override to apply it"
+        )
+    if provider and not llm_allow_provider_override():
+        denials["provider"] = (
+            f"Provider {provider} is set but host trust denies provider overrides, "
+            "so it is dropped before the call; set "
+            "plugins.entries.refine.llm.allow_provider_override to apply it"
+        )
+    return denials
+
+
 def live_main_target() -> Dict[str, str]:
     """Best-effort read of the host's live main provider/model.
 

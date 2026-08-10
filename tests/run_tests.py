@@ -1062,6 +1062,10 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["outcome"], "llm_error")
         self.assertEqual(result["failure"], "llm_call_error")
+        self.assertEqual(result["llm_meta"]["target_source"], "host_default")
+        self.assertEqual(result["llm_meta"]["requested_model"], "")
+        self.assertIsInstance(result["evidence"]["messages"], int)
+        self.assertNotIsInstance(result["evidence"]["messages"], list)
         self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "llm_error")
 
     def test_json_extraction_handles_trailing_braces_and_pydantic(self):
@@ -5776,6 +5780,31 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         llm.propose(model, "evidence", [], [])
         self.assertEqual(model.calls[0]["provider"], "my-provider")
         self.assertEqual(model.calls[0]["model"], "my-model")
+
+    def test_trust_denied_config_target_is_journaled_with_status_messages(self):
+        FakeHost.entry_config()["llm"] = {
+            "provider": "my-provider", "model": "my-model",
+        }
+        model = MockLlm({
+            "action": "no_op", "reason": "nothing", "evidence": [],
+            "kind": "", "name": "", "content": "",
+        })
+        result = core.refine_run(model, session_id="session")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "target_issue")
+        self.assertNotIn("provider", model.calls[0])
+        self.assertNotIn("model", model.calls[0])
+        target_issues = result["llm_meta"]["target_issues"]
+        self.assertEqual(len(target_issues), 2)
+        status = core.refine_status()
+        status_messages = {
+            warning["message"]
+            for warning in status["warnings"]
+            if warning["code"] in {
+                "model_override_trust_denied", "provider_override_trust_denied"
+            }
+        }
+        self.assertEqual(set(target_issues), status_messages)
 
     # ── Model selection tests ─────────────────────────────────────────────────
 
