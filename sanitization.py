@@ -108,9 +108,9 @@ def sanitize(value: Any) -> Any:
     if isinstance(value, str):
         return scrub_text(value)
     if isinstance(value, (bytes, bytearray)):
-        text = value.decode("utf-8", errors="replace")
+        text = value.decode("utf-8", errors="surrogateescape")
         scrubbed = scrub_text(text)
-        return type(value)(scrubbed.encode("utf-8", errors="replace"))
+        return type(value)(scrubbed.encode("utf-8", errors="surrogateescape"))
     if isinstance(value, dict):
         return {
             (scrub_text(key) if isinstance(key, str) else key): sanitize(item)

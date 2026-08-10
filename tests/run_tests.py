@@ -9269,6 +9269,33 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("new_session", plugin_init._AUTO_TURN_MARKS)
         plugin_init._AUTO_TURN_MARKS.clear()
 
+    # ── §10 Round 10: sanitize bytes surrogateescape ──────────────────────
+
+    def test_sanitize_bytes_roundtrips_invalid_utf8(self):
+        """§10: invalid UTF-8 bytes must survive sanitize() round-trip."""
+        original = b"\xff\xfe\x00secret='123456'"
+        result = sanitization.sanitize(original)
+        self.assertIsInstance(result, bytes)
+        # The invalid bytes at the front must be preserved
+        self.assertEqual(result[:3], b"\xff\xfe\x00")
+        # The secret must be redacted
+        self.assertNotIn(b"123456", result)
+        self.assertIn(b"[REDACTED]", result)
+
+    def test_sanitize_bytearray_preserves_type(self):
+        """§10: bytearray in → bytearray out."""
+        original = bytearray(b"\x80hello")
+        result = sanitization.sanitize(original)
+        self.assertIsInstance(result, bytearray)
+        self.assertEqual(result[0], 0x80)
+
+    def test_sanitize_bytes_idempotent(self):
+        """§10: sanitizing bytes twice gives the same result."""
+        original = b"\xff\xfesecret=abc123"
+        once = sanitization.sanitize(original)
+        twice = sanitization.sanitize(once)
+        self.assertEqual(once, twice)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
