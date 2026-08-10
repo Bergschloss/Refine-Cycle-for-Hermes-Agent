@@ -1687,6 +1687,16 @@ def _refine_once(
             lines.append(
                 f"[tool] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
             )
+        elif role == "assistant":
+            # An assistant reply routinely echoes or summarizes tool/web output
+            # the host already read this turn. Trusting it unconditionally lets
+            # attacker text laundered through one echo read back as the agent's
+            # own trusted observation. Give it the identical boundary and
+            # escaping tool records get, so "not instructions" applies to it too.
+            safe_record = _escape_foreign_tags(_strip_untrusted_tags(content))
+            lines.append(
+                f"[assistant] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
+            )
         else:
             lines.append(f"[{role}] {content}")
     evidence_text = "\n".join(lines)
