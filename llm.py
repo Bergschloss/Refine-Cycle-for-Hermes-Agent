@@ -764,7 +764,8 @@ def _valid_fingerprint(value: Any) -> str:
 
 def _overview_text(value: Any) -> str:
     """Sanitize untrusted host metadata into one physical prompt-line value."""
-    return re.sub(r"[\x00-\x1f\x7f]+", " ", scrub_text(str(value))).strip()
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", scrub_text(str(value))).strip()
+    return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _untrusted_json_record(label: str, content: Any) -> str:
@@ -1204,7 +1205,8 @@ def propose(
         max_chars=overview_max_chars,
     )
     corrections = "\n".join(
-        f"  - {item[:200]}" for item in user_corrections[:5]
+        f"  - {item[:200].replace('<', '&lt;').replace('>', '&gt;')}"
+        for item in user_corrections[:5]
     ) or "  (none)"
     unused_block = ""
     if unused_skills:

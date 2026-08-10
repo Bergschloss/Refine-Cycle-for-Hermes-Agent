@@ -329,7 +329,7 @@ def format_patterns(
                     r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+",
                     " ",
                     scrub_text(str(entry.get("tool") or "?")),
-                ),
+                ).replace("<", "&lt;").replace(">", "&gt;"),
                 sample=re.sub(
                     r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+",
                     " ",
