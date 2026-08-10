@@ -441,10 +441,21 @@ class RefineTests(unittest.TestCase):
 
     def test_error_patterns_carry_resolved_session_id(self):
         """Wave 2.2: error_items must use the resolved session, not the raw argument."""
+        # Need ≥3 identical errors to extract a pattern (threshold is 3)
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", "ERROR: request failed for /item/100", "http", now - 5, 1),
+            ("session", "tool", "ERROR: request failed for /item/200", "http", now - 4, 1),
+            ("session", "tool", "ERROR: request failed for /item/300", "http", now - 3, 1),
+            ("session", "user", "context message", "", now - 2, 1),
+            ("session", "assistant", "Retrying", "", now - 1, 1),
+        ])
         result = core.collect_evidence()  # no explicit session_id argument
-        for pattern in result.get("error_patterns", []):
-            # session_id in pattern items must be non-empty (the resolved value)
-            self.assertTrue(pattern.get("session_id") or pattern.get("sessions_seen", 0) >= 1)
+        pats = result.get("error_patterns", [])
+        self.assertTrue(len(pats) > 0, "Expected at least one error pattern")
+        for pattern in pats:
+            # sessions_seen must reflect the single session correctly
+            self.assertGreaterEqual(pattern.get("sessions_seen", 0), 1)
         # The returned session_id must be the resolved one
         self.assertEqual(result["session_id"], "session")
 
