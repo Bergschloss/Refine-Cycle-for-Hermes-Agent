@@ -887,6 +887,25 @@ class RefineTests(unittest.TestCase):
                 self.assertNotIn("user", result)
                 self.assertNotIn("s3cret", result)
 
+    def test_content_retry_reuses_json_mode_after_schema_fallback(self):
+        name = "json-mode-content-retry"
+        initial = {
+            "action": "create", "kind": "skill", "name": name,
+            "content": "", "reason": "add guidance", "evidence": [],
+        }
+        model = MockLlm(
+            MockResult(None, text="not json"),
+            initial,
+            skill_proposal(name),
+        )
+        result = llm.propose(model, "evidence", [], [])
+        self.assertEqual(result["action"], "create")
+        self.assertEqual(len(model.calls), 3)
+        self.assertIn("json_schema", model.calls[0])
+        self.assertTrue(model.calls[1].get("json_mode"))
+        self.assertTrue(model.calls[2].get("json_mode"))
+        self.assertNotIn("json_schema", model.calls[2])
+
     def test_content_retry_preserves_original_metadata(self):
         """R7-04: production _finalize_edit retry preserves original metadata."""
         original_parsed = {

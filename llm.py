@@ -37,6 +37,9 @@ _PROPOSAL_ENVELOPE_TOKENS = 1024
 # core.py can read reported_model, output_tokens and latency after calling
 # propose(). Thread-local because the gateway may run concurrent refine passes.
 _call_meta = threading.local()
+# A schema rejection applies to one proposal only. Semantic retries reuse the
+# working JSON transport instead of retrying the known-bad schema path.
+_call_transport = threading.local()
 
 
 def last_call_meta() -> Dict[str, Any]:
@@ -469,6 +472,35 @@ def _propose_structured(
         **resolved_target,
     )
     system_prompt = scrub_text(REFINE_SYSTEM_PROMPT)
+
+    def _call_json_mode() -> _Reply:
+        call_started = time.time()
+        try:
+            result = llm.complete_structured(
+                system_prompt=system_prompt
+                + "\nReply with one JSON object only, without Markdown fences.",
+                json_mode=True,
+                **common,
+            )
+        except PluginLlmTrustError:
+            _record_call_meta(None, call_started)
+            raise
+        except Exception:
+            _record_call_meta(None, call_started)
+            raise
+        _record_call_meta(result, call_started)
+        reply = _salvage_parsed(result, requested_max_tokens=max_tokens)
+        if not reply.failure:
+            _call_meta.value["output_mode"] = (
+                "json_mode_salvage" if reply.salvaged else "json_mode"
+            )
+            _call_transport.preferred_output_mode = "json_mode"
+        return reply
+
+    if getattr(_call_transport, "preferred_output_mode", "") == "json_mode":
+        reply = _call_json_mode()
+        return reply.parsed or _incomplete_proposal(reply)
+
     call_started = time.time()
     schema_meta_recorded = False
     try:
@@ -499,26 +531,12 @@ def _propose_structured(
             "json_schema proposal failed (%s); falling back to json_mode",
             scrub_text(str(first_exc)),
         )
-        call_started = time.time()
         try:
-            result = llm.complete_structured(
-                system_prompt=system_prompt
-                + "\nReply with one JSON object only, without Markdown fences.",
-                json_mode=True,
-                **common,
-            )
+            reply = _call_json_mode()
         except PluginLlmTrustError:
-            _record_call_meta(None, call_started)
             raise
         except Exception as fallback_exc:
-            _record_call_meta(None, call_started)
             raise fallback_exc from first_exc
-        _record_call_meta(result, call_started)
-        reply = _salvage_parsed(result, requested_max_tokens=max_tokens)
-        if not reply.failure:
-            _call_meta.value["output_mode"] = (
-                "json_mode_salvage" if reply.salvaged else "json_mode"
-            )
         return reply.parsed or _incomplete_proposal(reply)
 
 
@@ -1216,6 +1234,7 @@ def propose(
 ) -> Dict[str, Any]:
     """Propose one edit; skill patches are regenerated from safe full content."""
     _call_meta.value = {}
+    _call_transport.preferred_output_mode = ""
     try:
         from . import patterns as _patterns
     except ImportError:
