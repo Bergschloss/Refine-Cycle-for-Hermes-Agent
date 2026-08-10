@@ -474,6 +474,7 @@ All keys live under `plugins.entries.refine`:
 | `skip_session_sources` | list[str] | `["cron"]` | Skip matching session sources before any trajectory messages are read; each skip is journaled without consuming edit budget. |
 | `cross_session_days` | int | `7` | Interactive cross-session look-back window. |
 | `cross_session_max_sessions` | int | `25` | Interactive session scan cap. |
+| `cross_session_max_rows` | int | `4000` | Maximum trajectory rows scanned by an interactive cross-session pass. |
 | `dedup_window_days` | int | `7` | Refuse an edit identical to a recent applied, pending, or prepared edit. |
 
 LLM trust policy (`plugins.entries.refine.llm`):

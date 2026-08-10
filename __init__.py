@@ -679,7 +679,17 @@ def _on_session_end(
                 handed_off = True
                 _run_auto_refine(session_id, cleanup_session_notes=True)
                 return
-            evidence = core.collect_evidence(session_id=session_id, limit=30)
+            # The row limit here must cover whatever auto_min_messages is
+            # configured to require, plus headroom for the reviewer path
+            # (config.reviewer_min_messages()). A hardcoded 30 silently capped
+            # collect_evidence's returned messages below any auto_min_messages
+            # above 30, so the len(messages) < auto_min_messages() gate could
+            # never see enough messages to open, however many real messages the
+            # session actually had.
+            preflight_limit = max(
+                30, config.auto_min_messages(), config.reviewer_min_messages()
+            )
+            evidence = core.collect_evidence(session_id=session_id, limit=preflight_limit)
             collection_status = str(evidence.get("collection_status", "ok"))
             if collection_status != "ok":
                 logger.warning(

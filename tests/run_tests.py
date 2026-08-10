@@ -788,6 +788,30 @@ class RefineTests(unittest.TestCase):
             with self.subTest(safe=safe):
                 self.assertEqual(sanitization.scrub_text(safe), safe)
 
+    def test_env_secret_redacts_through_leading_comments_and_spaces(self):
+        """R9 §10: reproduce-checked, did not reproduce as a bug. A leading
+        comment marker, leading whitespace, or extra spaces around '=' must
+        not let an env-style secret escape redaction."""
+        cases = (
+            "  API_KEY=abc123456789",
+            "# API_KEY=abc123456789",
+            "API_KEY  =  abc123456789",
+        )
+        for value in cases:
+            with self.subTest(value=value):
+                result = sanitization.scrub_text(value)
+                self.assertNotIn("abc123456789", result)
+                self.assertIn("[REDACTED]", result)
+
+    def test_normalize_error_is_idempotent(self):
+        """R9 §10: reproduce-checked, did not reproduce as a bug. Normalizing
+        already-normalized text must be a no-op, so double-normalization
+        cannot silently drift two calls apart."""
+        sample = "Error: connection to /users/8821 failed at 12:34:56"
+        once = patterns.normalize_error(sample)
+        twice = patterns.normalize_error(once)
+        self.assertEqual(once, twice)
+
     def test_url_credentials_with_colon_in_password(self):
         """Wave 3.4: URL with colon in password -> fully redacted."""
         result = sanitization.scrub_text("http://admin:my:pass@example.com")
@@ -2344,6 +2368,16 @@ class RefineTests(unittest.TestCase):
         # But actual nonnumeric secrets still are
         self.assertIn("[REDACTED]", sanitization.scrub_text("token=abcSecretValue123"))
 
+    def test_aws_access_and_temporary_session_keys_both_redact(self):
+        """R9 §10: AWS long-term (AKIA) and STS temporary (ASIA) key prefixes
+        both must redact; ASIA was missing from the fixed-pattern list."""
+        akia = "AKIA" + "D" * 16
+        asia = "ASIA" + "E" * 16
+        self.assertNotIn(akia, sanitization.scrub_text(akia))
+        self.assertNotIn(asia, sanitization.scrub_text(asia))
+        self.assertIn("[REDACTED]", sanitization.scrub_text(akia))
+        self.assertIn("[REDACTED]", sanitization.scrub_text(asia))
+
     def test_bearer_redaction_preserves_json_quoting(self):
         """R9 §4: the quote around a Bearer token must survive redaction, not
         just the token being gone -- otherwise the surrounding JSON breaks."""
@@ -2451,6 +2485,18 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(memory_entry["proposal"]["content"], FakeHost.memory_entries[-1])
         self.assertNotIn("memory-secret-123", FakeHost.memory_entries[-1])
         self.assertTrue(core.refine_rollback(memory_result["journal_id"])["success"])
+
+    def test_atomic_write_cleans_up_its_staging_file_on_failure(self):
+        """R9 §10: reproduce-checked, did not reproduce as a bug. If the final
+        atomic replace fails, the .tmp staging file it wrote to must not be
+        left behind as an orphan -- _atomic_write_text's except branch unlinks
+        it before re-raising."""
+        target = journal.backups_dir() / "orphan-check.bak"
+        with patch.object(journal, "_replace_with_retry", side_effect=OSError("simulated")):
+            with self.assertRaises(OSError):
+                journal._atomic_write_text(target, "content")
+        leftovers = [p for p in target.parent.iterdir() if p.name != target.name]
+        self.assertEqual(leftovers, [])
 
     def test_lock_unlink_retries_on_permission_error(self):
         """Wave 1.3: transient unlink failure must not leave a permanent deadlock."""
@@ -3183,6 +3229,30 @@ class RefineTests(unittest.TestCase):
             {"session_id": "session", "auto": True, "session_ending": False},
         )
         self.assertEqual(calls[0][2], "refine-auto")
+
+    def test_session_end_min_messages_above_thirty_still_fires(self):
+        """R9 §10: auto_min_messages configured above 30 must still be able to
+        fire the session-end trigger. collect_evidence(limit=30) used to cap
+        the returned message count before it was ever compared against
+        auto_min_messages, so any threshold above 30 was silently impossible to
+        reach no matter how many real messages a session actually had."""
+        FakeHost.entry_config().update({
+            "auto_enabled": True, "auto_turn_interval": 0, "auto_min_messages": 40,
+        })
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"message {i}", "", now - (60 - i), 1)
+            for i in range(40)
+        ])
+        started = threading.Event()
+        with patch.object(
+            core, "refine_run", side_effect=lambda **k: started.set() or {"success": True}
+        ):
+            plugin_init._on_session_end(session_id="session")
+            self.assertTrue(started.wait(1))
+        deadline = time.monotonic() + 1
+        while plugin_init._AUTO_THREAD_GUARD.locked() and time.monotonic() < deadline:
+            time.sleep(0.01)
 
     def test_session_end_keeps_minimum_message_trigger_when_turn_trigger_is_disabled(self):
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 0})
