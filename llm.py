@@ -64,38 +64,64 @@ def _record_call_meta(result: Any, started: float) -> None:
 
 _UNTRUSTED_OPEN_TAG = "<untrusted_tool_result>"
 _UNTRUSTED_CLOSE_TAG = "</untrusted_tool_result>"
+_TRAJECTORY_ROLE_PREFIX = re.compile(
+    r"^\[(?:user|assistant|tool|system|unknown)\] <untrusted_tool_result>"
+)
+_TRAJECTORY_OMITTED = "[malformed trajectory record omitted]"
+_TRAJECTORY_OVERSIZED = "[oversized trajectory record omitted]"
+
+
+def _safe_trajectory_record(line: str) -> str:
+    """Accept only the canonical one-line wrapper when reserved tags appear."""
+    has_boundary = _UNTRUSTED_OPEN_TAG in line or _UNTRUSTED_CLOSE_TAG in line
+    if not has_boundary:
+        return line
+    if (
+        _TRAJECTORY_ROLE_PREFIX.match(line)
+        and line.endswith(_UNTRUSTED_CLOSE_TAG)
+        and line.count(_UNTRUSTED_OPEN_TAG) == 1
+        and line.count(_UNTRUSTED_CLOSE_TAG) == 1
+    ):
+        return line
+    # Never manufacture a trusted opener around payload text. Current rendering
+    # emits one complete physical line per record; any other reserved-tag shape
+    # is foreign or legacy malformed input and is safer to omit than to repair.
+    return _TRAJECTORY_OMITTED
 
 
 def _bounded_trajectory(text: str) -> str:
-    """Keep complete rendered records so truncation cannot split trust tags."""
-    if len(text) <= TRAJECTORY_MAX_CHARS:
-        return text
+    """Keep complete canonical records within the hard trajectory character cap."""
+    limit = max(0, int(TRAJECTORY_MAX_CHARS))
+    if limit == 0:
+        return ""
+    records = [_safe_trajectory_record(line) for line in text.split("\n")]
+    normalized = "\n".join(records)
+    if len(normalized) <= limit:
+        return normalized
     logger.warning(
         "Trajectory truncated from %d to at most %d characters",
-        len(text),
-        TRAJECTORY_MAX_CHARS,
+        len(normalized),
+        limit,
     )
     kept: List[str] = []
     used = 0
-    for line in reversed(text.split("\n")):
+    for line in reversed(records):
         addition = len(line) + (1 if kept else 0)
-        if addition > TRAJECTORY_MAX_CHARS:
+        if addition > limit:
             if not kept:
-                kept.append("[oversized trajectory record omitted]")
+                marker = _TRAJECTORY_OVERSIZED[:limit]
+                if marker:
+                    kept.append(marker)
+                    used = len(marker)
             break
-        if used + addition > TRAJECTORY_MAX_CHARS:
+        if used + addition > limit:
             break
         kept.append(line)
         used += addition
     result = "\n".join(reversed(kept))
-    # Truncation cuts on line boundaries, so a multi-line tool record can still
-    # lose its opening tag while its closing tag survives — the untrusted text
-    # between them would then read as trusted trajectory. Re-open exactly as
-    # many boundaries as are missing rather than let one leak unmarked.
-    deficit = result.count(_UNTRUSTED_CLOSE_TAG) - result.count(_UNTRUSTED_OPEN_TAG)
-    if deficit > 0:
-        result = (_UNTRUSTED_OPEN_TAG + "\n") * deficit + result
-    return result
+    # No bytes are added after accounting. Keep this defensive slice so future
+    # marker or separator changes cannot silently turn the advertised cap soft.
+    return result[:limit]
 
 
 def _pinned_target() -> Dict[str, str]:

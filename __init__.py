@@ -679,18 +679,15 @@ def _on_session_end(
                 handed_off = True
                 _run_auto_refine(session_id, cleanup_session_notes=True)
                 return
-            # The row limit here must cover whatever auto_min_messages is
-            # configured to require, plus headroom for the reviewer path
-            # (config.reviewer_min_messages()). A hardcoded 30 silently capped
-            # collect_evidence's returned messages below any auto_min_messages
-            # above 30, so the len(messages) < auto_min_messages() gate could
-            # never see enough messages to open, however many real messages the
-            # session actually had.
-            preflight_limit = max(
-                30, config.auto_min_messages(), config.reviewer_min_messages()
+            # Session-end only gates on ``auto_min_messages``. Count at most that
+            # many active rows without selecting role/content/tool payloads; the
+            # actual refine pass is the single owner of full evidence collection
+            # and independently sizes its reviewer window when that path is on.
+            message_threshold = config.auto_min_messages()
+            preflight = core.count_session_messages(
+                session_id=session_id, limit=message_threshold
             )
-            evidence = core.collect_evidence(session_id=session_id, limit=preflight_limit)
-            collection_status = str(evidence.get("collection_status", "ok"))
+            collection_status = str(preflight.get("collection_status", "ok"))
             if collection_status != "ok":
                 logger.warning(
                     "refine auto: evidence unavailable (%s); recording durable failure",
@@ -699,7 +696,7 @@ def _on_session_end(
                 entry_id = core.record_evidence_failure(
                     session_id,
                     collection_status,
-                    str(evidence.get("collection_error", "")),
+                    str(preflight.get("collection_error", "")),
                     trigger="auto",
                 )
                 if not entry_id:
@@ -708,9 +705,9 @@ def _on_session_end(
                         f"Evidence failure {collection_status} could not be journaled",
                     )
                 return
-            messages = evidence.get("messages", [])
-            if len(messages) < config.auto_min_messages():
-                logger.debug("refine auto: not enough messages (%d)", len(messages))
+            message_count = int(preflight.get("count", 0) or 0)
+            if message_count < message_threshold:
+                logger.debug("refine auto: not enough messages (%d)", message_count)
                 return
             handed_off = True
             _run_auto_refine(session_id, cleanup_session_notes=True)

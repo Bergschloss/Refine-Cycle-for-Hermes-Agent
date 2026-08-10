@@ -432,6 +432,66 @@ def _is_correction(content: str) -> bool:
     return any(re.search(pattern, text) for pattern in strong)
 
 
+def count_session_messages(
+    session_id: Optional[str] = None, *, limit: int
+) -> Dict[str, Any]:
+    """Count up to ``limit`` active rows without reading trajectory payloads.
+
+    Session-end only needs to know whether the minimum-message gate is reached.
+    Selecting content there duplicated the real refine pass, exposed private rows
+    to needless processing, and let an unrelated reviewer threshold make the
+    preflight arbitrarily large. This query stays on the shared read-only DB path
+    and preserves the same distinguishable collection failures as evidence.
+    """
+    result: Dict[str, Any] = {
+        "count": 0,
+        "session_id": "",
+        "session_id_source": "unknown",
+        "collection_status": "session_unknown",
+        "collection_error": "",
+    }
+    resolved, how = resolve_session_id(session_id or "")
+    result["session_id"] = resolved
+    result["session_id_source"] = how
+    if not resolved:
+        return result
+    db_path = config.state_db_path()
+    if not db_path.is_file():
+        result["collection_status"] = "db_absent"
+        return result
+    connection = _open_db()
+    if not connection:
+        result["collection_status"] = "db_unavailable"
+        return result
+    try:
+        sql = (
+            "SELECT COUNT(*) AS n FROM ("
+            "SELECT 1 FROM messages m "
+            "LEFT JOIN sessions s ON s.id = m.session_id "
+            "WHERE m.session_id = ? AND m.active = 1"
+        )
+        params: List[Any] = [resolved]
+        skipped_sources = config.skip_session_sources()
+        if skipped_sources:
+            placeholders = ",".join("?" for _ in skipped_sources)
+            sql += f" AND (s.source IS NULL OR LOWER(s.source) NOT IN ({placeholders}))"
+            params.extend(skipped_sources)
+        sql += " LIMIT ?)"
+        params.append(max(1, int(limit)))
+        row = connection.execute(sql, tuple(params)).fetchone()
+        result["count"] = int(row["n"] or 0) if row else 0
+        result["collection_status"] = "ok"
+        return result
+    except Exception as exc:
+        safe_error = scrub_text(str(exc))
+        logger.warning("Current-session count query failed: %s", safe_error)
+        result["collection_status"] = "query_error"
+        result["collection_error"] = safe_error[:300]
+        return result
+    finally:
+        connection.close()
+
+
 def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[str, Any]:
     empty = {
         "messages": [],
@@ -1703,7 +1763,14 @@ def _refine_once(
                 f"[assistant] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
             )
         else:
-            lines.append(f"[{role}] {content}")
+            # Every historical role is evidence supplied to a second model, not
+            # trusted control text. Wrap and escape user/system/unknown records
+            # just like assistant/tool records so a forged closing boundary or
+            # <system> tag can never become structure during later truncation.
+            safe_record = _escape_foreign_tags(_strip_untrusted_tags(content))
+            lines.append(
+                f"[{role}] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
+            )
     evidence_text = "\n".join(lines)
     proposal_context = safe_reason
     reviewer_context = ""

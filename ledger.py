@@ -427,25 +427,30 @@ def audit(
         if version >= 3 and verdict == "unclear":
             verdict = "churning"
 
-        # A skill can be edited by something other than refine -- Hermes's own
-        # background review writes to the same skills. If the host's current
-        # content no longer matches what refine last applied, a "working" or
-        # "did not help" verdict here would be crediting refine for an outcome
-        # it does not own. Read-only: never reconciled, reverted, or re-applied.
+        # A skill can be edited or removed by something other than refine --
+        # Hermes's own background review writes to the same skills. Once the
+        # current target differs from what refine last applied, *every*
+        # effectiveness verdict is unreliable: "unused" and "churning" are no
+        # safer to act on than "working". Read-only: never reconcile, recreate,
+        # revert, or re-apply the target here.
         externally_modified = False
+        external_change = ""
         if meta.get("kind", "skill") == "skill" and outcome == "applied":
             intended_digest = intended_skill_digests.get(name)
             if intended_digest:
                 current_baseline = journal.skill_baseline(name)
-                if (
-                    current_baseline is not None
-                    and current_baseline.get("exists")
-                    and current_baseline.get("sha256")
-                    and current_baseline["sha256"] != intended_digest
-                ):
+                if current_baseline is not None:
+                    if current_baseline.get("exists") is False:
+                        external_change = "removed"
+                    elif (
+                        current_baseline.get("exists") is True
+                        and current_baseline.get("sha256")
+                        and current_baseline["sha256"] != intended_digest
+                    ):
+                        external_change = "modified"
+                if external_change:
                     externally_modified = True
-                    if verdict in ("working", "did not help"):
-                        verdict = "unreliable — externally modified"
+                    verdict = f"unreliable — externally {external_change}"
 
         rows.append({
             "name": name,
@@ -507,11 +512,15 @@ def format_audit(rows: List[Dict[str, Any]]) -> str:
             lines.append(f"      model: {reported_model[:40]}")
         if row.get("externally_modified"):
             lines.append(
-                "      ⚠ modified since refine's edit by something else "
+                "      ⚠ modified or removed since refine's edit by something else "
                 "(e.g. Hermes background review) — verdict is not reliable"
             )
 
-    candidates = [row for row in rows if row["verdict"] in ("unused", "did not help")]
+    candidates = [
+        row for row in rows
+        if row["verdict"] in ("unused", "did not help")
+        and not row.get("externally_modified")
+    ]
     if candidates:
         lines.extend(["", "Candidates for removal:"])
         for row in candidates:
