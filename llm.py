@@ -62,6 +62,10 @@ def _record_call_meta(result: Any, started: float) -> None:
     _call_meta.value = meta
 
 
+_UNTRUSTED_OPEN_TAG = "<untrusted_tool_result>"
+_UNTRUSTED_CLOSE_TAG = "</untrusted_tool_result>"
+
+
 def _bounded_trajectory(text: str) -> str:
     """Keep complete rendered records so truncation cannot split trust tags."""
     if len(text) <= TRAJECTORY_MAX_CHARS:
@@ -83,7 +87,15 @@ def _bounded_trajectory(text: str) -> str:
             break
         kept.append(line)
         used += addition
-    return "\n".join(reversed(kept))
+    result = "\n".join(reversed(kept))
+    # Truncation cuts on line boundaries, so a multi-line tool record can still
+    # lose its opening tag while its closing tag survives — the untrusted text
+    # between them would then read as trusted trajectory. Re-open exactly as
+    # many boundaries as are missing rather than let one leak unmarked.
+    deficit = result.count(_UNTRUSTED_CLOSE_TAG) - result.count(_UNTRUSTED_OPEN_TAG)
+    if deficit > 0:
+        result = (_UNTRUSTED_OPEN_TAG + "\n") * deficit + result
+    return result
 
 
 def _pinned_target() -> Dict[str, str]:
