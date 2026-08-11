@@ -156,7 +156,7 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
         | prefer\s+(?:unified|concise|clear|minimal)\s+(?:format|response|summary)
         | redact\s+(?:credentials?|secrets?|sensitive\s+(?:data|values?)|api[_-]?key(?:\s*=\s*["']?\[REDACTED\]["']?)?)
         | reject\s+(?:it|the\s+(?:invalid\s+)?(?:target|request|response|result))
-        | retry\s+(?:the\s+|this\s+)?request
+        | retry\s+(?:the\s+|this\s+)?(?:request|proposal)(?:\s+with\s+(?:a\s+|an\s+)?(?:different|alternative|new)\s+\w+)?[.]?
         | summarize\s+(?:the\s+)?(?:common\s+cause|error|failure|result|outcome)
         | use\s+the\s+(?:supplied|provided|exact)\s+(?:spelling|name|format)
         | wait\s+for\s+(?:clarification|confirmation|approval|input)
