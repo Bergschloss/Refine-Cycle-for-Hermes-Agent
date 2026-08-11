@@ -446,10 +446,13 @@ plugins:
 ```
 
 Model availability depends on provider, account, and region. A `403 RegionError`
-identifies the provider that actually received the request; check
-`llm_meta.reported_provider` and `reported_model`. If an autorun unexpectedly
-reports a fallback provider, invoke the registered tool inside an active gateway
-turn rather than constructing a standalone plugin client.
+means the provider received the request and refused that model — commonly an
+account or region restriction that needs an explicit opt-in with the provider.
+Because refine inherits the live main model, a restricted main model makes refine
+fail for as long as the main model does; the fix is to opt in or select an
+available model with `hermes model`, not to pin refine elsewhere. Check
+`llm_meta.reported_provider` and `reported_model` to see which target was
+actually refused.
 
 Both `allow_*` flags are fail-closed in Hermes: with them off, a pinned value is
 refused rather than applied. Leave `provider`/`model` unset to inherit the live
