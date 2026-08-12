@@ -107,7 +107,13 @@ _LEGACY_IPV4_OVERFLOW = re.compile(
 )
 _SHORT_DECIMAL_IPV4_LITERAL = re.compile(r"(?<![\w.])(?:0|[1-9]\d{0,5})(?![\w.])")
 _HTTP_STATUS_REFERENCE = re.compile(
-    r"(?i)(?:\b(?:the\s+)?(?:request|response)\s+returns?\s+|\b(?:exit|status|error)\s+code\s+)(\d{1,3})\b"
+    r"""(?ix)
+    (?:
+        \b(?:the\s+)?(?:request|response)\s+returns?\s+|\b(?:exit|status|error)\s+code\s+|\bHTTP\s+
+    )(\d{1,3})\b
+    |
+    \b(\d{3})(?=\s+(?:errors?|RegionError|Unauthorized|Forbidden|NotFound|BadRequest|Timeout|error)\b)
+    """
 )
 _OVERRIDE_INTENT = re.compile(
     r"(?i)\b(?:ignore|disregard|override|bypass|skip|forget|regardless of|instead of)\b"
@@ -239,7 +245,11 @@ def _has_host_reference(text: str) -> bool:
         or _LEGACY_IPV4_OVERFLOW.search(text)
     ):
         return True
-    status_spans = [match.span(1) for match in _HTTP_STATUS_REFERENCE.finditer(text)]
+    status_spans: list[tuple[int, int]] = []
+    for m in _HTTP_STATUS_REFERENCE.finditer(text):
+        for gi in range(1, (m.lastindex or 0) + 1):
+            if m.group(gi) is not None:
+                status_spans.append(m.span(gi))
     return any(
         match.span() not in status_spans
         for match in _SHORT_DECIMAL_IPV4_LITERAL.finditer(text)
