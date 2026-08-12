@@ -147,14 +147,26 @@ _PROMPT_NOTE_SAFE_TARGET = r"""
 (?:endpoint|parameters?|target|response|result|output|value|shape|error|failure|tests?|request|details?)
 (?:\s+(?:and|or|the|this|its|expected|relevant|exact|endpoint|parameters?|target|response|result|output|value|shape|error|failure|tests?|request|details?))*
 """
+# What a "verify X by checking Y" action may name as the thing consulted.
+# Deliberately a closed noun list: an earlier revision ended this clause with
+# ``.*``, which made the allowlist accept any trailing text on the line and
+# turned a bounded policy form into free-form injected guidance.
+_PROMPT_NOTE_SAFE_SOURCE = r"""
+(?:the\s+)?(?:active|current|expected|configured|actual)?\s*
+(?:
+    hermes\s+(?:config|status|logs)
+    | config|status|logs|output|response|result|value|model|provider
+    | error|failure|tests?|parameters?|details?|endpoint|target
+)
+"""
 _PROMPT_NOTE_SAFE_ACTION = re.compile(
     rf"""(?ix)
     (?:
-        (?:check|confirm|inspect|verify)\s+(?:{_PROMPT_NOTE_SAFE_TARGET})(?:\s+before\s+(?:acting|continuing)|\s+by\s+(?:checking|inspecting|verifying|confirming|running)\s+(?:the\s+)?(?:active|current|expected|configured|actual|hermes\s+(?:config|status|logs))?(?:\s+and\s+(?:checking|inspecting|verifying)\s+.*)?)?
+        (?:check|confirm|inspect|verify)\s+(?:{_PROMPT_NOTE_SAFE_TARGET})(?:\s+before\s+(?:acting|continuing)|\s+by\s+(?:checking|inspecting|verifying|confirming|running)\s+(?:{_PROMPT_NOTE_SAFE_SOURCE})(?:\s+and\s+(?:checking|inspecting|verifying|confirming)\s+(?:{_PROMPT_NOTE_SAFE_SOURCE})){{0,2}})?
         | confirm\s+it(?:\s+before\s+acting)?
         | confirm\s+it['’]s\s+clear,\s+concise,\s+and\s+accurate
         | avoid\s+(?:unsupported\s+claims|speculation|unnecessary\s+changes)
-        | ask\s+(?:for\s+clarification|(?:a|one)\s+focused\s+question)(?:\s+instead\s+of\s+.+?)?
+        | ask\s+(?:for\s+clarification|(?:a|one)\s+focused\s+question)(?:\s+instead\s+of\s+(?:retrying|guessing|assuming|proceeding|continuing)(?:\s+(?:the\s+)?(?:same\s+|exact\s+)?(?:command|request|call|step|proposal|action))?)?
         | follow\s+(?:the\s+)?(?:old|current|existing|established)\s+(?:policy|guidance)
         | keep\s+(?:the\s+)?(?:response|result|scope|change|policy)\s+(?:narrow|concise|minimal|focused)
         | log\s+(?:the\s+)?(?:error|failure|outcome)
