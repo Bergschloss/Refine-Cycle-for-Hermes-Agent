@@ -107,7 +107,7 @@ _LEGACY_IPV4_OVERFLOW = re.compile(
 )
 _SHORT_DECIMAL_IPV4_LITERAL = re.compile(r"(?<![\w.])(?:0|[1-9]\d{0,5})(?![\w.])")
 _HTTP_STATUS_REFERENCE = re.compile(
-    r"(?i)\b(?:the\s+)?(?:request|response)\s+returns?\s+([1-5]\d{2})\b"
+    r"(?i)(?:\b(?:the\s+)?(?:request|response)\s+returns?\s+|\b(?:exit|status|error)\s+code\s+)(\d{1,3})\b"
 )
 _OVERRIDE_INTENT = re.compile(
     r"(?i)\b(?:ignore|disregard|override|bypass|skip|forget|regardless of|instead of)\b"
@@ -148,7 +148,7 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
         | confirm\s+it(?:\s+before\s+acting)?
         | confirm\s+it['’]s\s+clear,\s+concise,\s+and\s+accurate
         | avoid\s+(?:unsupported\s+claims|speculation|unnecessary\s+changes)
-        | ask\s+(?:for\s+clarification|(?:a|one)\s+focused\s+question)
+        | ask\s+(?:for\s+clarification|(?:a|one)\s+focused\s+question)(?:\s+instead\s+of\s+.+?)?
         | follow\s+(?:the\s+)?(?:old|current|existing|established)\s+(?:policy|guidance)
         | keep\s+(?:the\s+)?(?:response|result|scope|change|policy)\s+(?:narrow|concise|minimal|focused)
         | log\s+(?:the\s+)?(?:error|failure|outcome)
@@ -1367,7 +1367,7 @@ def _prompt_note_content_error(
         if any(_has_host_reference(line) for line in lines):
             return "Prompt note cannot reference hosts"
         return "Prompt note cannot reference file paths or environment variables"
-    if any(_OVERRIDE_INTENT.search(line) for line in lines):
+    if any(_CONTEXT_OVERRIDE_INTENT.search(line) for line in lines):
         return "Prompt note cannot override prior guidance"
     for line in lines:
         condition_match = _PROMPT_NOTE_CONDITION.match(line)
