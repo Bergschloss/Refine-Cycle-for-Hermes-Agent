@@ -156,7 +156,7 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
         | prefer\s+(?:unified|concise|clear|minimal)\s+(?:format|response|summary)
         | redact\s+(?:credentials?|secrets?|sensitive\s+(?:data|values?)|api[_-]?key(?:\s*=\s*["']?\[REDACTED\]["']?)?)
         | reject\s+(?:it|the\s+(?:invalid\s+)?(?:target|request|response|result))
-        | retry\s+(?:the\s+|this\s+)?(?:request|proposal)(?:\s+with\s+(?:a\s+|an\s+)?(?:different|alternative|new)\s+\w+)?[.]?
+        | retry\s+(?:the\s+|this\s+)?(?:request|proposal)(?:\s+with\s+(?:(?:a\s+|an\s+)?(?:different|alternative|new)\s+\w+|'[^']+'\s+instead\s+of\s+'[^']+'))?[.]?
         | summarize\s+(?:the\s+)?(?:common\s+cause|error|failure|result|outcome)
         | use\s+the\s+(?:supplied|provided|exact)\s+(?:spelling|name|format)
         | wait\s+for\s+(?:clarification|confirmation|approval|input)
@@ -165,6 +165,7 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
         | (?:always\s+)?include\s+both\s+path\s+and\s+content\s+fields?
         | (?:always\s+)?include\s+both\s+required\s+fields?\s*:\s*path\s+and\s+content
         | ask\s+before\s+retrying(?:\s+(?:a|the)\s+third\s+time)?
+        | stop\s+retrying\s+and\s+ask\s+for\s+(?:the\s+)?(?:correct\s+)?(?:command|clarification|input|help)
         | check\s+timing\s+assumptions\s+before\s+rerunning
         | mention\s+which\s+sections\s+were\s+skipped
     )\.?
