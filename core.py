@@ -144,7 +144,7 @@ _PROMPT_NOTE_SAFE_TARGET = r"""
 _PROMPT_NOTE_SAFE_ACTION = re.compile(
     rf"""(?ix)
     (?:
-        (?:check|confirm|inspect|verify)\s+(?:{_PROMPT_NOTE_SAFE_TARGET})(?:\s+before\s+(?:acting|continuing))?
+        (?:check|confirm|inspect|verify)\s+(?:{_PROMPT_NOTE_SAFE_TARGET})(?:\s+before\s+(?:acting|continuing)|\s+by\s+(?:checking|inspecting|verifying|confirming|running)\s+(?:the\s+)?(?:active|current|expected|configured|actual|hermes\s+(?:config|status|logs))?(?:\s+and\s+(?:checking|inspecting|verifying)\s+.*)?)?
         | confirm\s+it(?:\s+before\s+acting)?
         | confirm\s+it['’]s\s+clear,\s+concise,\s+and\s+accurate
         | avoid\s+(?:unsupported\s+claims|speculation|unnecessary\s+changes)
