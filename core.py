@@ -1492,6 +1492,16 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _host_tool_result(raw: Any) -> Dict[str, Any]:
+    """Normalize a host tool result, which is either a dict or a JSON string."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"success": False, "error": str(raw)}
+
+
 def _apply_skill(proposal: Dict[str, Any]) -> Dict[str, Any]:
     from tools.skill_manager_tool import skill_manage
 
@@ -1502,16 +1512,15 @@ def _apply_skill(proposal: Dict[str, Any]) -> Dict[str, Any]:
         content=proposal["content"],
         category=proposal.get("category") or None,
     )
-    if isinstance(raw, dict):
-        return raw
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {"success": False, "error": str(raw)}
+    return _host_tool_result(raw)
 
 
 def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
-    from tools.memory_tool import MemoryStore
+    # ``memory_tool`` is the entry point that owns the host's ``write_approval``
+    # gate; ``MemoryStore.add`` performs the write with no gate at all. Calling
+    # the store directly made refine the one writer that could never be staged,
+    # so a host configured to require approval for memory was silently bypassed.
+    from tools.memory_tool import MemoryStore, memory_tool
 
     # ``kind`` is constrained to skill/memory/prompt by REFINE_PROPOSAL_SCHEMA's
     # enum, so a proposal reaching this function is always kind="memory" and the
@@ -1523,7 +1532,11 @@ def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": f"Unknown memory action: {proposal.get('action')}"}
     store = MemoryStore()
     store.load_from_disk()
-    result = store.add(target, proposal["content"])
+    result = _host_tool_result(
+        memory_tool(action="add", target=target, content=proposal["content"], store=store)
+    )
+    # The gated entry point mutates the in-memory store but leaves persistence to
+    # its caller, exactly as the direct store call did.
     if result.get("success") and not result.get("staged"):
         store.save_to_disk(target)
     return result

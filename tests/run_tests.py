@@ -273,13 +273,9 @@ def install_fake_host():
             return FakeHost.user_entries if target == "user" else FakeHost.memory_entries
 
         def add(self, target, content):
-            if FakeHost.stage_writes:
-                pending_id = FakeHost.next_pending_id(target)
-                FakeHost.pending[("memory", pending_id)] = {
-                    "target": target,
-                    "content": content,
-                }
-                return {"success": True, "staged": True, "pending_id": pending_id}
+            # Mirrors the host: the store itself performs the write. The
+            # ``write_approval`` gate lives in ``memory_tool`` below, not here,
+            # so a caller that reaches the store directly is never gated.
             self._entries_for(target).append(content)
             return {"success": True}
 
@@ -289,11 +285,42 @@ def install_fake_host():
                 "\n\n---\n\n".join(self._entries_for(target)), encoding="utf-8"
             )
 
+    def memory_tool(action, target="memory", content=None, old_text=None, store=None):
+        """The gated host entry point, in the host's own validation order."""
+        if store is None:
+            return json.dumps({"success": False, "error": "Memory is not available."})
+        if target not in {"memory", "user"}:
+            return json.dumps({
+                "success": False, "error": f"Invalid target '{target}'."
+            })
+        if action == "add" and not content:
+            return json.dumps({
+                "success": False, "error": "Content is required for 'add' action."
+            })
+        if action not in {"add", "replace", "remove"}:
+            return json.dumps({
+                "success": False, "error": f"Unknown action '{action}'."
+            })
+        if FakeHost.stage_writes:
+            pending_id = FakeHost.next_pending_id(target)
+            FakeHost.pending[("memory", pending_id)] = {
+                "action": action,
+                "target": target,
+                "content": content,
+            }
+            return json.dumps({
+                "success": True, "staged": True, "pending_id": pending_id
+            })
+        if action == "add":
+            return json.dumps(store.add(target, content))
+        return json.dumps({"success": False, "error": f"unsupported {action}"})
+
     skills.skill_view = skill_view
     manager.skill_manage = skill_manage
     usage.is_agent_created = lambda name: name in FakeHost.agent_created
     usage.get_usage_count = lambda name: FakeHost.usage_counts.get(name, 0)
     memory.MemoryStore = MemoryStore
+    memory.memory_tool = memory_tool
     memory.get_memory_dir = lambda: str(FakeHost.root)
     approval.get_pending = lambda subsystem, pending_id: FakeHost.pending.get(
         (subsystem, pending_id)
@@ -9231,6 +9258,50 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 self.assertFalse(journal._prepared_is_abandoned({"ts": ts}))
         self.assertFalse(journal._prepared_is_abandoned({}))
         self.assertTrue(journal._prepared_is_abandoned({"ts": 0.0}))
+
+    def test_memory_apply_goes_through_the_gated_host_entry_point(self):
+        """``write_approval`` lives in ``memory_tool``; ``MemoryStore`` has no gate.
+
+        Writing through the store directly made refine the one memory writer the
+        host could never stage, so a host configured to require approval for
+        memory was bypassed without any error.
+        """
+        memory_module = sys.modules["tools.memory_tool"]
+        original = memory_module.memory_tool
+        calls = []
+
+        def recording(**kwargs):
+            calls.append(kwargs)
+            return original(**kwargs)
+
+        memory_module.memory_tool = recording
+        try:
+            result = self.run_proposal({
+                "action": "create", "kind": "memory", "name": "gated-lesson",
+                "content": "a durable lesson", "reason": "why", "evidence": [],
+            })
+        finally:
+            memory_module.memory_tool = original
+        self.assertTrue(result["success"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["action"], "add")
+        self.assertEqual(calls[0]["target"], "memory")
+        self.assertEqual(calls[0]["content"], "a durable lesson")
+        self.assertIn("a durable lesson", FakeHost.memory_entries)
+
+    def test_memory_write_stages_when_the_host_requires_approval(self):
+        FakeHost.stage_writes = True
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "staged-lesson",
+            "content": "withheld until approved", "reason": "why", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "pending_approval")
+        self.assertTrue(entry["pending_id"])
+        # The write is reserved, not performed.
+        self.assertEqual(FakeHost.memory_entries, [])
+        self.assertFalse(result["reversible"])
 
     def test_session_end_waits_off_callback_then_journals_evidence_failure(self):
         preflight = {
