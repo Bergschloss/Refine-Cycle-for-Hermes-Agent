@@ -9150,6 +9150,88 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(row["outcome"], "prepared")
         self.assertEqual(row["verdict"], "recovery needed")
 
+    def _prepared_entry_that_never_landed(self) -> str:
+        """A prepared record whose skill is absent, so the edit provably failed."""
+        entry_id = journal.prepare(
+            trigger="manual", reason="pass died mid-apply", session_id="session",
+            proposal=skill_proposal("never-landed"),
+            recovery={"type": "skill_create", "name": "never-landed"},
+        )
+        self.assertEqual(journal.count_today_applied(), 1)
+        self.assertIs(
+            journal.target_matches_applied(journal.get_entry(entry_id)), False
+        )
+        return entry_id
+
+    def test_abandoned_prepared_entry_stops_holding_the_daily_budget(self):
+        """A prepared record left by a dead pass must not cost an edit forever.
+
+        ``count_today_applied`` counts ``prepared`` as consumed, and reconcile
+        only ever advanced it on a positive target match, so a pass killed
+        between the backup and the host write burned one of the three daily
+        edits permanently.
+        """
+        entry_id = self._prepared_entry_that_never_landed()
+        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            journal.reconcile()
+        entry = journal.get_entry(entry_id)
+        self.assertEqual(entry["outcome"], "error")
+        self.assertIn("never landed", entry["error"])
+        self.assertEqual(journal.count_today_applied(), 0)
+        # Abandoning the record must not invent a host mutation.
+        self.assertNotIn("never-landed", FakeHost.skills)
+
+    def test_recent_prepared_entry_is_left_alone_while_a_write_may_be_in_flight(self):
+        """Age is the only thing separating a corpse from a live mutation."""
+        entry_id = self._prepared_entry_that_never_landed()
+        journal.reconcile()
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        self.assertEqual(journal.count_today_applied(), 1)
+
+    def test_prepared_entry_is_left_alone_when_target_state_is_unreadable(self):
+        """Unknown host state is not proof the edit failed."""
+        entry_id = self._prepared_entry_that_never_landed()
+        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0), patch.object(
+            journal, "target_matches_applied", return_value=None
+        ):
+            journal.reconcile()
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        self.assertEqual(journal.count_today_applied(), 1)
+
+    def test_prepared_is_not_abandoned_while_another_pass_holds_the_lock(self):
+        """A slow host write can outlive the age threshold, so re-check under the lock."""
+        entry_id = self._prepared_entry_that_never_landed()
+        holding = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            with journal.mutation_lock():
+                holding.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=holder, daemon=True, name="lock-holder")
+        thread.start()
+        try:
+            self.assertTrue(holding.wait(10))
+            with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+                journal.reconcile()
+            self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        finally:
+            release.set()
+            thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        # Once no other pass is mutating, the same call resolves the record.
+        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            journal.reconcile()
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "error")
+
+    def test_prepared_abandonment_needs_a_usable_timestamp(self):
+        for ts in (None, "recent", True, float("nan")):
+            with self.subTest(ts=ts):
+                self.assertFalse(journal._prepared_is_abandoned({"ts": ts}))
+        self.assertFalse(journal._prepared_is_abandoned({}))
+        self.assertTrue(journal._prepared_is_abandoned({"ts": 0.0}))
+
     def test_session_end_waits_off_callback_then_journals_evidence_failure(self):
         preflight = {
             "count": 0,

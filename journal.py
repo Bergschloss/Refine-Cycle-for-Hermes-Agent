@@ -74,6 +74,13 @@ _JOURNAL_IMMUTABLE_FIELDS = (
     "id", "ts", "trigger", "reason", "session_id", "proposal",
     "backup_path", "snapshot", "group", "llm_meta",
 )
+# How long a ``prepared`` record may sit before reconciliation treats it as the
+# remains of a dead pass rather than a mutation in flight. Generous on purpose:
+# the alternative to waiting is declaring a live edit failed, and only ``ts`` and
+# the target state distinguish the two. ``prepared`` counts against the daily
+# budget, so a record that never resolves costs one of three edits until this
+# elapses.
+_ABANDONED_PREPARED_SECONDS = 900.0
 
 
 def prompt_note_content_is_structurally_safe(content: Any) -> bool:
@@ -1834,6 +1841,22 @@ def rollback_target_matches(entry: Dict[str, Any]) -> Optional[bool]:
     return False
 
 
+def _prepared_is_abandoned(entry: Dict[str, Any]) -> bool:
+    """Whether a ``prepared`` record is too old for any pass to still own it.
+
+    ``prepared`` is the short window between "backup taken" and the host write
+    returning. A pass that dies inside that window leaves the record behind, and
+    because ``count_today_applied`` counts ``prepared`` as consumed, it burns one
+    of the day's three edits permanently. Age is what separates that corpse from
+    a mutation still in flight, so a missing or unusable timestamp means "not
+    abandoned" rather than "old enough".
+    """
+    ts = entry.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return False
+    return (time.time() - float(ts)) >= _ABANDONED_PREPARED_SECONDS
+
+
 def _pending_exists(subsystem: str, pending_id: str) -> Optional[bool]:
     """Return True/False for known approval state, None when host lookup failed."""
     if not pending_id:
@@ -1866,6 +1889,29 @@ def reconcile() -> List[Dict[str, Any]]:
                 applied_state = target_matches_applied(snapshot)
                 if applied_state is True:
                     changed.append(finalize(entry_id, "applied"))
+                    continue
+                if applied_state is False and _prepared_is_abandoned(snapshot):
+                    # Read-then-act: another pass may hold the lock precisely
+                    # because its own write is still in flight, and a slow host
+                    # call can outlive the age threshold. Only a pass that can
+                    # take the lock may declare the record abandoned, and it
+                    # re-proves both facts underneath it.
+                    with try_mutation_lock() as acquired:
+                        if not acquired:
+                            continue
+                        current = get_entry(entry_id)
+                        if not current or current.get("outcome") != "prepared":
+                            continue
+                        if target_matches_applied(current) is not False:
+                            continue
+                        changed.append(finalize(
+                            entry_id,
+                            "error",
+                            error=(
+                                "Abandoned while prepared: the host write never "
+                                "landed, so no edit was applied"
+                            ),
+                        ))
                 continue
             if outcome == "pending_approval":
                 pending = _pending_exists(subsystem, str(snapshot.get("pending_id", "")))
