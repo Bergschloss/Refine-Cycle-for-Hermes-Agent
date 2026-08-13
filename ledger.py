@@ -74,6 +74,11 @@ def _save_stats(stats: Dict[str, Any]) -> None:
         raise
 
 
+# Outcomes that leave nothing behind on the host, so they describe a record
+# rather than an artifact the audit can measure.
+_NO_ARTIFACT_OUTCOMES = frozenset({"error", "rejected"})
+
+
 def record_edit(
     proposal: Dict[str, Any],
     journal_id: str,
@@ -107,6 +112,14 @@ def record_edit(
         previous = stats.get(key, {})
         now = time.time()
         same_edit = previous.get("journal_id") == journal_id
+        # A record that left no artifact must not overwrite the row of a
+        # different edit that did. Rows are keyed by name, so an abandoned or
+        # rejected record for a name refine had legitimately edited before would
+        # otherwise reset created_ts, bump the version, replace journal_id, and
+        # relabel a live edit as failed -- losing the attribution of something
+        # still in effect.
+        if not same_edit and previous and outcome in _NO_ARTIFACT_OUTCOMES:
+            return
         created_ts = previous.get("created_ts", now) if same_edit else now
         previous_version = previous.get("version", 1 if previous else 0)
         version = previous_version if same_edit else previous_version + 1
@@ -408,6 +421,13 @@ def audit(
         elif outcome == "rejected":
             uses, usage_scope = None, "unavailable"
             verdict = "rejected"
+        elif outcome == "error":
+            # No artifact exists, so usage and usefulness are not questions that
+            # can be asked. Without this branch the row fell through to the
+            # applied path and was given a "did not help" / "unused" verdict for
+            # an edit that never landed.
+            uses, usage_scope = None, "unavailable"
+            verdict = "no edit landed"
         else:
             uses, usage_scope = _count_uses_with_scope(name, created)
             if fingerprint and patterns_available:

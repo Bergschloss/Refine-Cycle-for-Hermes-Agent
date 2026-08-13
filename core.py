@@ -1532,14 +1532,13 @@ def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": f"Unknown memory action: {proposal.get('action')}"}
     store = MemoryStore()
     store.load_from_disk()
-    result = _host_tool_result(
+    # No second save here. The host's ``add`` re-reads under its own file lock,
+    # appends, and persists inside that lock. A save from out here would rewrite
+    # the whole file without the lock and drop anything another session appended
+    # in between -- which is exactly the drift the host guards against.
+    return _host_tool_result(
         memory_tool(action="add", target=target, content=proposal["content"], store=store)
     )
-    # The gated entry point mutates the in-memory store but leaves persistence to
-    # its caller, exactly as the direct store call did.
-    if result.get("success") and not result.get("staged"):
-        store.save_to_disk(target)
-    return result
 
 
 def _apply_prompt_note(note: Dict[str, str]) -> Dict[str, Any]:

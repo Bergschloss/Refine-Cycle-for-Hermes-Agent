@@ -106,6 +106,7 @@ class FakeHost:
     agent_created = set()
     actions = []
     stage_writes = False
+    block_writes = False
     fail_next = ""
     memory_entries = []
     user_entries = []
@@ -121,6 +122,7 @@ class FakeHost:
         cls.agent_created = set()
         cls.actions = []
         cls.stage_writes = False
+        cls.block_writes = False
         cls.fail_next = ""
         cls.memory_entries = []
         cls.user_entries = []
@@ -273,11 +275,22 @@ def install_fake_host():
             return FakeHost.user_entries if target == "user" else FakeHost.memory_entries
 
         def add(self, target, content):
-            # Mirrors the host: the store itself performs the write. The
+            # Mirrors the host: the store strips, refuses an exact duplicate
+            # while still reporting success, appends, and persists itself. The
             # ``write_approval`` gate lives in ``memory_tool`` below, not here,
             # so a caller that reaches the store directly is never gated.
-            self._entries_for(target).append(content)
-            return {"success": True}
+            content = (content or "").strip()
+            if not content:
+                return {"success": False, "error": "Content cannot be empty."}
+            entries = self._entries_for(target)
+            if content in entries:
+                return {
+                    "success": True,
+                    "message": "Entry already exists (no duplicate added).",
+                }
+            entries.append(content)
+            self.save_to_disk(target)
+            return {"success": True, "message": "Entry added."}
 
         def save_to_disk(self, target):
             filename = "USER.md" if target == "user" else "MEMORY.md"
@@ -300,6 +313,12 @@ def install_fake_host():
         if action not in {"add", "replace", "remove"}:
             return json.dumps({
                 "success": False, "error": f"Unknown action '{action}'."
+            })
+        if FakeHost.block_writes:
+            # The gate's third outcome: an interactive denial. Neither staged nor
+            # written, and reported as a plain failure.
+            return json.dumps({
+                "success": False, "error": "Memory write denied by the user."
             })
         if FakeHost.stage_writes:
             pending_id = FakeHost.next_pending_id(target)
@@ -5019,12 +5038,26 @@ class MemoryStore:
         return None
     def _entries_for(self, target):
         return self.user_entries if target == "user" else self.memory_entries
+    def add(self, target, content):
+        self._entries_for(target).append(content)
+        return {"success": True}
+    def save_to_disk(self, target):
+        return None
+def memory_tool(action, target="memory", content=None, old_text=None, store=None):
+    # This driver has no approval gate; it exists so a memory proposal routed
+    # through the gated entry point does not fail on a missing attribute.
+    if store is None:
+        return json.dumps({"success": False, "error": "Memory is not available."})
+    if action != "add":
+        return json.dumps({"success": False, "error": f"unsupported {action}"})
+    return json.dumps(store.add(target, content))
 skills.skills_list = skills_list
 skills.skill_view = skill_view
 manager.skill_manage = skill_manage
 usage.is_agent_created = lambda skill_name: skill_path(skill_name).is_file()
 usage.get_usage_count = lambda skill_name, since_ts=None: 0
 memory.MemoryStore = MemoryStore
+memory.memory_tool = memory_tool
 approval.get_pending = lambda subsystem, pending_id: None
 tools.skills_tool = skills
 tools.skill_manager_tool = manager
@@ -8804,6 +8837,39 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 ledger.audit([], journal_entries=journal_entries)[0]["verdict"], "working"
             )
 
+    def test_no_artifact_outcome_does_not_overwrite_a_live_ledger_row(self):
+        """An abandoned record must not steal the attribution of a landed edit.
+
+        Ledger rows are keyed by name, so mirroring a never-landed record for a
+        name refine had already edited would reset created_ts, bump the version,
+        replace journal_id, and relabel the live edit as failed.
+        """
+        proposal = {"name": "shared-name", "kind": "skill", "action": "create"}
+        ledger.record_edit(proposal, "applied-one")
+        landed = ledger.load_stats()["shared-name"]
+
+        ledger.record_edit(proposal, "abandoned-two", outcome="error")
+        after = ledger.load_stats()["shared-name"]
+        self.assertEqual(after["journal_id"], "applied-one")
+        self.assertEqual(after["outcome"], "applied")
+        self.assertEqual(after["created_ts"], landed["created_ts"])
+        self.assertEqual(after["version"], landed["version"])
+
+        # The same record may still update its own row.
+        ledger.record_edit(proposal, "applied-one", outcome="error")
+        self.assertEqual(ledger.load_stats()["shared-name"]["outcome"], "error")
+
+    def test_audit_reports_a_never_landed_edit_instead_of_judging_it(self):
+        ledger.record_edit(
+            {"name": "failed-edit", "kind": "skill", "action": "create"},
+            "abcdef123456",
+            outcome="error",
+        )
+        row = next(item for item in ledger.audit([]) if item["name"] == "failed-edit")
+        self.assertEqual(row["verdict"], "no edit landed")
+        self.assertEqual(row["usage_scope"], "unavailable")
+        self.assertIsNone(row["uses"])
+
     def test_reported_model_survives_record_without_metadata(self):
         proposal = {"name": "kept-model", "kind": "skill", "action": "create"}
         ledger.record_edit(
@@ -9203,7 +9269,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             journal.reconcile()
         entry = journal.get_entry(entry_id)
         self.assertEqual(entry["outcome"], "error")
-        self.assertIn("never landed", entry["error"])
+        self.assertIn("Abandoned while prepared", entry["error"])
         self.assertEqual(journal.count_today_applied(), 0)
         # Abandoning the record must not invent a host mutation.
         self.assertNotIn("never-landed", FakeHost.skills)
@@ -9219,10 +9285,37 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         """Unknown host state is not proof the edit failed."""
         entry_id = self._prepared_entry_that_never_landed()
         with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0), patch.object(
-            journal, "target_matches_applied", return_value=None
+            journal, "rollback_target_matches", return_value=None
         ):
             journal.reconcile()
         self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        self.assertEqual(journal.count_today_applied(), 1)
+
+    def test_prepared_edit_that_did_land_is_never_declared_un_applied(self):
+        """"Does not match" is not absence: a landed edit must keep its record.
+
+        A pass can die after the host write but before ``finalize``, leaving a
+        ``prepared`` record for an edit that exists. If anything then edits that
+        target, the old rule ("target does not match") would rewrite the record
+        as an edit that never happened: the journal would assert something false,
+        ``is_reversible`` would drop it, its backup would become prunable, and a
+        budget slot would be handed back for a real mutation.
+        """
+        entry_id = journal.prepare(
+            trigger="manual", reason="died before finalize", session_id="session",
+            proposal=skill_proposal("landed-then-edited"),
+            recovery={"type": "skill_create", "name": "landed-then-edited"},
+        )
+        # The write landed, then something else changed the same skill.
+        FakeHost.add_skill("landed-then-edited", skill_content("landed-then-edited", "# Edited elsewhere"))
+        self.assertIs(
+            journal.target_matches_applied(journal.get_entry(entry_id)), False
+        )
+        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            journal.reconcile()
+        entry = journal.get_entry(entry_id)
+        self.assertEqual(entry["outcome"], "prepared")
+        self.assertTrue(journal.is_reversible(entry))
         self.assertEqual(journal.count_today_applied(), 1)
 
     def test_prepared_is_not_abandoned_while_another_pass_holds_the_lock(self):
@@ -9302,6 +9395,81 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         # The write is reserved, not performed.
         self.assertEqual(FakeHost.memory_entries, [])
         self.assertFalse(result["reversible"])
+
+    def test_approved_memory_survives_an_append_during_the_approval_window(self):
+        """Approval is proven by presence, not by the slot reserved at stage time.
+
+        The host replays a staged memory write as a plain append whenever the
+        user gets around to approving it, so anything the agent stored while it
+        waited sits in front of it. Keying on the exact planned slot reported an
+        approved edit as ``rejected`` and left it unrollbackable.
+        """
+        FakeHost.memory_entries[:] = ["earlier note"]
+        FakeHost.stage_writes = True
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "approved-lesson",
+            "content": "the staged lesson", "reason": "why", "evidence": [],
+        })
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "pending_approval")
+
+        # The agent stores something else before the user approves.
+        FakeHost.memory_entries.append("stored while waiting")
+        FakeHost.approve_pending("memory", entry["pending_id"])
+        FakeHost.stage_writes = False
+
+        core.refine_audit()
+        reconciled = journal.get_entry(result["journal_id"])
+        self.assertEqual(reconciled["outcome"], "applied")
+        self.assertIn("the staged lesson", FakeHost.memory_entries)
+
+        # And it stays rollback-able despite having shifted position.
+        self.assertTrue(journal.is_reversible(reconciled))
+        self.assertTrue(core.refine_rollback(result["journal_id"])["success"])
+        self.assertEqual(
+            FakeHost.memory_entries, ["earlier note", "stored while waiting"]
+        )
+
+    def test_rejected_memory_approval_is_recorded_as_rejected(self):
+        FakeHost.stage_writes = True
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "rejected-lesson",
+            "content": "never approved", "reason": "why", "evidence": [],
+        })
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "pending_approval")
+        FakeHost.reject_pending("memory", entry["pending_id"])
+        FakeHost.stage_writes = False
+
+        core.refine_audit()
+        self.assertEqual(
+            journal.get_entry(result["journal_id"])["outcome"], "rejected"
+        )
+        self.assertEqual(FakeHost.memory_entries, [])
+
+    def test_memory_write_denied_by_the_gate_is_journaled_as_an_error(self):
+        """The gate's third outcome: denied outright, neither staged nor written."""
+        FakeHost.block_writes = True
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "denied-lesson",
+            "content": "refused at the gate", "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        # A denied write reports no recovery id, so read the record it journaled.
+        entry = journal.entries()[-1]
+        self.assertEqual(entry["outcome"], "error")
+        self.assertIn("denied", entry["error"])
+        self.assertEqual(FakeHost.memory_entries, [])
+
+    def test_duplicate_memory_content_is_not_reported_as_applied(self):
+        """The host reports success without appending an exact duplicate."""
+        FakeHost.memory_entries[:] = ["already stored"]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "dupe-lesson",
+            "content": "already stored", "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertEqual(FakeHost.memory_entries, ["already stored"])
 
     def test_session_end_waits_off_callback_then_journals_evidence_failure(self):
         preflight = {

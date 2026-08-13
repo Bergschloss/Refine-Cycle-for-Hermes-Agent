@@ -1780,11 +1780,16 @@ def target_matches_applied(entry: Dict[str, Any]) -> Optional[bool]:
         if values is None:
             return None
         index = recovery.get("index")
+        # The append is proven by presence at or after its planned position, not
+        # by occupying that exact slot. A staged write is replayed by the host as
+        # a plain append whenever approval happens, so anything the agent stored
+        # during the approval window sits in between and shifts it down. Keying
+        # on the exact slot reported an approved edit as rejected. Entries before
+        # the planned position are still pinned by the prefix digest.
         return bool(
             _memory_prefix_matches(recovery, values)
             and isinstance(index, int)
-            and index < len(values)
-            and values[index] == recovery.get("content")
+            and recovery.get("content") in values[index:]
         )
     if kind == "prompt":
         recovery = entry.get("recovery", {})
@@ -1825,10 +1830,12 @@ def rollback_target_matches(entry: Dict[str, Any]) -> Optional[bool]:
         if values is None:
             return None
         index = recovery.get("index")
+        # Mirror of the applied check: gone means absent at or after the planned
+        # position, with everything before it unchanged.
         return bool(
             _memory_prefix_matches(recovery, values)
             and isinstance(index, int)
-            and (index >= len(values) or values[index] != recovery.get("content"))
+            and recovery.get("content") not in values[index:]
         )
     if kind == "prompt":
         recovery = entry.get("recovery", {})
@@ -1890,26 +1897,38 @@ def reconcile() -> List[Dict[str, Any]]:
                 if applied_state is True:
                     changed.append(finalize(entry_id, "applied"))
                     continue
-                if applied_state is False and _prepared_is_abandoned(snapshot):
-                    # Read-then-act: another pass may hold the lock precisely
-                    # because its own write is still in flight, and a slow host
-                    # call can outlive the age threshold. Only a pass that can
-                    # take the lock may declare the record abandoned, and it
-                    # re-proves both facts underneath it.
+                # Absence has to be proven, not inferred from "does not match".
+                # A pass that died after the host write but before finalize also
+                # leaves a ``prepared`` record, and any later edit of that target
+                # makes it stop matching. Declaring that one un-applied would lie
+                # in the journal, drop the edit out of ``is_reversible``, let its
+                # backup be pruned, and hand back a budget slot for a mutation
+                # that really happened. ``rollback_target_matches`` is the
+                # positive test: the target looks exactly as it would after a
+                # rollback, so the edit is genuinely not there.
+                if (
+                    rollback_target_matches(snapshot) is True
+                    and _prepared_is_abandoned(snapshot)
+                ):
+                    # Read-then-act: a slow host call can outlive the age
+                    # threshold, so re-prove it while no other process is
+                    # mutating. Within one thread the lock is re-entrant, so this
+                    # guards against other processes and threads, not against the
+                    # caller itself -- every production caller already holds it.
                     with try_mutation_lock() as acquired:
                         if not acquired:
                             continue
                         current = get_entry(entry_id)
                         if not current or current.get("outcome") != "prepared":
                             continue
-                        if target_matches_applied(current) is not False:
+                        if rollback_target_matches(current) is not True:
                             continue
                         changed.append(finalize(
                             entry_id,
                             "error",
                             error=(
-                                "Abandoned while prepared: the host write never "
-                                "landed, so no edit was applied"
+                                "Abandoned while prepared: the target still "
+                                "matches its pre-edit state, so no edit landed"
                             ),
                         ))
                 continue
@@ -2071,13 +2090,22 @@ def _rollback_memory_locked(entry_id: str) -> Dict[str, Any]:
         store = MemoryStore()
         store.load_from_disk()
         values = store._entries_for(target)  # noqa: SLF001
-        if not isinstance(index, int) or index < 0 or index >= len(values):
+        if not isinstance(index, int) or index < 0 or index > len(values):
             return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
-        if not _memory_prefix_matches(recovery, list(values)) or values[index] != expected:
+        if not _memory_prefix_matches(recovery, list(values)):
             return {"success": False, "error": "Memory rollback conflict: target entry or earlier memory changed"}
+        # Locate refine's own append rather than trusting the planned slot: an
+        # approved staged write lands after whatever was stored while it waited.
+        # Only an exact content match at or after the planned position may be
+        # removed, so a shift can never turn rollback into deleting someone
+        # else's entry, and the verified prefix stays untouched either way.
+        try:
+            position = list(values).index(expected, index)
+        except ValueError:
+            return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
         if entry.get("outcome") != "rollback_prepared":
             entry = finalize(entry_id, "rollback_prepared")
-        del values[index]
+        del values[position]
         store.save_to_disk(target)
     except Exception as exc:
         latest = get_entry(entry_id) or entry
