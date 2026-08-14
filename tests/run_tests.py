@@ -1244,6 +1244,7 @@ class RefineTests(unittest.TestCase):
             result = core.refine_run(MockLlm())
         self.assertTrue(result["success"])
         self.assertEqual(mock_propose.call_count, 2)
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 2)
 
     def test_primary_no_final_text_is_retried_once(self):
         """A primary-backend no_final_text must retry the proposal once before journaling."""
@@ -1253,6 +1254,7 @@ class RefineTests(unittest.TestCase):
             result = core.refine_run(MockLlm())
         self.assertTrue(result["success"])
         self.assertEqual(mock_propose.call_count, 2)
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 2)
 
     def test_primary_llm_trust_denied_is_not_retried(self):
         """A trust-policy denial must not cost a retry."""
@@ -1262,6 +1264,16 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["outcome"], "llm_error")
         self.assertEqual(mock_propose.call_count, 1)
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 1)
+
+    def test_primary_permission_region_failure_is_not_retried(self):
+        """Permanent provider permission/region failures must not be retried."""
+        fail = {"action": "no_op", "failure": "llm_call_error", "reason": "HTTP 403 RegionError: model unavailable"}
+        with patch.object(core._llm, "propose", return_value=fail) as mock_propose:
+            result = core.refine_run(MockLlm())
+        self.assertFalse(result["success"])
+        self.assertEqual(mock_propose.call_count, 1)
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 1)
 
     def test_primary_llm_call_error_stops_after_retry_budget(self):
         """A persistent llm_call_error must give up after exactly one retry (2 attempts)."""
@@ -1271,6 +1283,7 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["outcome"], "llm_error")
         self.assertEqual(mock_propose.call_count, 2)
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 2)
 
     def test_json_extraction_handles_trailing_braces_and_pydantic(self):
         """Wave 2.7: balanced-brace scanner extracts valid JSON despite trailing }."""

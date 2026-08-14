@@ -22,6 +22,16 @@ except ImportError:
     from sanitization import sanitize, scrub_text  # noqa: F811
 
 logger = logging.getLogger(__name__)
+
+# Retry only transient primary proposal failures. Provider permission/region
+# refusals are terminal and must not be sent twice.
+_PRIMARY_RETRY_FAILURES = frozenset({"llm_call_error", "no_final_text"})
+_PRIMARY_NONRETRY_MARKERS = (
+    "regionerror", "permissiondenied", "permission denied", "forbidden",
+    "unauthorized", "http 401", "http 403",
+)
+_MAX_PRIMARY_ATTEMPTS = 2
+
 _UNTRUSTED_TOOL_TAG = re.compile(
     r"<\s*/?\s*untrusted_tool_result[^>]*>", re.IGNORECASE
 )
@@ -2138,9 +2148,10 @@ def _refine_once(
     if _signal_path == "gate_disabled" and _min_signal_required:
         _signal_path = "gate_opened"
 
-    _PRIMARY_RETRY_FAILURES = frozenset({"llm_call_error", "no_final_text"})
-    _max_primary_attempts = 2
-    for _primary_attempt in range(_max_primary_attempts):
+    _primary_attempts = 0
+    proposal = {"action": "no_op", "failure": "no_final_text", "reason": "No primary attempt made."}
+    for _primary_attempt in range(_MAX_PRIMARY_ATTEMPTS):
+        _primary_attempts = _primary_attempt + 1
         proposal = _llm.propose(
             llm=llm,
             evidence_text=evidence_text,
@@ -2159,14 +2170,15 @@ def _refine_once(
         _primary_failure = str(proposal.get("failure", "") or "")
         if (
             _primary_failure not in _PRIMARY_RETRY_FAILURES
-            or _primary_attempt >= _max_primary_attempts - 1
+            or any(marker in str(proposal.get("reason", "")).lower() for marker in _PRIMARY_NONRETRY_MARKERS)
+            or _primary_attempt >= _MAX_PRIMARY_ATTEMPTS - 1
         ):
             break
         logger.warning(
             "Refine primary backend returned %s (attempt %d/%d); retrying",
             _primary_failure,
             _primary_attempt + 1,
-            _max_primary_attempts,
+            _MAX_PRIMARY_ATTEMPTS,
         )
     # Capture metadata from the LLM call that produced this proposal.
     llm_meta = _llm.last_call_meta()
@@ -2179,6 +2191,7 @@ def _refine_once(
             "reported_provider", "reported_model", "latency_ms",
             "output_tokens", "output_mode"
         )},
+        "primary_attempts": _primary_attempts,
     }
     if _run_target_issues:
         _run_llm_meta["target_issues"] = _run_target_issues
