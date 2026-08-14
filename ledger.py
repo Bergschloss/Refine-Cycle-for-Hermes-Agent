@@ -86,6 +86,7 @@ def record_edit(
     outcome: str = "applied",
     pending_id: str = "",
     llm_meta: Optional[Dict[str, Any]] = None,
+    entry_ts: Optional[float] = None,
 ) -> None:
     name = str(proposal.get("name", "")).strip()
     if not name:
@@ -118,7 +119,21 @@ def record_edit(
         # otherwise reset created_ts, bump the version, replace journal_id, and
         # relabel a live edit as failed -- losing the attribution of something
         # still in effect.
-        if not same_edit and previous and outcome in _NO_ARTIFACT_OUTCOMES:
+        stale = False
+        if not same_edit and previous:
+            if outcome in _NO_ARTIFACT_OUTCOMES:
+                stale = True
+            elif entry_ts is not None:
+                # An older edit must not overwrite a newer one's row either. A
+                # failed rollback mirrors its entry back as ``applied``, and a
+                # staged edit mirrors as ``pending_approval``, so outcome alone
+                # cannot tell "a newer edit of this name" from "an older record
+                # re-asserting itself".
+                try:
+                    stale = float(entry_ts) < float(previous.get("created_ts", 0) or 0)
+                except (TypeError, ValueError):
+                    stale = False
+        if stale:
             if stats.get(name) is not legacy:
                 # The legacy key migration above already rewrote the mapping;
                 # persist that rather than discarding it on the way out.
@@ -165,6 +180,7 @@ def record_journal_state(entry: Dict[str, Any]) -> None:
         outcome=str(entry.get("outcome", "")),
         pending_id=str(entry.get("pending_id", "")),
         llm_meta=entry.get("llm_meta") if isinstance(entry.get("llm_meta"), dict) else None,
+        entry_ts=entry.get("ts") if isinstance(entry.get("ts"), (int, float)) else None,
     )
 
 

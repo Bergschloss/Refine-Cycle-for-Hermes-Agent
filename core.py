@@ -1487,9 +1487,20 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
     fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
     if fingerprint and not re.fullmatch(r"[0-9a-f]{12}", fingerprint):
         return "pattern_fingerprint must be the complete 12-character fingerprint"
+    if kind == "memory" and _MEMORY_ENTRY_DELIMITER in str(proposal.get("content", "")):
+        # The host joins and splits entries on this sequence, so content carrying
+        # it is stored as one entry and read back as several. The target check
+        # then fails for a write that did land: journaled as an error,
+        # un-rollbackable, absent from the audit, and permanent in the prompt.
+        return "Memory content cannot contain the host's entry delimiter"
     if journal.was_applied_recently(proposal, config.dedup_window_days()):
         return f"Identical edit already applied within {config.dedup_window_days()} day(s)"
     return None
+
+
+# The host joins memory entries with this sequence and splits on it when
+# reading, so it cannot appear inside a single entry's content.
+_MEMORY_ENTRY_DELIMITER = "\n\u00a7\n"
 
 
 def _host_tool_result(raw: Any) -> Dict[str, Any]:

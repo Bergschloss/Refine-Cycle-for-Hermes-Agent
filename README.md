@@ -326,22 +326,26 @@ these notes. Creation, target-state proof, audit rows, and conflict-aware
 rollback are still journaled; host approval remains in force for host-managed
 skills and memory.
 
-### One disclosed asymmetry in the memory approval gate
+### How a memory entry is identified for rollback
 
-Adding a memory entry goes through the host's gated memory tool, so with
-`memory.write_approval` enabled it stages as `pending_approval` like any other
-gated write. **Rolling one back does not.** Refine removes its own append
-directly, under the host's per-file memory lock.
+Both directions go through the host's gated memory tool, so with
+`memory.write_approval` enabled the removal stages as `pending_rollback` exactly
+as the addition stages as `pending_approval`. Refine never rewrites `MEMORY.md`
+itself: the host owns the file lock, the drift check, and the write.
 
-The reason is that the host's gated removal identifies an entry by *substring*.
-Refine knows exactly which entry it appended and verifies it by exact content at
-or after a recorded position, with everything before that position pinned by a
-digest. Routing the removal through a substring match would let it delete a
-longer entry that merely contains refine's text — a worse failure than the
-missing gate, and a breach of the rule that refine never deletes anything but its
-own create. The host exposes no exact-identity removal, so this is stated rather
-than approximated. Skill rollback has no such gap: it goes through the host's
-skill manager and honors a staged result.
+Identifying *which* entry to remove takes care, because the host matches by
+substring. Refine proves the entry is its own — the exact content, present at or
+after the position recorded when the edit was planned, with everything before
+that position pinned by a digest — and additionally refuses when any other entry
+contains that content, since the host would then be unable to tell them apart.
+In that case rollback reports a conflict and removes nothing rather than guessing;
+the host applies the same refusal independently, so a state that changes in
+between cannot turn into the wrong deletion.
+
+One ambiguity remains and is not solvable from the host API: an entry written by
+something else that is byte-identical to refine's own. The host refuses exact
+duplicates, so this requires another writer reproducing refine's scrubbed text
+verbatim.
 
 ### Multi-edit transactions
 

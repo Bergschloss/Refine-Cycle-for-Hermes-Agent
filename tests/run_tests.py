@@ -188,9 +188,19 @@ class FakeHost:
                 cls.agent_created.discard(name)
                 shutil.rmtree(cls.root / "skills" / name, ignore_errors=True)
         else:
+            # Mirrors the host's apply_memory_pending: the staged payload is
+            # replayed by its action, so an approved removal removes rather than
+            # appending. Add lands at the current end, wherever that now is.
             target = record["target"]
             entries = cls.user_entries if target == "user" else cls.memory_entries
-            entries.append(record["content"])
+            action = record.get("action", "add")
+            if action == "add":
+                entries.append(record.get("content") or "")
+            elif action == "remove":
+                old_text = record.get("old_text") or ""
+                matches = [index for index, value in enumerate(entries) if old_text in value]
+                if matches and len({entries[index] for index in matches}) == 1:
+                    entries.pop(matches[0])
             filename = "USER.md" if target == "user" else "MEMORY.md"
             (cls.root / filename).write_text(
                 "\n\n---\n\n".join(entries), encoding="utf-8"
@@ -296,6 +306,29 @@ def install_fake_host():
             self.save_to_disk(target)
             return {"success": True, "message": "Entry added."}
 
+        def remove(self, target, old_text):
+            # Mirrors the host: substring match, refusal when the matches are not
+            # all one text, removal of the first match, persisted under the lock.
+            old_text = (old_text or "").strip()
+            if not old_text:
+                return {"success": False, "error": "old_text cannot be empty."}
+            with self._file_lock(self._path_for(target)):
+                if FakeHost.memory_drift:
+                    return {"success": False, "error": "Memory file changed outside Hermes."}
+                self._reload_target(target)
+                entries = self._entries_for(target)
+                matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
+                if not matches:
+                    return {"success": False, "error": f"No entry matched '{old_text}'."}
+                if len({e for _, e in matches}) > 1:
+                    return {
+                        "success": False,
+                        "error": f"Multiple entries matched '{old_text}'. Be more specific.",
+                    }
+                entries.pop(matches[0][0])
+                self.save_to_disk(target)
+            return {"success": True, "message": "Entry removed."}
+
         def save_to_disk(self, target):
             FakeHost.memory_events.append(("save", target))
             filename = "USER.md" if target == "user" else "MEMORY.md"
@@ -350,12 +383,15 @@ def install_fake_host():
                 "action": action,
                 "target": target,
                 "content": content,
+                "old_text": old_text,
             }
             return json.dumps({
                 "success": True, "staged": True, "pending_id": pending_id
             })
         if action == "add":
             return json.dumps(store.add(target, content))
+        if action == "remove":
+            return json.dumps(store.remove(target, old_text))
         return json.dumps({"success": False, "error": f"unsupported {action}"})
 
     skills.skill_view = skill_view
@@ -8901,6 +8937,42 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(row["journal_id"], "newer-two")
         self.assertEqual(row["outcome"], "applied")
 
+    def test_an_older_record_cannot_overwrite_a_newer_edits_row(self):
+        """A failed rollback mirrors its entry back as applied; it must not win.
+
+        Outcome alone cannot separate "a newer edit of this name" from "an older
+        record re-asserting itself", so the entry's own timestamp decides.
+        """
+        proposal = {"name": "shared", "kind": "memory", "action": "create"}
+        older = time.time() - 600
+        ledger.record_edit(proposal, "older-one", entry_ts=older)
+        ledger.record_edit(proposal, "newer-two", entry_ts=time.time())
+        self.assertEqual(ledger.load_stats()["memory:shared"]["journal_id"], "newer-two")
+
+        # The older edit's failed rollback mirrors it back as still applied.
+        ledger.record_edit(proposal, "older-one", outcome="applied", entry_ts=older)
+        row = ledger.load_stats()["memory:shared"]
+        self.assertEqual(row["journal_id"], "newer-two")
+
+        # A genuinely newer edit of the same name still takes the row.
+        ledger.record_edit(proposal, "newest-three", entry_ts=time.time())
+        self.assertEqual(ledger.load_stats()["memory:shared"]["journal_id"], "newest-three")
+
+    def test_memory_content_carrying_the_host_delimiter_is_refused(self):
+        """Content split into several entries by the host could never be proven."""
+        error = core._validate_proposal({
+            "action": "create", "kind": "memory", "name": "delimited",
+            "content": "first part\n\u00a7\nsecond part", "reason": "why", "evidence": [],
+        })
+        self.assertIsNotNone(error)
+        self.assertIn("entry delimiter", error)
+
+    def test_padded_memory_reproposal_is_still_a_duplicate(self):
+        """The store strips, so padding does not make it a different append."""
+        base = {"action": "create", "kind": "memory", "name": "same", "content": "one lesson"}
+        padded = dict(base, content="  one lesson\n")
+        self.assertEqual(journal.proposal_hash(base), journal.proposal_hash(padded))
+
     def test_audit_reports_a_never_landed_edit_instead_of_judging_it(self):
         ledger.record_edit(
             {"name": "failed-edit", "kind": "skill", "action": "create"},
@@ -9516,8 +9588,56 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         FakeHost.memory_drift = "MEMORY.md.bak.1"
         rollback = core.refine_rollback(result["journal_id"])
         self.assertFalse(rollback["success"])
-        self.assertIn("changed outside refine", rollback["error"])
+        # The host owns the drift check, so its refusal is what surfaces.
+        self.assertIn("changed outside Hermes", rollback["error"])
         self.assertIn("keep me", FakeHost.memory_entries)
+        # A refused rollback leaves the edit applied and still reversible.
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "applied")
+        self.assertTrue(journal.is_reversible(entry))
+
+    def test_memory_rollback_is_approval_gated_like_the_forward_write(self):
+        """Removing refine's own append goes through the same gate as adding it.
+
+        A user who turns on memory write approval to review memory mutations must
+        see the deletion too, not only the addition.
+        """
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "gated-removal",
+            "content": "remove me only after approval", "reason": "why", "evidence": [],
+        })
+        FakeHost.stage_writes = True
+        rollback = core.refine_rollback(result["journal_id"])
+        self.assertTrue(rollback["success"])
+        self.assertTrue(rollback["staged"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "pending_rollback")
+        self.assertTrue(entry["pending_id"])
+        # Still present until the host approves.
+        self.assertIn("remove me only after approval", FakeHost.memory_entries)
+
+        FakeHost.approve_pending("memory", entry["pending_id"])
+        FakeHost.stage_writes = False
+        core.refine_audit()
+        self.assertEqual(
+            journal.get_entry(result["journal_id"])["outcome"], "rolled_back"
+        )
+        self.assertNotIn("remove me only after approval", FakeHost.memory_entries)
+
+    def test_memory_rollback_refuses_when_another_entry_contains_its_text(self):
+        """The host would refuse an ambiguous match; name the real reason first."""
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "ambiguous",
+            "content": "short lesson", "reason": "why", "evidence": [],
+        })
+        FakeHost.memory_entries.append("short lesson with extra detail")
+        rollback = core.refine_rollback(result["journal_id"])
+        self.assertFalse(rollback["success"])
+        self.assertIn("contains this entry's text", rollback["error"])
+        # Nothing removed, and the record stays reversible for a later retry.
+        self.assertIn("short lesson", FakeHost.memory_entries)
+        self.assertIn("short lesson with extra detail", FakeHost.memory_entries)
+        self.assertTrue(journal.is_reversible(journal.get_entry(result["journal_id"])))
 
     def test_rejected_memory_approval_is_recorded_as_rejected(self):
         FakeHost.stage_writes = True

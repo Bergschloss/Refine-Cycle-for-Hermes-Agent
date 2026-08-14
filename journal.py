@@ -11,7 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -1458,14 +1458,20 @@ def proposal_hash(proposal: Dict[str, Any]) -> str:
     kind = str(proposal.get("kind", ""))
     action = str(proposal.get("action", ""))
     name = str(proposal.get("name", ""))
+    content = str(proposal.get("content", ""))
     if kind == "memory" and action in ("create", "patch"):
         action = "append"
         name = "memory"
+        # The store strips before saving, so two proposals differing only in
+        # surrounding whitespace are the same append. Without this the dedup
+        # window misses a padded re-proposal, which then spends a budget slot
+        # only for the host to refuse it as an exact duplicate.
+        content = content.strip()
     key = "|".join([
         kind,
         action,
         name,
-        hashlib.sha1(str(proposal.get("content", "")).encode("utf-8", "replace")).hexdigest(),
+        hashlib.sha1(content.encode("utf-8", "replace")).hexdigest(),
     ])
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
 
@@ -1741,32 +1747,15 @@ def backup_memory(target: str) -> Optional[str]:
     return "\n\n---\n\n".join(entries_value)
 
 
-def _memory_file_lock(store: Any, target: str):
-    """The host's per-file memory lock, or a no-op when it exposes none.
-
-    Refine's rollback is the only place it mutates memory directly, and the host
-    owns the file. Falling back to no lock keeps an older host working rather
-    than refusing every rollback, but it is reported so the weaker guarantee is
-    not silent.
-    """
+def _host_result(raw: Any) -> Dict[str, Any]:
+    """Normalize a host tool result, which is either a dict or a JSON string."""
+    if isinstance(raw, dict):
+        return raw
     try:
-        return store._file_lock(store._path_for(target))  # noqa: SLF001
-    except Exception as exc:
-        logger.warning(
-            "Host exposes no memory file lock; rolling back unlocked: %s",
-            scrub_text(str(exc)),
-        )
-        return nullcontext()
-
-
-def _reload_memory_target(store: Any, target: str) -> str:
-    """Re-read memory inside the lock; return the host's drift marker if any."""
-    try:
-        return str(store._reload_target(target) or "")  # noqa: SLF001
-    except AttributeError:
-        # Older host: no drift detection to consult, so fall back to a plain read.
-        store.load_from_disk()
-        return ""
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"success": False, "error": str(raw)}
+    return parsed if isinstance(parsed, dict) else {"success": False, "error": str(raw)}
 
 
 def memory_recovery(target: str, content: str) -> Optional[Dict[str, Any]]:
@@ -1934,8 +1923,13 @@ def reconcile() -> List[Dict[str, Any]]:
                 # that really happened. ``rollback_target_matches`` is the
                 # positive test: the target looks exactly as it would after a
                 # rollback, so the edit is genuinely not there.
+                # A prompt note is exempt: session-scoped notes are removed at
+                # session end without journaling anything, so absence proves
+                # nothing about whether the note was ever written. Session end is
+                # also exactly when the automatic pass runs.
                 if (
-                    rollback_target_matches(snapshot) is True
+                    proposal.get("kind") != "prompt"
+                    and rollback_target_matches(snapshot) is True
                     and _prepared_is_abandoned(snapshot)
                 ):
                     # Read-then-act: a slow host call can outlive the age
@@ -2107,14 +2101,14 @@ def rollback_skill(entry_id: str) -> Dict[str, Any]:
 
 
 def rollback_memory(entry_id: str) -> Dict[str, Any]:
-    """Rollback one exact append while holding the shared mutation lock.
+    """Rollback one exact append through the host's gated removal.
 
-    Unlike the forward write, this does not pass through the host's approval
-    gate, and that asymmetry is deliberate: the gated removal identifies an entry
-    by substring, which could delete a longer entry that merely contains refine's
-    text. Refine knows the exact content it appended and verifies it positionally,
-    so it removes that entry itself under the host's file lock. The host exposes
-    no exact-identity removal; see the README section on this asymmetry.
+    The removal goes through the same entry point as the forward write, so it is
+    approval-gated, locked, and drift-checked by the host rather than by a
+    whole-file rewrite from out here. The host matches by substring but refuses
+    when the matches are not all one text, so verifying first that nothing else
+    contains this entry's content makes that match provably exact -- and if the
+    state changes underneath, the host refuses instead of removing the wrong one.
     """
     with mutation_lock():
         return _rollback_memory_locked(entry_id)
@@ -2132,51 +2126,73 @@ def _rollback_memory_locked(entry_id: str) -> Dict[str, Any]:
     index = recovery.get("index")
 
     try:
-        from tools.memory_tool import MemoryStore
+        from tools.memory_tool import MemoryStore, memory_tool
 
         store = MemoryStore()
-        # The whole read-verify-delete-persist sequence runs under the host's own
-        # file lock. ``save_to_disk`` rewrites the entire file and does not lock,
-        # re-read, or check for drift by itself, so doing this outside the lock
-        # discards whatever another session appended in between. Refine's own
-        # mutation lock cannot help: it does not serialize the host's writers.
-        with _memory_file_lock(store, target):
-            drift = _reload_memory_target(store, target)
-            if drift:
-                return {
-                    "success": False,
-                    "error": (
-                        "Memory rollback conflict: the memory file changed "
-                        "outside refine and was backed up by the host"
-                    ),
-                }
-            values = store._entries_for(target)  # noqa: SLF001
-            if not isinstance(index, int) or index < 0 or index > len(values):
-                return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
-            if not _memory_prefix_matches(recovery, list(values)):
-                return {"success": False, "error": "Memory rollback conflict: target entry or earlier memory changed"}
-            # Locate refine's own append rather than trusting the planned slot: an
-            # approved staged write lands after whatever was stored while it
-            # waited. Only an exact content match at or after the planned
-            # position may be removed, so a shift can never turn rollback into
-            # deleting an entry with different content, and the verified prefix
-            # stays untouched either way. The residual ambiguity is byte-identical
-            # content written by someone else after the planned position; the host
-            # refuses exact duplicates, so that needs another writer reproducing
-            # refine's scrubbed text verbatim.
-            try:
-                position = list(values).index(expected, index)
-            except ValueError:
-                return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
-            if entry.get("outcome") != "rollback_prepared":
-                entry = finalize(entry_id, "rollback_prepared")
-            del values[position]
-            store.save_to_disk(target)
+        store.load_from_disk()
+        values = list(store._entries_for(target))  # noqa: SLF001
+        if not isinstance(index, int) or index < 0 or index > len(values):
+            return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
+        if not _memory_prefix_matches(recovery, values):
+            return {"success": False, "error": "Memory rollback conflict: target entry or earlier memory changed"}
+        # Prove this is refine's own append: present at or after the planned
+        # position, with everything before it pinned by the digest. An approved
+        # staged write lands after whatever was stored while it waited, so the
+        # planned slot itself cannot be trusted.
+        if expected not in values[index:]:
+            return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
+        # The host removes by substring and refuses when the matches are not all
+        # one text. Anything else containing this content would therefore make it
+        # refuse rather than delete the wrong entry -- but reporting the conflict
+        # here names the real reason instead of surfacing a generic host error.
+        if any(expected in value and value != expected for value in values):
+            return {
+                "success": False,
+                "error": (
+                    "Memory rollback conflict: another memory entry contains this "
+                    "entry's text, so it cannot be identified for removal"
+                ),
+            }
+        if entry.get("outcome") != "rollback_prepared":
+            entry = finalize(entry_id, "rollback_prepared")
+        result = _host_result(
+            memory_tool(action="remove", target=target, old_text=expected, store=store)
+        )
     except Exception as exc:
         latest = get_entry(entry_id) or entry
         if not rollback_target_matches(latest):
             _restore_applied(entry_id, scrub_text(str(exc)))
         return {"success": False, "error": f"Memory rollback failed: {scrub_text(str(exc))}"}
+
+    if not result.get("success"):
+        error = scrub_text(str(result.get("error", "Memory rollback host operation failed")))
+        _restore_applied(entry_id, error)
+        return {"success": False, "error": error}
+
+    if result.get("staged"):
+        pending_id = str(result.get("pending_id", ""))
+        if not pending_id:
+            error = "Memory rollback was staged without a pending_id"
+            _restore_applied(entry_id, error)
+            return {"success": False, "error": error}
+        try:
+            finalize(entry_id, "pending_rollback", pending_id=pending_id)
+        except Exception as exc:
+            return {
+                "success": False,
+                "staged": True,
+                "pending_id": pending_id,
+                "error": (
+                    "Memory rollback was reserved but pending state finalization "
+                    f"failed; recovery id: {entry_id}. {scrub_text(str(exc))}"
+                ),
+            }
+        return {
+            "success": True,
+            "staged": True,
+            "pending_id": pending_id,
+            "message": "Memory rollback is pending approval; the entry is still present",
+        }
 
     latest = get_entry(entry_id) or entry
     if not rollback_target_matches(latest):
