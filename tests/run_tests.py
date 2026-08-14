@@ -110,6 +110,8 @@ class FakeHost:
     fail_next = ""
     memory_entries = []
     user_entries = []
+    memory_events = []
+    memory_drift = ""
     usage_counts = {}
     config = {}
     pending = {}
@@ -126,6 +128,8 @@ class FakeHost:
         cls.fail_next = ""
         cls.memory_entries = []
         cls.user_entries = []
+        cls.memory_events = []
+        cls.memory_drift = ""
         cls.usage_counts = {}
         cls.pending = {}
         cls.pending_counter = 0
@@ -293,10 +297,30 @@ def install_fake_host():
             return {"success": True, "message": "Entry added."}
 
         def save_to_disk(self, target):
+            FakeHost.memory_events.append(("save", target))
             filename = "USER.md" if target == "user" else "MEMORY.md"
             (FakeHost.root / filename).write_text(
                 "\n\n---\n\n".join(self._entries_for(target)), encoding="utf-8"
             )
+
+        @staticmethod
+        def _path_for(target):
+            return FakeHost.root / ("USER.md" if target == "user" else "MEMORY.md")
+
+        @staticmethod
+        @contextmanager
+        def _file_lock(path):
+            # The host serializes every memory mutation on this per-file lock.
+            FakeHost.memory_events.append(("lock", Path(path).name))
+            try:
+                yield
+            finally:
+                FakeHost.memory_events.append(("unlock", Path(path).name))
+
+        def _reload_target(self, target):
+            # Re-read under the lock; a truthy return is the host's drift marker.
+            FakeHost.memory_events.append(("reload", target))
+            return FakeHost.memory_drift
 
     def memory_tool(action, target="memory", content=None, old_text=None, store=None):
         """The gated host entry point, in the host's own validation order."""
@@ -8859,6 +8883,24 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         ledger.record_edit(proposal, "applied-one", outcome="error")
         self.assertEqual(ledger.load_stats()["shared-name"]["outcome"], "error")
 
+    def test_rolling_back_an_older_edit_does_not_relabel_a_newer_one(self):
+        """Two same-named memory edits: rolling back the older keeps the newer.
+
+        Ledger rows are keyed by name, and nothing stops two memory proposals
+        sharing a name with different content, so a late rollback of the first
+        would otherwise report the name as rolled back while the second entry is
+        still in the agent's context.
+        """
+        proposal = {"name": "same-name", "kind": "memory", "action": "create"}
+        ledger.record_edit(proposal, "older-one")
+        ledger.record_edit(proposal, "newer-two")
+        self.assertEqual(ledger.load_stats()["memory:same-name"]["journal_id"], "newer-two")
+
+        ledger.record_edit(proposal, "older-one", outcome="rolled_back")
+        row = ledger.load_stats()["memory:same-name"]
+        self.assertEqual(row["journal_id"], "newer-two")
+        self.assertEqual(row["outcome"], "applied")
+
     def test_audit_reports_a_never_landed_edit_instead_of_judging_it(self):
         ledger.record_edit(
             {"name": "failed-edit", "kind": "skill", "action": "create"},
@@ -9270,6 +9312,11 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         entry = journal.get_entry(entry_id)
         self.assertEqual(entry["outcome"], "error")
         self.assertIn("Abandoned while prepared", entry["error"])
+        # The target proves present state, not history, so the record states what
+        # it can see and says outright that the two histories are indistinguishable
+        # rather than asserting one of them.
+        self.assertIn("pre-edit state", entry["error"])
+        self.assertIn("not distinguishable", entry["error"])
         self.assertEqual(journal.count_today_applied(), 0)
         # Abandoning the record must not invent a host mutation.
         self.assertNotIn("never-landed", FakeHost.skills)
@@ -9319,7 +9366,13 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(journal.count_today_applied(), 1)
 
     def test_prepared_is_not_abandoned_while_another_pass_holds_the_lock(self):
-        """A slow host write can outlive the age threshold, so re-check under the lock."""
+        """Defence in depth for a caller that reconciles without the lock.
+
+        Every production caller already holds the mutation lock, and it is
+        re-entrant, so this guard is a no-op on those paths. It exists so a
+        lock-free caller cannot declare a record abandoned while another process
+        or thread is mid-write, which is the state this test creates.
+        """
         entry_id = self._prepared_entry_that_never_landed()
         holding = threading.Event()
         release = threading.Event()
@@ -9430,6 +9483,42 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             FakeHost.memory_entries, ["earlier note", "stored while waiting"]
         )
 
+    def test_memory_rollback_deletes_under_the_host_file_lock(self):
+        """The delete and its whole-file rewrite must sit inside the host's lock.
+
+        ``save_to_disk`` rewrites the file without locking, re-reading, or
+        checking drift, so doing this outside the lock discards whatever another
+        session appended in between. Refine's own mutation lock does not help --
+        it serializes refine, not the host's other writers.
+        """
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "locked-lesson",
+            "content": "removed under the lock", "reason": "why", "evidence": [],
+        })
+        FakeHost.memory_events.clear()
+        self.assertTrue(core.refine_rollback(result["journal_id"])["success"])
+
+        kinds = [event[0] for event in FakeHost.memory_events]
+        self.assertIn("lock", kinds)
+        self.assertIn("unlock", kinds)
+        # Re-read inside the lock, and persist before releasing it.
+        self.assertLess(kinds.index("lock"), kinds.index("reload"))
+        self.assertLess(kinds.index("reload"), kinds.index("save"))
+        self.assertLess(kinds.index("save"), kinds.index("unlock"))
+        self.assertNotIn("removed under the lock", FakeHost.memory_entries)
+
+    def test_memory_rollback_refuses_when_the_host_reports_drift(self):
+        """Host-detected drift means someone else rewrote the file; do not delete."""
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "drifted-lesson",
+            "content": "keep me", "reason": "why", "evidence": [],
+        })
+        FakeHost.memory_drift = "MEMORY.md.bak.1"
+        rollback = core.refine_rollback(result["journal_id"])
+        self.assertFalse(rollback["success"])
+        self.assertIn("changed outside refine", rollback["error"])
+        self.assertIn("keep me", FakeHost.memory_entries)
+
     def test_rejected_memory_approval_is_recorded_as_rejected(self):
         FakeHost.stage_writes = True
         result = self.run_proposal({
@@ -9442,10 +9531,36 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         FakeHost.stage_writes = False
 
         core.refine_audit()
-        self.assertEqual(
-            journal.get_entry(result["journal_id"])["outcome"], "rejected"
-        )
+        reconciled = journal.get_entry(result["journal_id"])
+        self.assertEqual(reconciled["outcome"], "rejected")
         self.assertEqual(FakeHost.memory_entries, [])
+        # A user denial and a refusal at replay time (duplicate, size limit,
+        # content scan) look identical from here, so the record must not pick one.
+        self.assertIn("denied or refused by the host", reconciled["error"])
+
+    def test_memory_refused_at_replay_time_is_not_reported_as_applied(self):
+        """An approved write the host then refuses must not be journaled applied.
+
+        The gate stages before the store validates, so approval can still hit the
+        duplicate refusal, the char limit, or the content scan.
+        """
+        FakeHost.memory_entries[:] = ["already stored"]
+        FakeHost.stage_writes = True
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "refused-lesson",
+            "content": "already stored", "reason": "why", "evidence": [],
+        })
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "pending_approval")
+        # Approval happens, but the host refuses the duplicate, so nothing is
+        # appended. Model that by dropping the pending record without writing.
+        FakeHost.pending.pop(("memory", entry["pending_id"]))
+        FakeHost.stage_writes = False
+
+        core.refine_audit()
+        reconciled = journal.get_entry(result["journal_id"])
+        self.assertEqual(reconciled["outcome"], "rejected")
+        self.assertEqual(FakeHost.memory_entries, ["already stored"])
 
     def test_memory_write_denied_by_the_gate_is_journaled_as_an_error(self):
         """The gate's third outcome: denied outright, neither staged nor written."""
@@ -9455,10 +9570,33 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "content": "refused at the gate", "reason": "why", "evidence": [],
         })
         self.assertFalse(result["success"])
-        # A denied write reports no recovery id, so read the record it journaled.
-        entry = journal.entries()[-1]
+        # A denied write reports no recovery id, so find this proposal's record
+        # rather than trusting whatever line happens to be last.
+        entry = next(
+            item for item in journal.entries()
+            if item.get("proposal", {}).get("name") == "denied-lesson"
+        )
         self.assertEqual(entry["outcome"], "error")
         self.assertIn("denied", entry["error"])
+        self.assertEqual(FakeHost.memory_entries, [])
+
+    def test_memory_content_with_surrounding_whitespace_still_applies(self):
+        """The host stores the stripped form, so recovery must record that form.
+
+        Recording the unstripped string made the post-apply check compare against
+        a value that cannot exist on the host: the entry landed, but was reported
+        as failed and left un-rollbackable and absent from the audit.
+        """
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "padded-lesson",
+            "content": "  a padded lesson\n", "reason": "why", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        self.assertIn("a padded lesson", FakeHost.memory_entries)
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "applied")
+        self.assertTrue(journal.is_reversible(entry))
+        self.assertTrue(core.refine_rollback(result["journal_id"])["success"])
         self.assertEqual(FakeHost.memory_entries, [])
 
     def test_duplicate_memory_content_is_not_reported_as_applied(self):

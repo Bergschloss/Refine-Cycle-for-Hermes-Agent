@@ -1532,6 +1532,11 @@ def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": f"Unknown memory action: {proposal.get('action')}"}
     store = MemoryStore()
     store.load_from_disk()
+    # With the gate on and a foreground CLI callback registered, this call can
+    # prompt the user inline while the refine pass holds the mutation lock, so an
+    # unanswered prompt blocks other callers until their own lock wait expires.
+    # The automatic path is unaffected: it takes the lock non-blockingly.
+    #
     # No second save here. The host's ``add`` re-reads under its own file lock,
     # appends, and persists inside that lock. A save from out here would rewrite
     # the whole file without the lock and drop anything another session appended
@@ -2534,6 +2539,11 @@ def _apply_edit(
         # kind is validated to "memory" here; see _apply_memory for why "user"
         # is unreachable rather than a second real target.
         target = "memory"
+        # The host stores the stripped form. Recording anything else as the
+        # recovery content makes the post-apply check compare against a string
+        # that cannot exist on the host, which reports a landed edit as failed
+        # and leaves it un-rollbackable and absent from the audit.
+        proposal = dict(proposal, content=str(proposal.get("content", "")).strip())
         memory_recovery = journal.memory_recovery(target, proposal["content"])
         if memory_recovery is None:
             error = f"Cannot capture {target} memory recovery state; mutation aborted"

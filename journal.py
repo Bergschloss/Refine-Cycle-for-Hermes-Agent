@@ -11,7 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -1741,6 +1741,34 @@ def backup_memory(target: str) -> Optional[str]:
     return "\n\n---\n\n".join(entries_value)
 
 
+def _memory_file_lock(store: Any, target: str):
+    """The host's per-file memory lock, or a no-op when it exposes none.
+
+    Refine's rollback is the only place it mutates memory directly, and the host
+    owns the file. Falling back to no lock keeps an older host working rather
+    than refusing every rollback, but it is reported so the weaker guarantee is
+    not silent.
+    """
+    try:
+        return store._file_lock(store._path_for(target))  # noqa: SLF001
+    except Exception as exc:
+        logger.warning(
+            "Host exposes no memory file lock; rolling back unlocked: %s",
+            scrub_text(str(exc)),
+        )
+        return nullcontext()
+
+
+def _reload_memory_target(store: Any, target: str) -> str:
+    """Re-read memory inside the lock; return the host's drift marker if any."""
+    try:
+        return str(store._reload_target(target) or "")  # noqa: SLF001
+    except AttributeError:
+        # Older host: no drift detection to consult, so fall back to a plain read.
+        store.load_from_disk()
+        return ""
+
+
 def memory_recovery(target: str, content: str) -> Optional[Dict[str, Any]]:
     entries_value = _memory_entries(target)
     if entries_value is None:
@@ -1927,8 +1955,11 @@ def reconcile() -> List[Dict[str, Any]]:
                             entry_id,
                             "error",
                             error=(
-                                "Abandoned while prepared: the target still "
-                                "matches its pre-edit state, so no edit landed"
+                                "Abandoned while prepared: the target is now in "
+                                "its pre-edit state, so there is nothing to "
+                                "reverse. Whether the edit never landed or landed "
+                                "and was undone elsewhere is not distinguishable "
+                                "from the target alone."
                             ),
                         ))
                 continue
@@ -1943,7 +1974,15 @@ def reconcile() -> List[Dict[str, Any]]:
                 if applied_state is True:
                     changed.append(finalize(entry_id, "applied"))
                 elif applied_state is False:
-                    changed.append(finalize(entry_id, "rejected", error="Approval rejected"))
+                    # The host record is gone and the target never changed. A user
+                    # denial and a refusal at replay time (duplicate, size limit,
+                    # content scan) are indistinguishable from here, so the record
+                    # must not claim which one happened.
+                    changed.append(finalize(
+                        entry_id,
+                        "rejected",
+                        error="Approval did not result in a write (denied or refused by the host)",
+                    ))
                 continue
             if outcome == "rollback_prepared":
                 if rollback_target_matches(snapshot) is True:
@@ -2068,7 +2107,15 @@ def rollback_skill(entry_id: str) -> Dict[str, Any]:
 
 
 def rollback_memory(entry_id: str) -> Dict[str, Any]:
-    """Rollback one exact append while holding the shared mutation lock."""
+    """Rollback one exact append while holding the shared mutation lock.
+
+    Unlike the forward write, this does not pass through the host's approval
+    gate, and that asymmetry is deliberate: the gated removal identifies an entry
+    by substring, which could delete a longer entry that merely contains refine's
+    text. Refine knows the exact content it appended and verifies it positionally,
+    so it removes that entry itself under the host's file lock. The host exposes
+    no exact-identity removal; see the README section on this asymmetry.
+    """
     with mutation_lock():
         return _rollback_memory_locked(entry_id)
 
@@ -2088,25 +2135,43 @@ def _rollback_memory_locked(entry_id: str) -> Dict[str, Any]:
         from tools.memory_tool import MemoryStore
 
         store = MemoryStore()
-        store.load_from_disk()
-        values = store._entries_for(target)  # noqa: SLF001
-        if not isinstance(index, int) or index < 0 or index > len(values):
-            return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
-        if not _memory_prefix_matches(recovery, list(values)):
-            return {"success": False, "error": "Memory rollback conflict: target entry or earlier memory changed"}
-        # Locate refine's own append rather than trusting the planned slot: an
-        # approved staged write lands after whatever was stored while it waited.
-        # Only an exact content match at or after the planned position may be
-        # removed, so a shift can never turn rollback into deleting someone
-        # else's entry, and the verified prefix stays untouched either way.
-        try:
-            position = list(values).index(expected, index)
-        except ValueError:
-            return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
-        if entry.get("outcome") != "rollback_prepared":
-            entry = finalize(entry_id, "rollback_prepared")
-        del values[position]
-        store.save_to_disk(target)
+        # The whole read-verify-delete-persist sequence runs under the host's own
+        # file lock. ``save_to_disk`` rewrites the entire file and does not lock,
+        # re-read, or check for drift by itself, so doing this outside the lock
+        # discards whatever another session appended in between. Refine's own
+        # mutation lock cannot help: it does not serialize the host's writers.
+        with _memory_file_lock(store, target):
+            drift = _reload_memory_target(store, target)
+            if drift:
+                return {
+                    "success": False,
+                    "error": (
+                        "Memory rollback conflict: the memory file changed "
+                        "outside refine and was backed up by the host"
+                    ),
+                }
+            values = store._entries_for(target)  # noqa: SLF001
+            if not isinstance(index, int) or index < 0 or index > len(values):
+                return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
+            if not _memory_prefix_matches(recovery, list(values)):
+                return {"success": False, "error": "Memory rollback conflict: target entry or earlier memory changed"}
+            # Locate refine's own append rather than trusting the planned slot: an
+            # approved staged write lands after whatever was stored while it
+            # waited. Only an exact content match at or after the planned
+            # position may be removed, so a shift can never turn rollback into
+            # deleting an entry with different content, and the verified prefix
+            # stays untouched either way. The residual ambiguity is byte-identical
+            # content written by someone else after the planned position; the host
+            # refuses exact duplicates, so that needs another writer reproducing
+            # refine's scrubbed text verbatim.
+            try:
+                position = list(values).index(expected, index)
+            except ValueError:
+                return {"success": False, "error": "Memory rollback conflict: appended entry position changed"}
+            if entry.get("outcome") != "rollback_prepared":
+                entry = finalize(entry_id, "rollback_prepared")
+            del values[position]
+            store.save_to_disk(target)
     except Exception as exc:
         latest = get_entry(entry_id) or entry
         if not rollback_target_matches(latest):

@@ -326,6 +326,23 @@ these notes. Creation, target-state proof, audit rows, and conflict-aware
 rollback are still journaled; host approval remains in force for host-managed
 skills and memory.
 
+### One disclosed asymmetry in the memory approval gate
+
+Adding a memory entry goes through the host's gated memory tool, so with
+`memory.write_approval` enabled it stages as `pending_approval` like any other
+gated write. **Rolling one back does not.** Refine removes its own append
+directly, under the host's per-file memory lock.
+
+The reason is that the host's gated removal identifies an entry by *substring*.
+Refine knows exactly which entry it appended and verifies it by exact content at
+or after a recorded position, with everything before that position pinned by a
+digest. Routing the removal through a substring match would let it delete a
+longer entry that merely contains refine's text — a worse failure than the
+missing gate, and a breach of the rule that refine never deletes anything but its
+own create. The host exposes no exact-identity removal, so this is stated rather
+than approximated. Skill rollback has no such gap: it goes through the host's
+skill manager and honors a staged result.
+
 ### Multi-edit transactions
 
 Some lessons are not one edit. A new skill and the memory entry that says when to

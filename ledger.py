@@ -76,7 +76,7 @@ def _save_stats(stats: Dict[str, Any]) -> None:
 
 # Outcomes that leave nothing behind on the host, so they describe a record
 # rather than an artifact the audit can measure.
-_NO_ARTIFACT_OUTCOMES = frozenset({"error", "rejected"})
+_NO_ARTIFACT_OUTCOMES = frozenset({"error", "rejected", "rolled_back"})
 
 
 def record_edit(
@@ -119,6 +119,10 @@ def record_edit(
         # relabel a live edit as failed -- losing the attribution of something
         # still in effect.
         if not same_edit and previous and outcome in _NO_ARTIFACT_OUTCOMES:
+            if stats.get(name) is not legacy:
+                # The legacy key migration above already rewrote the mapping;
+                # persist that rather than discarding it on the way out.
+                _save_stats(stats)
             return
         created_ts = previous.get("created_ts", now) if same_edit else now
         previous_version = previous.get("version", 1 if previous else 0)
