@@ -351,7 +351,12 @@ a problem: identification is by exact content, not substring.
 Two consequences worth knowing:
 
 - A memory rollback is not reviewable through `memory.write_approval`. Skill
-  rollback is: it goes through the host's skill manager and honors a staged result.
+  rollback does stage under `skills.write_approval` — but note that staging does
+  not make it safer in this respect: the host replays a staged skill delete by
+  name, without re-checking content, so a skill edited during the approval window
+  is deleted as approved. Rolling back a refine-created skill while skill write
+  approval is on is best done promptly, or not at all if the skill has since been
+  edited by hand.
 - With the gate on and an interactive prompt registered, the *forward* memory
   write can block on that prompt while the refine pass holds the shared mutation
   lock, so a concurrent `/refine` waits out its lock timeout and the automatic

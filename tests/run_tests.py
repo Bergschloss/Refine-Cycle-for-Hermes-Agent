@@ -8974,10 +8974,11 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 })
                 self.assertIsNotNone(error)
                 self.assertIn("entry delimiter", error)
-        # Ordinary content, and a leading marker the host splits correctly, pass.
+        # Ordinary content passes, and so does a leading marker: splitting is
+        # greedy and non-overlapping, so that edge survives the round trip.
         for content in ["an ordinary lesson", "\u00a7\nleading marker"]:
             with self.subTest(accepted=content):
-                self.assertIsNone(core._memory_content_splits(content) or None)
+                self.assertFalse(core._memory_content_splits(content))
 
     def test_padded_memory_reproposal_is_still_a_duplicate(self):
         """The store strips, so padding does not make it a different append."""

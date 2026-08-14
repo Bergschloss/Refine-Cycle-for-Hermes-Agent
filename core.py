@@ -1519,10 +1519,12 @@ def _memory_content_splits(content: str) -> bool:
     """Whether the host would read this content back as more than one entry.
 
     Checking for the delimiter alone is not enough: the host joins entries with
-    it, so content whose own edge completes the sequence once a neighbour is
-    joined -- a trailing ``\\n§`` or a leading ``§\\n`` -- splits just as surely
-    while round-tripping clean on its own, which means no drift is reported
-    either. The real test is what the join/split cycle does to it.
+    it, so content whose own trailing edge completes the sequence once a
+    neighbour is joined -- ``...\\n§`` -- splits just as surely while
+    round-tripping clean on its own, which means no drift is reported either. A
+    *leading* ``§\\n`` is safe, because splitting is greedy left to right and
+    non-overlapping, so it survives the cycle intact. Rather than reason about
+    which edge is which, this probes what the join/split cycle actually does.
     """
     delimiter = _memory_entry_delimiter()
     stripped = content.strip()
