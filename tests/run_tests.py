@@ -2707,6 +2707,116 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(sum(bool(result["success"]) for result in results), 1)
         self.assertEqual(len(FakeHost.skills), 1)
 
+    def test_four_thread_gateway_contention_budget_exactly_once(self):
+        """Four concurrent refine_run callers with budget=1 must produce exactly one edit.
+
+        Strengthens the 2-thread variant by asserting journal daily count,
+        ledger stats, and the on-disk lock file cleanup after all threads exit.
+        """
+        FakeHost.entry_config()["max_edits_per_day"] = 1
+        barrier = threading.Barrier(5)  # 4 workers + main
+        results = []
+
+        def worker(name):
+            barrier.wait()
+            results.append(core.refine_run(MockLlm(skill_proposal(name))))
+
+        threads = [
+            threading.Thread(target=worker, args=(f"four-way-{i}",))
+            for i in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(any(t.is_alive() for t in threads))
+
+        self.assertEqual(sum(bool(r["success"]) for r in results), 1)
+        self.assertEqual(len(FakeHost.skills), 1)
+        # Budget exactly-once: journal must record exactly 1 consumed edit.
+        self.assertEqual(journal.count_today_applied(), 1)
+        consumed = [
+            e for e in journal.entries()
+            if e.get("outcome") in {"applied", "pending_approval", "prepared"}
+        ]
+        self.assertEqual(len(consumed), 1)
+        self.assertEqual(len(ledger.load_stats()), 1)
+        # The file lock must not linger after all threads finish.
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        self.assertFalse(lock_path.exists())
+
+    def test_stale_lock_cleanup_unblocks_concurrent_run(self):
+        """A stale file lock left by a dead PID must be cleared, allowing a real run.
+
+        Plants a lock file with a non-existent PID and an old timestamp, then
+        runs refine_run. The stale lock cleaner must remove it and the run must
+        succeed without timeout.
+        """
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        # Write a lock file that looks like it was created 600s ago by PID 2.
+        # PID 2 does not exist on any OS (init/System on *nix/Windows).
+        stale_payload = json.dumps({
+            "pid": 2, "created": time.time() - 600, "token": "stale-token-dead"
+        })
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(stale_payload, encoding="utf-8")
+        # Back-date the file mtime so the staleness check passes.
+        stale_mtime = time.time() - 600
+        os.utime(lock_path, (stale_mtime, stale_mtime))
+
+        self.assertTrue(lock_path.exists())
+        result = core.refine_run(MockLlm(skill_proposal("after-stale-lock")))
+        self.assertTrue(result["success"])
+        self.assertIn("after-stale-lock", FakeHost.skills)
+        self.assertFalse(lock_path.exists())
+
+    def test_concurrent_multipass_budget_exactly_once(self):
+        """Two concurrent refine_run callers, each allowed 3 passes, but daily budget=2.
+
+        The total edits applied across both runs must equal the daily budget cap,
+        not the sum of their per-run limits. Validates the budget re-check inside
+        the multipass loop under real thread contention.
+        """
+        FakeHost.entry_config()["max_edits_per_day"] = 2
+        FakeHost.entry_config()["max_edits_per_run"] = 3
+        barrier = threading.Barrier(3)  # 2 workers + main
+        results = []
+
+        def worker(prefix):
+            # Each worker proposes up to 3 unique skills, but the daily cap is 2.
+            llm = MockLlm(
+                skill_proposal(f"{prefix}-pass1"),
+                skill_proposal(f"{prefix}-pass2"),
+                skill_proposal(f"{prefix}-pass3"),
+                {"action": "no_op", "reason": "done"},
+            )
+            barrier.wait()
+            results.append(core.refine_run(llm))
+
+        threads = [
+            threading.Thread(target=worker, args=(f"mp-{side}",))
+            for side in ("left", "right")
+        ]
+        for t in threads:
+            t.start()
+        barrier.wait()
+        for t in threads:
+            t.join(timeout=15)
+        self.assertFalse(any(t.is_alive() for t in threads))
+
+        total_applied = journal.count_today_applied()
+        self.assertEqual(total_applied, 2, f"Expected exactly 2 edits, got {total_applied}")
+        consumed = [
+            e for e in journal.entries()
+            if e.get("outcome") in {"applied", "pending_approval", "prepared"}
+        ]
+        self.assertEqual(len(consumed), 2)
+        self.assertEqual(len(FakeHost.skills), 2)
+        # Lock must be clean.
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        self.assertFalse(lock_path.exists())
+
     def test_reason_and_multipass_context_reach_model(self):
         FakeHost.entry_config()["max_edits_per_run"] = 2
         model = MockLlm(skill_proposal("first-pass"), {"action": "no_op", "reason": "done"})
