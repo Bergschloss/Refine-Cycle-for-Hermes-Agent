@@ -2003,10 +2003,14 @@ def _refine_once(
         if should_review:
             reviewer = _llm.review_fallback(llm, evidence_text, target=_run_target)
             reviewer_call_meta = _llm.last_call_meta()
+            # Reviewer fallback is a single bounded call (schema fallback is
+            # transport fallback, not a second reviewer attempt). Keep the
+            # attempt telemetry consistent with primary proposal calls.
             reviewer_llm_meta = {
                 "requested_provider": _run_target.get("provider", ""),
                 "requested_model": _run_target.get("model", ""),
                 "target_source": _run_target_source,
+                "primary_attempts": 1,
                 **{k: v for k, v in reviewer_call_meta.items() if k in (
                     "reported_provider", "reported_model", "latency_ms",
                     "output_tokens", "output_mode"
@@ -2149,7 +2153,6 @@ def _refine_once(
         _signal_path = "gate_opened"
 
     _primary_attempts = 0
-    proposal = {"action": "no_op", "failure": "no_final_text", "reason": "No primary attempt made."}
     for _primary_attempt in range(_MAX_PRIMARY_ATTEMPTS):
         _primary_attempts = _primary_attempt + 1
         proposal = _llm.propose(

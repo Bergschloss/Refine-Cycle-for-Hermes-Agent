@@ -7980,6 +7980,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(
             reviewer_entry["llm_meta"].get("output_mode"), "json_mode_salvage"
         )
+        self.assertEqual(reviewer_entry["llm_meta"].get("primary_attempts"), 1)
         proposal_entry = journal.get_entry(result["journal_id"])
         self.assertEqual(
             proposal_entry["llm_meta"].get("signal_path"), "reviewer_approved"
