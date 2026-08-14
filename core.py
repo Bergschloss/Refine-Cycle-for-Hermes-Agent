@@ -2138,21 +2138,36 @@ def _refine_once(
     if _signal_path == "gate_disabled" and _min_signal_required:
         _signal_path = "gate_opened"
 
-    proposal = _llm.propose(
-        llm=llm,
-        evidence_text=evidence_text,
-        existing_skills=list_skill_entries(),
-        existing_memories=list_memory_snippets(),
-        error_patterns=error_patterns,
-        user_corrections=[item.get("snippet", "") for item in corrections],
-        unused_skills=_unused_skills_safe(),
-        refinement_history=journal.recent_refinements(config.history_max_entries()),
-        purpose="refine",
-        run_context=proposal_context,
-        reviewer_context=reviewer_context,
-        skill_content_loader=journal.read_skill_content,
-        target=_run_target,
-    )
+    _PRIMARY_RETRY_FAILURES = frozenset({"llm_call_error", "no_final_text"})
+    _max_primary_attempts = 2
+    for _primary_attempt in range(_max_primary_attempts):
+        proposal = _llm.propose(
+            llm=llm,
+            evidence_text=evidence_text,
+            existing_skills=list_skill_entries(),
+            existing_memories=list_memory_snippets(),
+            error_patterns=error_patterns,
+            user_corrections=[item.get("snippet", "") for item in corrections],
+            unused_skills=_unused_skills_safe(),
+            refinement_history=journal.recent_refinements(config.history_max_entries()),
+            purpose="refine",
+            run_context=proposal_context,
+            reviewer_context=reviewer_context,
+            skill_content_loader=journal.read_skill_content,
+            target=_run_target,
+        )
+        _primary_failure = str(proposal.get("failure", "") or "")
+        if (
+            _primary_failure not in _PRIMARY_RETRY_FAILURES
+            or _primary_attempt >= _max_primary_attempts - 1
+        ):
+            break
+        logger.warning(
+            "Refine primary backend returned %s (attempt %d/%d); retrying",
+            _primary_failure,
+            _primary_attempt + 1,
+            _max_primary_attempts,
+        )
     # Capture metadata from the LLM call that produced this proposal.
     llm_meta = _llm.last_call_meta()
     _run_llm_meta = {

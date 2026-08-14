@@ -1236,6 +1236,42 @@ class RefineTests(unittest.TestCase):
         self.assertNotIsInstance(result["evidence"]["messages"], list)
         self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "llm_error")
 
+    def test_primary_llm_call_error_is_retried_once(self):
+        """A primary-backend llm_call_error must retry the proposal once before journaling."""
+        fail = {"action": "no_op", "failure": "llm_call_error", "reason": "model unavailable"}
+        ok = skill_proposal("retry-llm-call-error")
+        with patch.object(core._llm, "propose", side_effect=[fail, ok]) as mock_propose:
+            result = core.refine_run(MockLlm())
+        self.assertTrue(result["success"])
+        self.assertEqual(mock_propose.call_count, 2)
+
+    def test_primary_no_final_text_is_retried_once(self):
+        """A primary-backend no_final_text must retry the proposal once before journaling."""
+        fail = {"action": "no_op", "failure": "no_final_text", "reason": "no output"}
+        ok = skill_proposal("retry-no-final-text")
+        with patch.object(core._llm, "propose", side_effect=[fail, ok]) as mock_propose:
+            result = core.refine_run(MockLlm())
+        self.assertTrue(result["success"])
+        self.assertEqual(mock_propose.call_count, 2)
+
+    def test_primary_llm_trust_denied_is_not_retried(self):
+        """A trust-policy denial must not cost a retry."""
+        fail = {"action": "no_op", "failure": "llm_trust_denied", "reason": "policy denied"}
+        with patch.object(core._llm, "propose", return_value=fail) as mock_propose:
+            result = core.refine_run(MockLlm())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "llm_error")
+        self.assertEqual(mock_propose.call_count, 1)
+
+    def test_primary_llm_call_error_stops_after_retry_budget(self):
+        """A persistent llm_call_error must give up after exactly one retry (2 attempts)."""
+        fail = {"action": "no_op", "failure": "llm_call_error", "reason": "model unavailable"}
+        with patch.object(core._llm, "propose", return_value=fail) as mock_propose:
+            result = core.refine_run(MockLlm())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "llm_error")
+        self.assertEqual(mock_propose.call_count, 2)
+
     def test_json_extraction_handles_trailing_braces_and_pydantic(self):
         """Wave 2.7: balanced-brace scanner extracts valid JSON despite trailing }."""
         # Valid JSON followed by trailing text with a brace
