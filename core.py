@@ -1487,8 +1487,8 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
     fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
     if fingerprint and not re.fullmatch(r"[0-9a-f]{12}", fingerprint):
         return "pattern_fingerprint must be the complete 12-character fingerprint"
-    if kind == "memory" and _MEMORY_ENTRY_DELIMITER in str(proposal.get("content", "")):
-        # The host joins and splits entries on this sequence, so content carrying
+    if kind == "memory" and _memory_content_splits(str(proposal.get("content", ""))):
+        # The host joins and splits entries on its delimiter, so content carrying
         # it is stored as one entry and read back as several. The target check
         # then fails for a write that did land: journaled as an error,
         # un-rollbackable, absent from the audit, and permanent in the prompt.
@@ -1498,9 +1498,39 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-# The host joins memory entries with this sequence and splits on it when
-# reading, so it cannot appear inside a single entry's content.
-_MEMORY_ENTRY_DELIMITER = "\n\u00a7\n"
+def _memory_entry_delimiter() -> str:
+    """The host's entry delimiter, read from the host rather than restated here.
+
+    Two constants that must agree are a defect waiting to happen, so this asks the
+    host and keeps a literal only as the fallback for a host that stops exporting
+    it.
+    """
+    try:
+        from tools.memory_tool import ENTRY_DELIMITER
+
+        if isinstance(ENTRY_DELIMITER, str) and ENTRY_DELIMITER:
+            return ENTRY_DELIMITER
+    except Exception:
+        logger.debug("Host exports no memory entry delimiter", exc_info=True)
+    return "\n\u00a7\n"
+
+
+def _memory_content_splits(content: str) -> bool:
+    """Whether the host would read this content back as more than one entry.
+
+    Checking for the delimiter alone is not enough: the host joins entries with
+    it, so content whose own edge completes the sequence once a neighbour is
+    joined -- a trailing ``\\n§`` or a leading ``§\\n`` -- splits just as surely
+    while round-tripping clean on its own, which means no drift is reported
+    either. The real test is what the join/split cycle does to it.
+    """
+    delimiter = _memory_entry_delimiter()
+    stripped = content.strip()
+    if delimiter in stripped:
+        return True
+    # Probe the actual round trip with neighbours on both sides.
+    joined = delimiter.join(["before", stripped, "after"])
+    return joined.split(delimiter) != ["before", stripped, "after"]
 
 
 def _host_tool_result(raw: Any) -> Dict[str, Any]:
@@ -1508,9 +1538,12 @@ def _host_tool_result(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return raw
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {"success": False, "error": str(raw)}
+    # A JSON scalar or list is not a result; returning it would make every caller
+    # that does ``.get("success")`` raise outside its own error handling.
+    return parsed if isinstance(parsed, dict) else {"success": False, "error": str(raw)}
 
 
 def _apply_skill(proposal: Dict[str, Any]) -> Dict[str, Any]:

@@ -8960,12 +8960,24 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_memory_content_carrying_the_host_delimiter_is_refused(self):
         """Content split into several entries by the host could never be proven."""
-        error = core._validate_proposal({
-            "action": "create", "kind": "memory", "name": "delimited",
-            "content": "first part\n\u00a7\nsecond part", "reason": "why", "evidence": [],
-        })
-        self.assertIsNotNone(error)
-        self.assertIn("entry delimiter", error)
+        for content in [
+            # Carries the delimiter outright.
+            "first part\n\u00a7\nsecond part",
+            # Completes the delimiter only once a neighbour is joined onto it, so
+            # it round-trips clean alone and reports no drift.
+            "trailing edge\n\u00a7",
+        ]:
+            with self.subTest(content=content):
+                error = core._validate_proposal({
+                    "action": "create", "kind": "memory", "name": "delimited",
+                    "content": content, "reason": "why", "evidence": [],
+                })
+                self.assertIsNotNone(error)
+                self.assertIn("entry delimiter", error)
+        # Ordinary content, and a leading marker the host splits correctly, pass.
+        for content in ["an ordinary lesson", "\u00a7\nleading marker"]:
+            with self.subTest(accepted=content):
+                self.assertIsNone(core._memory_content_splits(content) or None)
 
     def test_padded_memory_reproposal_is_still_a_duplicate(self):
         """The store strips, so padding does not make it a different append."""
@@ -9588,56 +9600,74 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         FakeHost.memory_drift = "MEMORY.md.bak.1"
         rollback = core.refine_rollback(result["journal_id"])
         self.assertFalse(rollback["success"])
-        # The host owns the drift check, so its refusal is what surfaces.
-        self.assertIn("changed outside Hermes", rollback["error"])
+        self.assertIn("changed outside refine", rollback["error"])
         self.assertIn("keep me", FakeHost.memory_entries)
         # A refused rollback leaves the edit applied and still reversible.
         entry = journal.get_entry(result["journal_id"])
         self.assertEqual(entry["outcome"], "applied")
         self.assertTrue(journal.is_reversible(entry))
 
-    def test_memory_rollback_is_approval_gated_like_the_forward_write(self):
-        """Removing refine's own append goes through the same gate as adding it.
+    def test_memory_rollback_never_stages_a_deferred_removal(self):
+        """A staged removal is replayed by substring and can bind to another entry.
 
-        A user who turns on memory write approval to review memory mutations must
-        see the deletion too, not only the addition.
+        The host stages ``{"action": "remove", "old_text": <content>}`` and
+        replays it later through a substring match that pops a single match even
+        when that match is a strict superstring. Between staging and approval the
+        entry can be replaced or extended, and the replay would then delete the
+        user's entry -- a delete of something refine never created. Refine
+        therefore removes its own append itself and does not stage a removal, even
+        with the gate on.
         """
         result = self.run_proposal({
-            "action": "create", "kind": "memory", "name": "gated-removal",
-            "content": "remove me only after approval", "reason": "why", "evidence": [],
+            "action": "create", "kind": "memory", "name": "never-staged",
+            "content": "remove exactly this", "reason": "why", "evidence": [],
         })
         FakeHost.stage_writes = True
         rollback = core.refine_rollback(result["journal_id"])
         self.assertTrue(rollback["success"])
-        self.assertTrue(rollback["staged"])
+        self.assertFalse(rollback.get("staged"))
         entry = journal.get_entry(result["journal_id"])
-        self.assertEqual(entry["outcome"], "pending_rollback")
-        self.assertTrue(entry["pending_id"])
-        # Still present until the host approves.
-        self.assertIn("remove me only after approval", FakeHost.memory_entries)
-
-        FakeHost.approve_pending("memory", entry["pending_id"])
-        FakeHost.stage_writes = False
-        core.refine_audit()
+        self.assertEqual(entry["outcome"], "rolled_back")
+        self.assertNotIn("remove exactly this", FakeHost.memory_entries)
+        # No pending record was created for the removal.
         self.assertEqual(
-            journal.get_entry(result["journal_id"])["outcome"], "rolled_back"
+            [key for key in FakeHost.pending if key[0] == "memory"], []
         )
-        self.assertNotIn("remove me only after approval", FakeHost.memory_entries)
 
-    def test_memory_rollback_refuses_when_another_entry_contains_its_text(self):
-        """The host would refuse an ambiguous match; name the real reason first."""
+    def test_memory_rollback_removes_its_own_entry_beside_a_superstring(self):
+        """Exact-content removal is unambiguous even next to a longer entry.
+
+        The host's substring removal would refuse here, or worse bind to the
+        longer entry once refine's own was gone. Removing by proven position and
+        exact content does neither.
+        """
         result = self.run_proposal({
-            "action": "create", "kind": "memory", "name": "ambiguous",
+            "action": "create", "kind": "memory", "name": "beside-superstring",
             "content": "short lesson", "reason": "why", "evidence": [],
         })
         FakeHost.memory_entries.append("short lesson with extra detail")
+        self.assertTrue(core.refine_rollback(result["journal_id"])["success"])
+        self.assertEqual(
+            FakeHost.memory_entries, ["short lesson with extra detail"]
+        )
+
+    def test_memory_rollback_refuses_when_its_entry_became_a_superstring(self):
+        """If refine's exact text is gone, nothing may be removed in its place."""
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "replaced",
+            "content": "short lesson", "reason": "why", "evidence": [],
+        })
+        # Someone rewrote refine's entry into a longer one.
+        FakeHost.memory_entries[:] = ["short lesson plus detail the user wrote"]
+        # A promise that cannot be kept is withdrawn, so the refusal comes from
+        # the reversibility check itself rather than from a later conflict.
+        self.assertFalse(journal.is_reversible(journal.get_entry(result["journal_id"])))
         rollback = core.refine_rollback(result["journal_id"])
         self.assertFalse(rollback["success"])
-        self.assertIn("contains this entry's text", rollback["error"])
-        # Nothing removed, and the record stays reversible for a later retry.
-        self.assertIn("short lesson", FakeHost.memory_entries)
-        self.assertIn("short lesson with extra detail", FakeHost.memory_entries)
-        self.assertTrue(journal.is_reversible(journal.get_entry(result["journal_id"])))
+        self.assertIn("not reversible", rollback["error"])
+        self.assertEqual(
+            FakeHost.memory_entries, ["short lesson plus detail the user wrote"]
+        )
 
     def test_rejected_memory_approval_is_recorded_as_rejected(self):
         FakeHost.stage_writes = True

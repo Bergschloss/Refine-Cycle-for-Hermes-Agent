@@ -326,21 +326,36 @@ these notes. Creation, target-state proof, audit rows, and conflict-aware
 rollback are still journaled; host approval remains in force for host-managed
 skills and memory.
 
-### How a memory entry is identified for rollback
+### How a memory entry is identified for rollback, and one disclosed gap
 
-Both directions go through the host's gated memory tool, so with
-`memory.write_approval` enabled the removal stages as `pending_rollback` exactly
-as the addition stages as `pending_approval`. Refine never rewrites `MEMORY.md`
-itself: the host owns the file lock, the drift check, and the write.
+Adding a memory entry goes through the host's gated memory tool, so with
+`memory.write_approval` enabled it stages as `pending_approval` like any other
+gated write. **Removing it does not go through that gate**, and that is a
+deliberate trade rather than an oversight.
 
-Identifying *which* entry to remove takes care, because the host matches by
-substring. Refine proves the entry is its own — the exact content, present at or
-after the position recorded when the edit was planned, with everything before
-that position pinned by a digest — and additionally refuses when any other entry
-contains that content, since the host would then be unable to tell them apart.
-In that case rollback reports a conflict and removes nothing rather than guessing;
-the host applies the same refusal independently, so a state that changes in
-between cannot turn into the wrong deletion.
+The host's removal identifies an entry by *substring*, and pops a single match
+even when that match is a strict superstring of the text it was given. Under the
+gate a removal is staged and replayed later, so between staging and approval the
+entry can be replaced or extended — and the replay would then delete the **user's**
+entry. That is a delete of something refine never created, which this plugin may
+never do, and it would outrank the value of the gate.
+
+So refine removes its own append itself: it re-reads under the host's per-file
+memory lock, proves the entry is its own — exact content, at or after the position
+recorded when the edit was planned, with everything before that position pinned by
+a digest — and deletes only that entry, all inside the lock. If its exact text is
+no longer there, rollback refuses and removes nothing, and the entry stops being
+advertised as reversible. A longer entry that merely contains refine's text is not
+a problem: identification is by exact content, not substring.
+
+Two consequences worth knowing:
+
+- A memory rollback is not reviewable through `memory.write_approval`. Skill
+  rollback is: it goes through the host's skill manager and honors a staged result.
+- With the gate on and an interactive prompt registered, the *forward* memory
+  write can block on that prompt while the refine pass holds the shared mutation
+  lock, so a concurrent `/refine` waits out its lock timeout and the automatic
+  session-end pass skips that round.
 
 One ambiguity remains and is not solvable from the host API: an entry written by
 something else that is byte-identical to refine's own. The host refuses exact
