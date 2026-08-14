@@ -115,7 +115,9 @@ _LEGACY_IPV4_OVERFLOW = re.compile(
     (?=\.|[^\w.]|$)
     """
 )
-_SHORT_DECIMAL_IPV4_LITERAL = re.compile(r"(?<![\w.])(?:0|[1-9]\d{0,5})(?![\w.])")
+_SHORT_DECIMAL_IPV4_LITERAL = re.compile(
+    r"(?<![\w.])(?:0|[1-9]\d{0,5})(?=$|[^\w.]|\.(?=\s|$))"
+)
 _HTTP_STATUS_REFERENCE = re.compile(
     r"""(?ix)
     (?:
@@ -273,7 +275,9 @@ def _short_decimal_has_host_context(text: str, match: re.Match) -> bool:
     before = text[max(0, match.start() - 48):match.start()]
     return bool(
         re.search(
-            r"(?i)\b(?:host|address|ip|server|target|connect(?:ion)?|endpoint)"
+            r"(?i)\b(?:host|address|ip|server|target|connect(?:ion)?|endpoint"
+            r"|ssh|dial|reach|ping|curl|wget|telnet|netcat|nc|route|proxy|forward"
+            r"|bind|listen)"
             r"s?\s*(?:(?:is|to|at)\s*|[=,:;\-]\s*|\(\s*)?$",
             before,
         )
@@ -1420,6 +1424,23 @@ def _skill_or_memory_injection_error(content: str) -> Optional[str]:
     return None
 
 
+def _resource_reference_kind(text: str) -> Optional[str]:
+    """Classify a durable-context resource reference without rewriting it.
+
+    NFKC is inspection-only: persisted memory and prompt-note bytes stay intact,
+    while compatibility forms such as full-width URL punctuation cannot bypass the
+    same resource policy applied to their ASCII equivalents.
+    """
+    inspected = unicodedata.normalize("NFKC", text)
+    if not (_RESOURCE_REFERENCE.search(inspected) or _has_host_reference(inspected)):
+        return None
+    if _RESOURCE_NETWORK_OR_SHELL.search(inspected):
+        return "network_or_shell"
+    if _has_host_reference(inspected):
+        return "host"
+    return "path_or_environment"
+
+
 def _memory_resource_error(content: str) -> Optional[str]:
     """Reject resources in memory, which is future behavioral context.
 
@@ -1427,7 +1448,7 @@ def _memory_resource_error(content: str) -> Optional[str]:
     durable guidance instead, so a path, host, URL, environment expansion, or
     shell metacharacter has no safe operational role there.
     """
-    if _RESOURCE_REFERENCE.search(content) or _has_host_reference(content):
+    if _resource_reference_kind(content):
         return "Memory content cannot reference resources, hosts, URLs, paths, environment variables, or shell syntax"
     return None
 
@@ -1450,13 +1471,12 @@ def _prompt_note_content_error(
         return "Prompt note must use 'When <specific condition>, <one action>.'"
     if len(lines) > 1 and not _PROMPT_NOTE_FORMAT.match(lines[1]):
         return "Every line of a prompt note must use 'When <specific condition>, <one action>.'"
-    if any(
-        _RESOURCE_REFERENCE.search(line) or _has_host_reference(line)
-        for line in lines
-    ):
-        if any(_RESOURCE_NETWORK_OR_SHELL.search(line) for line in lines):
+    resource_kinds = {_resource_reference_kind(line) for line in lines}
+    resource_kinds.discard(None)
+    if resource_kinds:
+        if "network_or_shell" in resource_kinds:
             return "Prompt note cannot reference URLs, commands, or shell syntax"
-        if any(_has_host_reference(line) for line in lines):
+        if "host" in resource_kinds:
             return "Prompt note cannot reference hosts"
         return "Prompt note cannot reference file paths or environment variables"
     if any(_CONTEXT_OVERRIDE_INTENT.search(line) for line in lines):

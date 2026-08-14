@@ -49,13 +49,22 @@ _UNQUOTED_SECRET = re.compile(
     r"(?P<value>(?:[\"']?bearer\s+\[REDACTED\][\"']?|[^\s,;\}\]\[]{6,}))"
 )
 _BEARER = re.compile(
-    r"(?i)(?P<label>\bbearer\s+)(?P<quote>[\"']?)[A-Za-z0-9_.+/=-]{8,}(?P<close>[\"']?)"
+    r"(?i)(?P<label>\bbearer\s+)(?P<quote>[\"']?)[A-Za-z0-9._~+/=-]{8,}(?P<close>[\"']?)"
 )
 # Preserve only already-canonical credential fields as units before marker
 # splitting. Without this, a later boundary pass sees the pre-marker fragment
 # (``credentials=Bearer ``) by itself and destroys the auth scheme.
 _CANONICAL_BEARER_FIELD = re.compile(
-    rf"(?i){_SECRET_PREFIX}(?:[\"']?bearer\s+)\[REDACTED\][\"']?"
+    rf"(?i){_SECRET_PREFIX}(?:[\"']?bearer\s+)\[REDACTED\]"
+    r"(?:[\"'](?=$|[\s,;\}\]])|(?=$|[\s,;\}\]]))"
+)
+# A marker inside a credential value is untrusted input, not proof that the
+# rest of that value was scrubbed. Remove a token suffix before marker splitting
+# so it cannot leak through a forged `[REDACTED]` fragment.
+_FORGED_BEARER_MARKER_FIELD = re.compile(
+    rf"(?ix)(?P<prefix>{_SECRET_PREFIX})(?:"
+    r"(?P<quote>[\"'])bearer\s+\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
+    r"|bearer\s+\[REDACTED\](?:[^\s,;\}\]]+|\s+[^\s,;\}\]]+))"
 )
 _BEARER_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
 _URL_CREDENTIALS = re.compile(
@@ -153,6 +162,14 @@ def scrub_text(text: str) -> str:
     """Redact credentials while preserving existing redaction markers exactly."""
     if not text:
         return text
+
+    # Reject forged markers with a token suffix before preserving any canonical
+    # field. The marker is not evidence that untrusted trailing text is safe.
+    text = _FORGED_BEARER_MARKER_FIELD.sub(
+        lambda match: f"{match.group('prefix')}{match.group('quote') or ''}"
+        f"Bearer {_REDACTED}{match.group('close') or ''}",
+        text,
+    )
 
     def scrub_unprotected(chunk: str) -> str:
         # Sanitized proposals cross several trust boundaries. Splitting around

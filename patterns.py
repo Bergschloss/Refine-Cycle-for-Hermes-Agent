@@ -90,6 +90,9 @@ _TRACEBACK_WRAPPER_LINE = re.compile(r"(?i)^(?:g?make|ninja):")
 _TRACEBACK_CHAIN_LINE = re.compile(
     r"(?i)^(?:during handling of the above exception|the above exception was the direct cause)"
 )
+_TRACEBACK_RUNNER_FOOTER_LINE = re.compile(
+    r"(?i)^(?:process|command) exited with code \d+|^exit(?:ed)? code:? \d+"
+)
 
 
 def _is_python_exception_line(line: str) -> bool:
@@ -177,6 +180,7 @@ def normalize_error(content: str) -> str:
                 if (
                     _TRACEBACK_WRAPPER_LINE.match(line.strip())
                     or _TRACEBACK_CHAIN_LINE.match(line.strip())
+                    or _TRACEBACK_RUNNER_FOOTER_LINE.match(line.strip())
                 ):
                     continue
                 terminal = line
