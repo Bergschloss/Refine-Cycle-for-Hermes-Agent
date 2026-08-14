@@ -3985,6 +3985,62 @@ class RefineTests(unittest.TestCase):
             self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
         self.assertTrue(all(call["auto"] for call in calls))
 
+    def test_gateway_style_concurrent_post_hooks_start_only_one_worker(self):
+        """Concurrent gateway callback threads must coalesce to one auto worker."""
+        FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
+        barrier = threading.Barrier(17)
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def run(**kwargs):
+            calls.append(kwargs)
+            started.set()
+            release.wait(2)
+            return {"success": True}
+
+        class GatewayContext:
+            llm = object()
+
+            def register_command(self, *args, **kwargs):
+                return None
+
+            def register_tool(self, *args, **kwargs):
+                return None
+
+            def register_hook(self, name, callback):
+                if name == "post_llm_call":
+                    self.post_hook = callback
+
+        context = GatewayContext()
+        plugin_init.register(context)
+        with patch.object(plugin_init.core, "refine_run", side_effect=run):
+            threads = [
+                threading.Thread(
+                    target=lambda sid=f"gateway-session-{index}": (
+                        barrier.wait(),
+                        context.post_hook(
+                            session_id=sid,
+                            conversation_history=[{"role": "assistant"}],
+                        ),
+                    )
+                )
+                for index in range(16)
+            ]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            self.assertTrue(started.wait(1))
+            for thread in threads:
+                thread.join(1)
+            release.set()
+            deadline = time.monotonic() + 2
+            while plugin_init._AUTO_THREAD_GUARD.locked() and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
+
     def test_held_mutation_lock_skips_concurrent_auto_triggers_without_stranding(self):
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
         attempted = threading.Event()
