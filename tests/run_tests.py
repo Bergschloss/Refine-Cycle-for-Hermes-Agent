@@ -2754,10 +2754,12 @@ class RefineTests(unittest.TestCase):
         succeed without timeout.
         """
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())
-        # Write a lock file that looks like it was created 600s ago by PID 2.
-        # PID 2 does not exist on any OS (init/System on *nix/Windows).
+        # Use a PID that cannot currently exist on this host. PID 2 is the
+        # systemd/kthreadd process on Linux, so treating it as dead makes this
+        # stale-lock fixture fail for the wrong reason.
+        impossible_pid = os.getpid() + 10_000_000
         stale_payload = json.dumps({
-            "pid": 2, "created": time.time() - 600, "token": "stale-token-dead"
+            "pid": impossible_pid, "created": time.time() - 600, "token": "***"
         })
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(stale_payload, encoding="utf-8")
