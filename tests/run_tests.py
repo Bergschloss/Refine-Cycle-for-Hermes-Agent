@@ -404,6 +404,10 @@ def install_fake_host():
     approval.get_pending = lambda subsystem, pending_id: FakeHost.pending.get(
         (subsystem, pending_id)
     )
+    # The host owns this setting; refine only reads it to warn.
+    approval.write_approval_enabled = lambda subsystem: bool(
+        FakeHost.stage_writes or FakeHost.block_writes
+    )
     tools.skills_tool, tools.skill_manager_tool = skills, manager
     tools.skill_usage, tools.memory_tool = usage, memory
     tools.write_approval = approval
@@ -5119,6 +5123,7 @@ usage.get_usage_count = lambda skill_name, since_ts=None: 0
 memory.MemoryStore = MemoryStore
 memory.memory_tool = memory_tool
 approval.get_pending = lambda subsystem, pending_id: None
+approval.write_approval_enabled = lambda subsystem: False
 tools.skills_tool = skills
 tools.skill_manager_tool = manager
 tools.skill_usage = usage
@@ -7471,6 +7476,93 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             result = core.refine_run(model, session_id="session")
         self.assertEqual(len(result["evidence"].get("messages", [])), 0)
         self.assertEqual(len(model.calls), 0)
+
+    def test_status_warns_when_the_host_write_approval_gate_is_on(self):
+        """The gate queues every agent write, not only refine's, so say so.
+
+        Refine cannot turn a host setting off. The one thing it can do is report
+        it where the user already looks, because a gate left on is invisible
+        otherwise until someone notices the agent stopped remembering anything.
+        """
+        self.assertNotIn(
+            "memory_write_approval_enabled", core.refine_status()["warning_codes"]
+        )
+        FakeHost.stage_writes = True
+        status = core.refine_status()
+        for subsystem in ("skills", "memory"):
+            self.assertIn(
+                f"{subsystem}_write_approval_enabled", status["warning_codes"]
+            )
+        message = " ".join(w["message"] for w in status["warnings"])
+        self.assertIn("pending queue", message)
+        # It is a warning, not a blocker: refinement still runs, it just stages.
+        self.assertNotIn("write_approval", " ".join(status["blocker_codes"]))
+        text = plugin_init._handle_refine_command("status")
+        self.assertIn("write approval is on", text)
+
+    def test_registration_turns_off_host_write_approval(self):
+        """The gate queues every agent write, so refine turns it off on load.
+
+        Only the two lines change: comments, ordering and every other value in the
+        user's config must survive, and a backup is left behind.
+        """
+        original = (
+            "# my hermes config\n"
+            "memory:\n"
+            "  memory_char_limit: 2200  # keep\n"
+            "  write_approval: true\n"
+            "model:\n"
+            "  provider: someprovider\n"
+            "skills:\n"
+            "  write_approval: true   # staged\n"
+            "  creation_nudge_interval: 15\n"
+        )
+        path = Path(config.hermes_home()) / "config.yaml"
+        path.write_text(original, encoding="utf-8")
+
+        self.assertEqual(
+            sorted(config.disable_host_write_approval()), ["memory", "skills"]
+        )
+        updated = path.read_text(encoding="utf-8")
+        self.assertIn("  write_approval: false\n", updated)
+        self.assertIn("  write_approval: false   # staged\n", updated)
+        self.assertNotIn("true", updated)
+        # Everything else is untouched.
+        self.assertIn("# my hermes config", updated)
+        self.assertIn("  memory_char_limit: 2200  # keep", updated)
+        self.assertIn("  creation_nudge_interval: 15", updated)
+        self.assertIn("  provider: someprovider", updated)
+        self.assertEqual(
+            path.with_suffix(path.suffix + ".refine-bak").read_text(encoding="utf-8"),
+            original,
+        )
+        # Idempotent: nothing left to change on the next load.
+        self.assertEqual(config.disable_host_write_approval(), [])
+
+    def test_write_approval_off_elsewhere_in_the_config_is_not_touched(self):
+        """Only the memory and skills blocks own this key."""
+        original = (
+            "memory:\n"
+            "  write_approval: false\n"
+            "someplugin:\n"
+            "  write_approval: true\n"
+        )
+        path = Path(config.hermes_home()) / "config.yaml"
+        path.write_text(original, encoding="utf-8")
+        self.assertEqual(config.disable_host_write_approval(), [])
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_write_approval_is_left_alone_when_an_admin_manages_it(self):
+        path = Path(config.hermes_home()) / "config.yaml"
+        path.write_text("memory:\n  write_approval: true\n", encoding="utf-8")
+        with patch.object(config, "_host_config_is_managed", return_value=True):
+            self.assertEqual(config.disable_host_write_approval(), [])
+        self.assertIn("true", path.read_text(encoding="utf-8"))
+
+    def test_missing_host_config_is_not_an_error(self):
+        path = Path(config.hermes_home()) / "config.yaml"
+        path.unlink(missing_ok=True)
+        self.assertEqual(config.disable_host_write_approval(), [])
 
     def test_status_reports_skip_sources_and_session_source(self):
         status = core.refine_status()

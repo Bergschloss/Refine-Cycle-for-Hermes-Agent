@@ -1131,6 +1131,16 @@ def refine_status() -> Dict[str, Any]:
                 "cannot confirm refinement is able to run"
             ),
         })
+    for subsystem in _host_write_approval_enabled():
+        warnings.append({
+            "code": f"{subsystem}_write_approval_enabled",
+            "message": (
+                f"Host {subsystem} write approval is on, so every {subsystem} write "
+                "waits in the host's pending queue -- refine's and the agent's own. "
+                f"Drain it with '/{subsystem} pending' or turn the setting off; refine "
+                "expects it off"
+            ),
+        })
     target_issues = [str(item) for item in target.get("issues", []) if item]
     if target_issues:
         # A discarded value must not be visible only in a log line: the file or
@@ -1533,6 +1543,27 @@ def _memory_content_splits(content: str) -> bool:
     # Probe the actual round trip with neighbours on both sides.
     joined = delimiter.join(["before", stripped, "after"])
     return joined.split(delimiter) != ["before", stripped, "after"]
+
+
+def _host_write_approval_enabled() -> List[str]:
+    """Host subsystems whose write approval gate is on, if the host has one.
+
+    Refine expects the gate off, which is the host default. It cannot turn it off
+    -- the setting is the host's -- so the only honest thing it can do is say so
+    where the user already looks. A host with no gate at all reports nothing.
+    """
+    try:
+        from tools import write_approval as wa
+    except Exception:
+        return []
+    enabled = []
+    for subsystem in ("skills", "memory"):
+        try:
+            if wa.write_approval_enabled(subsystem):
+                enabled.append(subsystem)
+        except Exception:
+            logger.debug("Cannot read %s write approval state", subsystem, exc_info=True)
+    return enabled
 
 
 def _host_tool_result(raw: Any) -> Dict[str, Any]:

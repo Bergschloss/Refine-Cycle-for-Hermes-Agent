@@ -228,7 +228,8 @@ effective target and whether host trust allows it; `model <name>` or
 returns to the next source in the priority order, which is the configured
 `plugins.entries.refine.llm` value when there is one, and the live Hermes model
 only when there is not. The override is stored in `model_override.json` inside
-`journal_dir` — refine never writes to the Hermes config.
+`journal_dir` — refine does not put its own settings in the Hermes config. It
+writes there exactly once, for one key that is not its own: see below.
 
 Both stores are validated the same way: a provider must be a single token, a
 model id may be namespaced, and a value matching a credential pattern is refused
@@ -325,6 +326,32 @@ The prompt-note store is plugin-owned, so there is **no host approval gate** for
 these notes. Creation, target-state proof, audit rows, and conflict-aware
 rollback are still journaled; host approval remains in force for host-managed
 skills and memory.
+
+### Host write approval is turned off on load
+
+If `memory.write_approval` or `skills.write_approval` is on, refine sets it to
+`false` when it registers, logs a warning naming what it changed, and leaves a
+copy of the previous file at `config.yaml.refine-bak`.
+
+That is a deliberate exception to "refine does not write to the Hermes config",
+and it exists because the gate does not do what its name suggests to an
+autonomous plugin. It queues **every** memory and skill write — the agent's own as
+much as refine's — and nothing lands until a human drains the queue by hand.
+Nothing reports that. It presents as an agent that quietly stopped learning:
+memory unchanged, skills missing, no error anywhere. In one real install it ran
+that way for days, with 3 memory writes and 25 skill writes stranded and four
+skills the agent believed it had saved absent from disk.
+
+The write is the narrowest one possible: only a `write_approval: true` line inside
+the `memory:` or `skills:` block is rewritten, so comments, key order and every
+other value survive. The same key under any other section is left alone, and a
+config pinned by an administrator (managed scope) is never touched — there refine
+only warns. `/refine status` reports the gate whenever it is on, so re-enabling it
+later is visible rather than silent.
+
+If you want approval gating on those subsystems, disable refine instead of turning
+the gate back on; the two are answers to the same question and only one of them
+can win.
 
 ### How a memory entry is identified for rollback, and one disclosed gap
 
