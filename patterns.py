@@ -37,7 +37,7 @@ except ImportError:
 #   * an unrooted path (``src/main.py``) is only recognized when its last segment
 #     carries an extension — that is what separates a real relative path from two
 #     prose words around a slash.
-_SEGMENT = r"[\w.\-]+"
+_SEGMENT = r"[\w.()\-]+"
 _SPACED_SEGMENT = rf"{_SEGMENT}(?: {_SEGMENT})*"
 # A drive letter or a UNC prefix is never prose, so segments under it may carry
 # interior spaces (``C:\Program Files\x``).
@@ -78,7 +78,7 @@ _NORMALIZERS = [
     (_PATH, "PATH"),
     # UUIDs, then any long hex run (ids, hashes, object addresses)
     (re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b"), "X"),
-    (re.compile(r"\b(?:0x)?[0-9a-fA-F]{8,}\b"), "X"),
+    (re.compile(r"\b(?:0x)?[0-9a-fA-F]{7,}\b"), "X"),
     # Durations and sizes: a timeout after 10s and after 15s are one failure.
     (re.compile(r"(?i)\b\d+(?:\.\d+)?\s*(?:ms|s|m|h|kb|mb|gb)\b"), "N"),
     # Whatever integers survive

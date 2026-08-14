@@ -400,6 +400,34 @@ def _has_incomplete_json_structure(text: str) -> bool:
     return in_string or depth > 0
 
 
+_REASONING_TAGS = "think|thought|reasoning|reflection"
+_LEADING_REASONING_OPEN = re.compile(
+    rf"^\s*<(?P<tag>{_REASONING_TAGS})\s*>", re.IGNORECASE
+)
+
+
+def _final_answer_text(text: str) -> str:
+    """Drop complete leading reasoning blocks before considering salvage JSON.
+
+    A model may emit an internally consistent draft inside a reasoning tag before
+    its actual answer. That draft is not an authorized proposal. An unclosed
+    leading block has no final answer at all, so it deliberately yields an empty
+    string rather than searching inside it for JSON.
+    """
+    remaining = text
+    while True:
+        opening = _LEADING_REASONING_OPEN.match(remaining)
+        if opening is None:
+            return remaining
+        tag = opening.group("tag")
+        closing = re.search(
+            rf"</{re.escape(tag)}\s*>", remaining[opening.end():], re.IGNORECASE
+        )
+        if closing is None:
+            return ""
+        remaining = remaining[opening.end() + closing.end():]
+
+
 def _salvage_parsed(result: Any, *, requested_max_tokens: int) -> _Reply:
     """Parse one reply and name incomplete output instead of returning a false no_op."""
     parsed = getattr(result, "parsed", None)
@@ -414,12 +442,13 @@ def _salvage_parsed(result: Any, *, requested_max_tokens: int) -> _Reply:
     text = getattr(result, "text", "") or ""
     if isinstance(parsed, str) and not text:
         text = parsed
-    if text:
-        value = _extract_first_json_object(text)
+    final_text = _final_answer_text(text) if text else ""
+    if final_text:
+        value = _extract_first_json_object(final_text)
         if value is not None:
             return _Reply(sanitize(value), salvaged=True)
     output_tokens = _output_tokens(result)
-    if not text:
+    if not final_text:
         if output_tokens:
             model = scrub_text(str(getattr(result, "model", "")))
             logger.warning(
@@ -438,7 +467,7 @@ def _salvage_parsed(result: Any, *, requested_max_tokens: int) -> _Reply:
             "truncated",
             "Model output reached its token limit before the proposal completed.",
         )
-    if _has_incomplete_json_structure(text):
+    if _has_incomplete_json_structure(final_text):
         return _Reply(
             None,
             "truncated",
@@ -809,7 +838,9 @@ def normalize_expected_outcome(value: Any) -> str:
 
 def normalize_summary(value: Any) -> str:
     """Return a compact, sanitized transaction summary for durable storage."""
-    return scrub_text(str(value)).strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
+    if not isinstance(value, str):
+        return ""
+    return scrub_text(value).strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
 
 
 def refinement_history_max_chars(configured_chars: int) -> int:
@@ -1021,7 +1052,10 @@ def _finalize_edit(
         if retry is not None:
             if retry.get("failure"):
                 return sanitize(retry)
-            for key in ("reason", "expected_outcome", "evidence", "pattern_fingerprint"):
+            for key in (
+                "action", "kind", "name", "category", "reason",
+                "expected_outcome", "evidence", "pattern_fingerprint",
+            ):
                 if not retry.get(key) and parsed.get(key):
                     retry[key] = parsed[key]
             parsed = retry

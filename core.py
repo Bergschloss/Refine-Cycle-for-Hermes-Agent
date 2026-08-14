@@ -3321,7 +3321,10 @@ def refine_run(
             return runs[0]
 
         recoveries: List[Dict[str, Any]] = []
-        for item in runs:
+        # Each pass already returns its own recoveries newest-first.  Traverse
+        # passes in reverse too, so the combined list is directly safe for
+        # positional memory rollback.
+        for item in reversed(runs):
             inner = item.get("recoveries")
             if isinstance(inner, list) and inner:
                 recoveries.extend(inner)

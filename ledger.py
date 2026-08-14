@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import tempfile
@@ -79,6 +80,17 @@ def _save_stats(stats: Dict[str, Any]) -> None:
 _NO_ARTIFACT_OUTCOMES = frozenset({"error", "rejected", "rolled_back"})
 
 
+def _finite_float(value: Any) -> Optional[float]:
+    """Return one persisted numeric value only when it is finite."""
+    if isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 def record_edit(
     proposal: Dict[str, Any],
     journal_id: str,
@@ -111,6 +123,10 @@ def record_edit(
                 stats.setdefault(legacy_key, legacy)
                 del stats[name]
         previous = stats.get(key, {})
+        if not isinstance(previous, dict):
+            # Keep an otherwise readable ledger usable when one historical row
+            # was manually corrupted; this new edit owns the replacement row.
+            previous = {}
         now = time.time()
         same_edit = previous.get("journal_id") == journal_id
         # A record that left no artifact must not overwrite the row of a
@@ -140,7 +156,14 @@ def record_edit(
                 _save_stats(stats)
             return
         created_ts = previous.get("created_ts", now) if same_edit else now
-        previous_version = previous.get("version", 1 if previous else 0)
+        default_version = 1 if previous else 0
+        raw_version = previous.get("version", default_version)
+        try:
+            previous_version = (
+                default_version if isinstance(raw_version, bool) else int(raw_version)
+            )
+        except (TypeError, ValueError):
+            previous_version = default_version
         version = previous_version if same_edit else previous_version + 1
         stats[key] = {
             "created_ts": created_ts,
@@ -185,13 +208,13 @@ def record_journal_state(entry: Dict[str, Any]) -> None:
 
 
 def earliest_created_ts() -> Optional[float]:
-    values = [
-        float(meta.get("created_ts", 0))
-        for meta in load_stats().values()
-        if isinstance(meta, dict)
-        and meta.get("created_ts")
-        and meta.get("outcome", "applied") == "applied"
-    ]
+    values: List[float] = []
+    for meta in load_stats().values():
+        if not isinstance(meta, dict) or meta.get("outcome", "applied") != "applied":
+            continue
+        created = _finite_float(meta.get("created_ts"))
+        if created is not None:
+            values.append(created)
     return min(values) if values else None
 
 
@@ -250,13 +273,17 @@ def unused_skills(min_age_days: int = 14) -> List[str]:
     cutoff = time.time() - (min_age_days * 86400)
     result: List[str] = []
     for name, meta in load_stats().items():
+        if not isinstance(meta, dict):
+            continue
+        created = _finite_float(meta.get("created_ts"))
         if (
             meta.get("kind") != "skill"
-            or meta.get("created_ts", 0) > cutoff
+            or created is None
+            or created > cutoff
             or meta.get("outcome", "applied") != "applied"
         ):
             continue
-        uses, scope = _count_uses_with_scope(name, meta.get("created_ts", 0))
+        uses, scope = _count_uses_with_scope(name, created)
         # since_approx is a heuristic (LIKE '%/name%' in message content); absence
         # of detected uses is not absence of use.  Only since_exact (the host's
         # authoritative usage counter) can prove a skill is genuinely unused.
@@ -283,10 +310,11 @@ def _merge_journal_stats(
     }
     ordered = sorted(
         (entry for entry in (journal_entries or []) if isinstance(entry, dict)),
-        key=lambda entry: float(entry.get("ts", 0) or 0),
+        key=lambda entry: _finite_float(entry.get("ts")) or 0,
     )
     for entry in ordered:
-        if entry.get("outcome") not in tracked_outcomes:
+        outcome = entry.get("outcome")
+        if outcome not in tracked_outcomes:
             continue
         proposal = entry.get("proposal")
         if not isinstance(proposal, dict) or proposal.get("action") not in ("create", "patch"):
@@ -297,8 +325,16 @@ def _merge_journal_stats(
         kind = str(proposal.get("kind", "skill") or "skill")
         key = name if kind == "skill" else f"{kind}:{name}"
         entry_id = str(entry.get("id", ""))
-        timestamp = float(entry.get("ts", 0) or 0)
+        timestamp = _finite_float(entry.get("ts")) or 0
         existing = merged.get(key)
+        # A later rejected/rolled-back attempt for the same name did not change
+        # the host. It must not erase attribution for a different live artifact.
+        if (
+            isinstance(existing, dict)
+            and existing.get("journal_id") != entry_id
+            and outcome in _NO_ARTIFACT_OUTCOMES
+        ):
+            continue
         llm_meta = entry.get("llm_meta")
         reported_model = (
             scrub_text(str(llm_meta["reported_model"]))[:60]
@@ -410,9 +446,14 @@ def audit(
     merged_stats = _merge_journal_stats(stats, journal_entries)
     intended_skill_digests = _latest_applied_skill_digests(journal_entries)
     for key, meta in sorted(merged_stats.items()):
+        if not isinstance(meta, dict):
+            logger.warning("Ignoring malformed ledger row for %s", scrub_text(str(key)))
+            continue
         # Legacy rows have no explicit name; their key is the name.
         name = str(meta.get("name") or key)
-        created = meta.get("created_ts", 0) or now
+        created = _finite_float(meta.get("created_ts"))
+        if created is None:
+            created = now
         age_days = max(0, int((now - created) // 86400))
         try:
             version = max(1, int(meta.get("version", 1) or 1))
@@ -449,7 +490,13 @@ def audit(
             uses, usage_scope = None, "unavailable"
             verdict = "no edit landed"
         else:
-            uses, usage_scope = _count_uses_with_scope(name, created)
+            if meta.get("kind", "skill") == "skill":
+                uses, usage_scope = _count_uses_with_scope(name, created)
+            else:
+                # The host exposes a usage counter only for skills. Counting a
+                # memory/prompt name in conversations is neither authoritative
+                # nor useful evidence, so keep that dimension unavailable.
+                uses, usage_scope = None, "unavailable"
             if fingerprint and patterns_available:
                 hit = by_fingerprint.get(fingerprint)
                 # Pattern exists but has no last_ts -> still active (recurred)

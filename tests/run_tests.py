@@ -526,6 +526,8 @@ class RefineTests(unittest.TestCase):
         # Both are process-lifetime globals: left set, they leak across tests.
         plugin_init._REGISTER_WARNED = False
         plugin_init._REGISTERED_LLM = None
+        llm._call_transport.preferred_output_mode = ""
+        llm._call_meta.value = {}
         config._set_runtime_journal_dir(None)
         journal._MIGRATION_STATUS.update({
             "outcome": "not_checked", "source": "", "destination": "",
@@ -625,6 +627,209 @@ class RefineTests(unittest.TestCase):
             patterns.fingerprint("bash", prefix + "same"),
             patterns.fingerprint("bash", prefix + "same"),
         )
+
+    def test_quoted_secret_keys_and_escaped_values_are_redacted(self):
+        """Quoted JSON/Python keys must not bypass the generic secret boundary."""
+        cases = (
+            ('{"api_key": supersecret123}', "supersecret123"),
+            ("'access_token': supersecret456", "supersecret456"),
+            ('{"api_key": "escaped\\\"secret789"}', "escaped\\\"secret789"),
+        )
+        for raw, secret in cases:
+            with self.subTest(raw=raw):
+                scrubbed = sanitization.scrub_text(raw)
+                self.assertNotIn(secret, scrubbed)
+                self.assertIn("[REDACTED]", scrubbed)
+                self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
+
+        # An unterminated, backslash-heavy value must remain linear. The older
+        # overlapping alternatives explored exponentially many segmentations.
+        adversarial = 'api_key="' + ("\\" * 4096)
+        started = time.perf_counter()
+        sanitization.scrub_text(adversarial)
+        self.assertLess(time.perf_counter() - started, 0.5)
+
+    def test_reasoning_block_cannot_supply_the_salvaged_proposal(self):
+        """Only final answer text, never a completed reasoning draft, is authoritative."""
+        for tag in ("think", "thought", "reasoning", "reflection"):
+            with self.subTest(tag=tag):
+                reply = llm._salvage_parsed(
+                    MockResult(
+                        None,
+                        text=(
+                            f'<{tag.upper()}>{{"action":"create","kind":"skill",'
+                            '"name":"draft","content":"draft"}'
+                            f'</{tag.upper()}>\n'
+                            '{"action":"no_op","reason":"final answer"}'
+                        ),
+                    ),
+                    requested_max_tokens=llm.PROPOSAL_MAX_TOKENS,
+                )
+                self.assertFalse(reply.failure)
+                self.assertEqual(reply.parsed["action"], "no_op")
+                self.assertEqual(reply.parsed["reason"], "final answer")
+
+        unclosed = llm._salvage_parsed(
+            MockResult(
+                None,
+                text='<reasoning>{"action":"create","kind":"skill"}',
+                output_tokens=1,
+            ),
+            requested_max_tokens=llm.PROPOSAL_MAX_TOKENS,
+        )
+        self.assertEqual(unclosed.failure, "no_final_text")
+
+    def test_multipass_recoveries_are_newest_first_and_rollback_cleanly(self):
+        """Returned IDs must be directly usable for positional memory rollback."""
+        FakeHost.entry_config()["max_edits_per_run"] = 2
+        with patch.object(
+            core._llm,
+            "propose",
+            side_effect=[
+                memory_edit("first multipass lesson", name="first-pass"),
+                memory_edit("second multipass lesson", name="second-pass"),
+            ],
+        ):
+            result = core.refine_run(MockLlm())
+        self.assertTrue(result["success"])
+        self.assertEqual(FakeHost.memory_entries, [
+            "first multipass lesson", "second multipass lesson",
+        ])
+        for recovery in result["recoveries"]:
+            self.assertTrue(core.refine_rollback(recovery["journal_id"])["success"])
+        self.assertEqual(FakeHost.memory_entries, [])
+
+    def test_command_boundaries_reject_bad_input_and_render_missing_message(self):
+        self.assertEqual(
+            plugin_init._format_run_result({"success": True, "message": None}),
+            "done",
+        )
+        result = json.loads(plugin_init._handle_refine_run({"reason": {"bad": "value"}}))
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "reason must be a string.")
+
+    def test_auto_hooks_contain_failures_and_record_a_scrubbed_event(self):
+        with patch.object(core, "note_session_id", side_effect=RuntimeError("hook failure")):
+            self.assertIsNone(plugin_init._on_post_llm_call("session", []))
+
+        FakeHost.entry_config()["auto_enabled"] = True
+        self.assertTrue(plugin_init._AUTO_THREAD_GUARD.acquire(blocking=False))
+        secret = "auto-secret-123456"
+        with patch.object(plugin_init, "_auto_refine_allowed", return_value=True), patch.object(
+            plugin_init.core,
+            "refine_run",
+            side_effect=RuntimeError(f'api_key="{secret}"'),
+        ):
+            plugin_init._run_auto_refine("session")
+        event = core.refine_status()["last_auto_event"]
+        self.assertEqual(event["code"], "auto_refine_failed")
+        self.assertNotIn(secret, event["message"])
+        self.assertIn("[REDACTED]", event["message"])
+        self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
+
+    def test_ledger_ignores_malformed_rows_and_preserves_landed_artifacts(self):
+        now = time.time()
+        ledger._save_stats({
+            "bad-null": None,
+            "bad-list": [],
+            "bad-time": {
+                "name": "bad-time", "kind": "skill", "created_ts": "not-a-time",
+                "version": "not-a-version", "outcome": "applied",
+            },
+        })
+        self.assertIsNone(ledger.earliest_created_ts())
+        self.assertIsNone(ledger._finite_float(True))
+        self.assertIsNone(ledger._finite_float(float("nan")))
+        self.assertIsNone(ledger._finite_float(float("inf")))
+        rows = ledger.audit([])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "bad-time")
+        self.assertEqual(rows[0]["version"], 1)
+
+        ledger.record_edit(
+            {"name": "bad-null", "kind": "skill", "action": "create"}, "new-edit"
+        )
+        self.assertEqual(ledger.load_stats()["bad-null"]["journal_id"], "new-edit")
+        ledger.record_edit(
+            {"name": "bad-time", "kind": "skill", "action": "create"}, "new-version"
+        )
+        self.assertEqual(ledger.load_stats()["bad-time"]["version"], 2)
+
+        stats = {"landed": {
+            "name": "landed", "kind": "skill", "journal_id": "landed-id",
+            "created_ts": now, "updated_ts": now, "outcome": "applied",
+        }}
+        merged = ledger._merge_journal_stats(stats, [{
+            "id": "rejected-id", "ts": now + 1, "outcome": "rejected",
+            "proposal": {"name": "landed", "kind": "skill", "action": "create"},
+        }])
+        self.assertEqual(merged["landed"]["journal_id"], "landed-id")
+        self.assertEqual(merged["landed"]["outcome"], "applied")
+
+    def test_audit_does_not_invent_usage_for_non_skill_entries(self):
+        created = time.time() - 30 * 86400
+        stats = {"memory:lesson": {
+            "name": "lesson", "kind": "memory", "journal_id": "memory-id",
+            "created_ts": created, "updated_ts": created, "outcome": "applied",
+        }}
+        with patch.object(ledger, "_count_uses_with_scope") as count:
+            row = ledger.audit([], stats_snapshot=stats)[0]
+        count.assert_not_called()
+        self.assertIsNone(row["uses"])
+        self.assertEqual(row["usage_scope"], "unavailable")
+
+    def test_path_and_short_sha_normalization_remain_precise(self):
+        self.assertEqual(
+            patterns.fingerprint("open", r"failed C:\Build (old)\a.txt"),
+            patterns.fingerprint("open", r"failed C:\Build (new)\b.txt"),
+        )
+        self.assertEqual(
+            patterns.fingerprint("git", "commit deadbee failed"),
+            patterns.fingerprint("git", "commit fadedad failed"),
+        )
+
+    def test_fresh_dead_lock_is_reclaimed_but_live_lock_is_preserved(self):
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        now = time.time()
+        lock_path.write_text(
+            json.dumps({"pid": os.getpid() + 10_000_000, "created": now, "token": "dead"}),
+            encoding="utf-8",
+        )
+        journal._try_clear_stale_lock(lock_path)
+        self.assertFalse(lock_path.exists())
+
+        lock_path.write_text(
+            json.dumps({"pid": os.getpid(), "created": now - 600, "token": "live"}),
+            encoding="utf-8",
+        )
+        journal._try_clear_stale_lock(lock_path)
+        self.assertTrue(lock_path.exists())
+
+    def test_content_retry_keeps_create_identity_and_empty_summary_is_absent(self):
+        original = {
+            "action": "create", "kind": "skill", "name": "identity-retry",
+            "category": "workflow", "content": "", "reason": "repeat failure",
+        }
+        result = llm._finalize_edit(
+            MockLlm({"content": skill_content("identity-retry")}),
+            "short",
+            "instructions",
+            original,
+        )
+        self.assertEqual(
+            (result["action"], result["kind"], result["name"], result["category"]),
+            ("create", "skill", "identity-retry", "workflow"),
+        )
+        self.assertEqual(llm.normalize_summary(None), "")
+
+    def test_sanitizer_covers_frozensets_and_github_service_tokens(self):
+        secret = "ghs_" + "A" * 36
+        frozen = sanitization.sanitize(frozenset({f'api_key="{secret}"'}))
+        self.assertIsInstance(frozen, frozenset)
+        self.assertNotIn(secret, next(iter(frozen)))
+        for prefix in ("ghu_", "ghs_", "ghr_"):
+            token = prefix + "B" * 36
+            self.assertNotIn(token, sanitization.scrub_text(token))
 
     def test_traceback_normalization_only_truncates_real_tracebacks(self):
         """Wave 2.3: File/at markers alone must not truncate normal output."""

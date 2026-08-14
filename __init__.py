@@ -170,8 +170,11 @@ def _run_auto_refine(session_id: str, *, cleanup_session_notes: bool = False) ->
                     _clear_session_prompt_notes(
                         session_id, timeout=None if acquired else 0.0
                     )
-    except Exception:
-        logger.exception("refine auto hook failed")
+    except Exception as exc:
+        safe_error = core.scrub_text(str(exc))
+        message = f"Automatic refine failed: {safe_error or 'unknown error'}"
+        logger.error("%s", message)
+        core.note_auto_event("auto_refine_failed", message)
     finally:
         _finish_auto_worker()
 
@@ -285,8 +288,15 @@ def _on_session_reset(session_id: str = "", **kwargs) -> None:
 def _on_post_llm_call(
     session_id: str = "", conversation_history: Any = None, **kwargs
 ) -> None:
-    core.note_session_id(session_id)
-    _start_auto_refine(session_id, _assistant_turn_count(conversation_history))
+    """Record the session and schedule auto-refine without breaking the host hook."""
+    try:
+        core.note_session_id(session_id)
+        _start_auto_refine(session_id, _assistant_turn_count(conversation_history))
+    except Exception as exc:
+        safe_error = core.scrub_text(str(exc))
+        message = f"Post-LLM refine hook failed: {safe_error or 'unknown error'}"
+        logger.warning("%s", message)
+        core.note_auto_event("post_llm_hook_failed", message)
 
 
 _MODEL_SUBCOMMAND = "model"
@@ -635,7 +645,11 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
     rollback_match = _ROLLBACK_COMMAND.fullmatch(args)
     if rollback_match:
         entry_id = rollback_match.group(1).lower()
-        result = core.refine_rollback(entry_id)
+        try:
+            result = core.refine_rollback(entry_id)
+        except Exception as exc:
+            logger.exception("refine rollback failed")
+            return f"❌ Rollback failed: {core.scrub_text(str(exc))}"
         if result.get("success"):
             return f"✅ Rollback {entry_id}: {result.get('message', 'done')}"
         return f"❌ Rollback failed: {result.get('error', 'unknown error')}"
@@ -660,7 +674,7 @@ def _format_run_result(result: Dict[str, Any]) -> str:
     if not result.get("success") and result.get("outcome") != "partial_success":
         return f"❌ {result.get('message', 'Unknown error')}"
 
-    summary = result.get("message", "done")
+    summary = str(result.get("message") or "done")
     evidence = result.get("evidence", {})
     if evidence.get("session_id"):
         summary += (
@@ -707,6 +721,11 @@ def _format_run_result(result: Dict[str, Any]) -> str:
 def _handle_refine_run(args: dict, **kw) -> str:
     payload = args if isinstance(args, dict) else {}
     reason = payload.get("reason", "")
+    if not isinstance(reason, str):
+        return json.dumps({
+            "success": False,
+            "error": "reason must be a string.",
+        })
     dry_run = payload.get("dry_run", False)
     if not isinstance(dry_run, bool):
         return json.dumps({

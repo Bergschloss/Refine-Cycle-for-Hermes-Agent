@@ -7,7 +7,7 @@ _REDACTED = "[REDACTED]"
 
 _FIXED_PATTERNS = [
     re.compile(r"github_pat_[A-Za-z0-9_]+"),
-    re.compile(r"gh[po]_[A-Za-z0-9]{20,}"),
+    re.compile(r"gh[pours]_[A-Za-z0-9]{20,}"),
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
     re.compile(r"AIza[A-Za-z0-9_-]{20,}"),
@@ -30,12 +30,20 @@ _SECRET_KEY = (
     r"(?:authorization|bearer|"
     r"[A-Za-z0-9_-]*(?:api[_-]?key|password|passwd|secret|token)[A-Za-z0-9_-]*)"
 )
+# A quoted key must close with the same delimiter that opened it. The value
+# alternatives are disjoint: escaped characters start with a backslash, while
+# ordinary characters exclude both backslashes and the closing delimiter. This
+# avoids the exponential ambiguity of ``(?:\\.|(?!quote).)+`` on attacker text.
+_SECRET_PREFIX = (
+    rf"(?:(?P<key_quote>[\"']){_SECRET_KEY}(?P=key_quote)|"
+    rf"\b{_SECRET_KEY}\b)\s*[:=]\s*"
+)
 _QUOTED_SECRET = re.compile(
-    rf"(?i)(?P<prefix>[\"']?{_SECRET_KEY}[\"']?\s*[:=]\s*)"
-    r"(?P<quote>[\"'])(?P<value>(?:\\.|(?!\2).)+)(?P=quote)"
+    rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
+    r"(?P<quote>[\"'])(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n])+(?P=quote)"
 )
 _UNQUOTED_SECRET = re.compile(
-    rf"(?i)(?P<prefix>\b{_SECRET_KEY}\b\s*[:=]\s*)"
+    rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
     r"(?P<value>[^\s,;\}\]\[]{6,})"
 )
 _BEARER = re.compile(
@@ -129,4 +137,6 @@ def sanitize(value: Any) -> Any:
         return tuple(sanitize(item) for item in value)
     if isinstance(value, set):
         return {sanitize(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(sanitize(item) for item in value)
     return value

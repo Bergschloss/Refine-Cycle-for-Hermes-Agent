@@ -875,6 +875,7 @@ def _try_clear_stale_lock(path: Path) -> None:
         modified = path.stat().st_mtime
     except FileNotFoundError:
         return
+    data: Any = None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         pid = int(data.get("pid", 0))
@@ -886,7 +887,15 @@ def _try_clear_stale_lock(path: Path) -> None:
     except FileNotFoundError:
         return
     freshness = max(modified, created) if created > 0 else modified
-    if time.time() - freshness < _LOCK_STALE_SECONDS or _pid_is_alive(pid):
+    # A complete lock with a known dead owner cannot become valid again, so
+    # reclaim it immediately.  Malformed/partial lock files may be observed
+    # while another process is still writing them; keep those until their mtime
+    # is stale.  Live owners always win, regardless of timestamp skew.
+    valid_pid = isinstance(data, dict) and isinstance(data.get("pid"), int) and not isinstance(data.get("pid"), bool) and pid > 0
+    if valid_pid:
+        if _pid_is_alive(pid):
+            return
+    elif time.time() - freshness < _LOCK_STALE_SECONDS:
         return
     try:
         path.unlink()
