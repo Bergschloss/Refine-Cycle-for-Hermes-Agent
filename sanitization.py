@@ -25,9 +25,11 @@ _FIXED_PATTERNS = [
 ]
 
 # Match exact generic labels and common compounds such as client_secret,
-# access-token, refreshToken, and github_api_key.
+# access-token, refreshToken, and github_api_key. The explicit aliases cover
+# common credential-store fields without treating every ``key`` as secret.
 _SECRET_KEY = (
-    r"(?:authorization|bearer|"
+    r"(?:authorization|bearer|credentials?|private[_-]?key|access[_-]?key|"
+    r"auth|cookie|session[_-]?id|db[_-]?pass|"
     r"[A-Za-z0-9_-]*(?:api[_-]?key|password|passwd|secret|token)[A-Za-z0-9_-]*)"
 )
 # A quoted key must close with the same delimiter that opened it. The value
@@ -40,15 +42,22 @@ _SECRET_PREFIX = (
 )
 _QUOTED_SECRET = re.compile(
     rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
-    r"(?P<quote>[\"'])(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n])+(?P=quote)"
+    r"(?P<quote>[\"'])(?P<value>(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n])+)(?P=quote)"
 )
 _UNQUOTED_SECRET = re.compile(
     rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
-    r"(?P<value>[^\s,;\}\]\[]{6,})"
+    r"(?P<value>(?:[\"']?bearer\s+\[REDACTED\][\"']?|[^\s,;\}\]\[]{6,}))"
 )
 _BEARER = re.compile(
     r"(?i)(?P<label>\bbearer\s+)(?P<quote>[\"']?)[A-Za-z0-9_.+/=-]{8,}(?P<close>[\"']?)"
 )
+# Preserve only already-canonical credential fields as units before marker
+# splitting. Without this, a later boundary pass sees the pre-marker fragment
+# (``credentials=Bearer ``) by itself and destroys the auth scheme.
+_CANONICAL_BEARER_FIELD = re.compile(
+    rf"(?i){_SECRET_PREFIX}(?:[\"']?bearer\s+)\[REDACTED\][\"']?"
+)
+_BEARER_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
 _URL_CREDENTIALS = re.compile(
     r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/?#]+@(?=[^\s/?#]+(?:[/?#]|\s|$))"
 )
@@ -63,11 +72,38 @@ _NUMERIC_METRIC_KEYS = {
     "max_tokens", "min_tokens", "total_tokens", "input_tokens", "output_tokens",
     "prompt_tokens", "completion_tokens", "context_tokens", "cached_tokens",
 }
+# These are ordinary parser/telemetry fields, not credential labels. They match
+# the generic ``token`` compound rule above, so protect them by exact key name
+# rather than weakening the credential grammar with a broad substring exception.
+_NON_SECRET_TOKEN_KEYS = {"tokenizer", "token_count"}
+
+
+def _key_from_prefix(prefix: str) -> str:
+    """Extract one normalized key from a matched ``key[:=]`` prefix."""
+    key = re.sub(r"\s*[:=]\s*$", "", prefix).strip()
+    return key.strip("\"'").lower()
+
+
+def _preserve_non_secret_token_field(prefix: str) -> bool:
+    return _key_from_prefix(prefix) in _NON_SECRET_TOKEN_KEYS
 
 
 def _replace_quoted(match: re.Match) -> str:
+    prefix = match.group("prefix")
+    key = _key_from_prefix(prefix)
+    # The Bearer pass has already reduced this exact credential form to the
+    # canonical marker. Do not let the generic auth-field pass erase its scheme
+    # (or add a second marker) on the same scrub cycle.
+    if (
+        _preserve_non_secret_token_field(prefix)
+        or (
+            key in _BEARER_SCHEME_KEYS
+            and match.group("value").lower() == f"bearer {_REDACTED}".lower()
+        )
+    ):
+        return match.group(0)
     return (
-        f"{match.group('prefix')}{match.group('quote')}"
+        f"{prefix}{match.group('quote')}"
         f"{_REDACTED}{match.group('quote')}"
     )
 
@@ -84,14 +120,19 @@ def _is_number(value: str) -> bool:
 def _replace_unquoted(match: re.Match) -> str:
     value = match.group("value")
     prefix = match.group("prefix")
-    key = re.sub(r"\s*[:=]\s*$", "", prefix).strip().lower()
-    if value.lower() in _NON_SECRETS or (
-        _is_number(value) and key in _NUMERIC_METRIC_KEYS
+    key = _key_from_prefix(prefix)
+    if (
+        _preserve_non_secret_token_field(prefix)
+        or (
+            key in _BEARER_SCHEME_KEYS
+            and re.fullmatch(r"(?i)[\"']?bearer\s+\[REDACTED\][\"']?", value)
+        )
+        or value.lower() in _NON_SECRETS
+        or (_is_number(value) and key in _NUMERIC_METRIC_KEYS)
     ):
         return match.group(0)
-    # Canonical markers are protected by scrub_text splitting and ``[`` is not
-    # part of this regex's value class. Do not exempt arbitrary credentials
-    # merely because their real value begins with the word "REDACTED".
+    # Canonical markers are protected before the ordinary marker split. Do not
+    # exempt arbitrary credentials merely because a value names redaction.
     return f"{match.group('prefix')}{_REDACTED}"
 
 
@@ -112,10 +153,24 @@ def scrub_text(text: str) -> str:
     """Redact credentials while preserving existing redaction markers exactly."""
     if not text:
         return text
-    # Sanitized proposals are deliberately scrubbed at several trust boundaries.
-    # Splitting around the marker prevents a later generic ``token=...`` match
-    # from consuming part of it and makes sanitation strictly idempotent.
-    return _REDACTED.join(_scrub_chunk(chunk) for chunk in text.split(_REDACTED))
+
+    def scrub_unprotected(chunk: str) -> str:
+        # Sanitized proposals cross several trust boundaries. Splitting around
+        # ordinary markers keeps generic secret matching from consuming one,
+        # making repeated scrubbing idempotent.
+        return _REDACTED.join(_scrub_chunk(part) for part in chunk.split(_REDACTED))
+
+    # A canonical Bearer field includes no secret, but it must stay intact as a
+    # record. Protect it before the ordinary marker split so aliases such as
+    # ``credentials`` retain the protocol scheme on subsequent boundaries.
+    protected: list[str] = []
+    position = 0
+    for match in _CANONICAL_BEARER_FIELD.finditer(text):
+        protected.append(scrub_unprotected(text[position:match.start()]))
+        protected.append(match.group(0))
+        position = match.end()
+    protected.append(scrub_unprotected(text[position:]))
+    return "".join(protected)
 
 
 def sanitize(value: Any) -> Any:

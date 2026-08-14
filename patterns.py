@@ -87,6 +87,9 @@ _NORMALIZERS = [
 
 _TRACEBACK_MARKERS = ("Traceback (most recent call last)", 'File "', "  at ")
 _TRACEBACK_WRAPPER_LINE = re.compile(r"(?i)^(?:g?make|ninja):")
+_TRACEBACK_CHAIN_LINE = re.compile(
+    r"(?i)^(?:during handling of the above exception|the above exception was the direct cause)"
+)
 
 
 def _is_python_exception_line(line: str) -> bool:
@@ -162,15 +165,24 @@ def normalize_error(content: str) -> str:
                 if position + 1 < len(traceback_headers)
                 else len(lines)
             )
-            exception_line = next(
-                (
-                    line.strip()
-                    for line in lines[start:end]
-                    if line.strip()
-                    and not line.startswith((" ", "\t"))
-                    and _is_python_exception_line(line)
-                ),
-                None,
+            block = lines[start:end]
+            # A traceback exception is its block's terminal non-wrapper line.
+            # Permitting arbitrary indented candidates makes typed source
+            # statements such as ``ConnectionError: annotation`` look like an
+            # exception and hides the actual terminal failure.
+            terminal = ""
+            for line in reversed(block):
+                if not line.strip():
+                    continue
+                if (
+                    _TRACEBACK_WRAPPER_LINE.match(line.strip())
+                    or _TRACEBACK_CHAIN_LINE.match(line.strip())
+                ):
+                    continue
+                terminal = line
+                break
+            exception_line = (
+                terminal.strip() if terminal and _is_python_exception_line(terminal) else None
             )
             if exception_line:
                 break

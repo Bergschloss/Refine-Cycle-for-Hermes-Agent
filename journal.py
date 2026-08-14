@@ -702,7 +702,13 @@ def _load_prompt_notes() -> Optional[List[Dict[str, str]]]:
         logger.warning("Prompt-note store is not a regular file")
         return None
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(
+            _retry_on_contention(
+                lambda: path.read_text(encoding="utf-8"),
+                _READ_RETRY_BUDGET_SECONDS,
+                OSError,
+            )
+        )
         raw_notes = document.get("notes") if isinstance(document, dict) else None
         if not isinstance(raw_notes, list):
             raise ValueError("notes must be a list")
@@ -898,7 +904,7 @@ def _try_clear_stale_lock(path: Path) -> None:
     elif time.time() - freshness < _LOCK_STALE_SECONDS:
         return
     try:
-        path.unlink()
+        _retry_on_contention(path.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError)
     except FileNotFoundError:
         pass
 
@@ -1921,6 +1927,23 @@ def _prepared_is_abandoned(entry: Dict[str, Any]) -> bool:
     return (time.time() - float(ts)) >= _ABANDONED_PREPARED_SECONDS
 
 
+def _rollback_prepared_is_abandoned(entry: Dict[str, Any]) -> bool:
+    """Whether an unfinalized rollback intent is safely old enough to recover.
+
+    The original edit timestamp says nothing about when rollback started. Only
+    the transition's finite ``finalized_ts`` bounds a currently in-flight host
+    rollback; unknown or malformed metadata must remain pending.
+    """
+    finalized_ts = entry.get("finalized_ts")
+    if (
+        isinstance(finalized_ts, bool)
+        or not isinstance(finalized_ts, (int, float))
+        or not math.isfinite(float(finalized_ts))
+    ):
+        return False
+    return (time.time() - float(finalized_ts)) >= _ABANDONED_PREPARED_SECONDS
+
+
 def _pending_exists(subsystem: str, pending_id: str) -> Optional[bool]:
     """Return True/False for known approval state, None when host lookup failed."""
     if not pending_id:
@@ -2026,6 +2049,41 @@ def reconcile() -> List[Dict[str, Any]]:
             if outcome == "rollback_prepared":
                 if rollback_target_matches(snapshot) is True:
                     changed.append(finalize(entry_id, "rolled_back"))
+                    continue
+                # An interrupted rollback can leave its intent durable even
+                # though the original applied target is still provably present.
+                # Never infer this from age alone: require a finite timestamp on
+                # the rollback transition, positive target proof, and re-prove
+                # both state and target while serialized with other mutations.
+                if (
+                    _rollback_prepared_is_abandoned(snapshot)
+                    and target_matches_applied(snapshot) is True
+                ):
+                    with try_mutation_lock() as acquired:
+                        if not acquired:
+                            logger.warning(
+                                "Left journal entry %s rollback_prepared: another "
+                                "process holds the mutation lock",
+                                entry_id,
+                            )
+                            continue
+                        current = get_entry(entry_id)
+                        if (
+                            not current
+                            or current.get("outcome") != "rollback_prepared"
+                            or not _rollback_prepared_is_abandoned(current)
+                            or target_matches_applied(current) is not True
+                        ):
+                            continue
+                        changed.append(finalize(
+                            entry_id,
+                            "applied",
+                            error=(
+                                "Abandoned rollback intent: the original applied "
+                                "target is still present after a finite stale "
+                                "rollback transition."
+                            ),
+                        ))
                 continue
             if outcome == "pending_rollback":
                 pending = _pending_exists(subsystem, str(snapshot.get("pending_id", "")))

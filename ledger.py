@@ -78,6 +78,12 @@ def _save_stats(stats: Dict[str, Any]) -> None:
 # Outcomes that leave nothing behind on the host, so they describe a record
 # rather than an artifact the audit can measure.
 _NO_ARTIFACT_OUTCOMES = frozenset({"error", "rejected", "rolled_back"})
+_STAGED_OUTCOMES = frozenset({"prepared", "pending_approval"})
+
+
+def _kind_is_skill(kind: Any) -> bool:
+    """Treat only missing/empty legacy kinds as skills, never named unknown kinds."""
+    return kind is None or (isinstance(kind, str) and not kind.strip()) or kind == "skill"
 
 
 def _finite_float(value: Any) -> Optional[float]:
@@ -137,7 +143,9 @@ def record_edit(
         # still in effect.
         stale = False
         if not same_edit and previous:
-            if outcome in _NO_ARTIFACT_OUTCOMES:
+            if outcome in _NO_ARTIFACT_OUTCOMES or (
+                outcome in _STAGED_OUTCOMES and previous.get("outcome") == "applied"
+            ):
                 stale = True
             elif entry_ts is not None:
                 # An older edit must not overwrite a newer one's row either. A
@@ -277,7 +285,7 @@ def unused_skills(min_age_days: int = 14) -> List[str]:
             continue
         created = _finite_float(meta.get("created_ts"))
         if (
-            meta.get("kind") != "skill"
+            not _kind_is_skill(meta.get("kind"))
             or created is None
             or created > cutoff
             or meta.get("outcome", "applied") != "applied"
@@ -332,7 +340,10 @@ def _merge_journal_stats(
         if (
             isinstance(existing, dict)
             and existing.get("journal_id") != entry_id
-            and outcome in _NO_ARTIFACT_OUTCOMES
+            and (
+                outcome in _NO_ARTIFACT_OUTCOMES
+                or (outcome in _STAGED_OUTCOMES and existing.get("outcome") == "applied")
+            )
         ):
             continue
         llm_meta = entry.get("llm_meta")
@@ -403,7 +414,7 @@ def _latest_applied_skill_digests(
         proposal = entry.get("proposal")
         if not isinstance(proposal, dict):
             continue
-        if proposal.get("kind") != "skill" or proposal.get("action") not in ("create", "patch"):
+        if not _kind_is_skill(proposal.get("kind")) or proposal.get("action") not in ("create", "patch"):
             continue
         name = str(proposal.get("name", "")).strip()
         content = proposal.get("content")

@@ -179,9 +179,9 @@ def _parse_bool(value, default: bool, key_for_log: str) -> bool:
             return bool(value)
     elif isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in ("true", "yes", "1"):
+        if normalized in ("true", "yes", "on", "1"):
             return True
-        if normalized in ("false", "no", "0"):
+        if normalized in ("false", "no", "off", "0"):
             return False
     if value is not None:
         logger.warning(
@@ -211,16 +211,26 @@ def _get_fail_closed_bool(key: str, default: bool = True) -> bool:
 
 
 def get_int(key: str, default: int, min_val: int = 1) -> int:
-    """Read an integer config key with a default and floor. Accepts string integers."""
+    """Read an integer config key with a default and visible floor clamp."""
     entry = _get_refine_entry()
     val = entry.get(key)
+    parsed: Optional[int] = None
     if isinstance(val, (int, float)) and not isinstance(val, bool):
-        return max(int(val), min_val)
-    if isinstance(val, str):
+        parsed = int(val)
+    elif isinstance(val, str):
         try:
-            return max(int(val.strip()), min_val)
+            parsed = int(val.strip())
         except ValueError:
             pass
+    if parsed is not None:
+        if parsed < min_val:
+            logger.warning(
+                "Config key '%s' is below minimum %d; using the minimum",
+                key,
+                min_val,
+            )
+            return min_val
+        return parsed
     if val is not None:
         logger.warning("Config key '%s' has unrecognized integer value; using default", key)
     return default

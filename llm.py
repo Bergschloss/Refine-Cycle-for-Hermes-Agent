@@ -849,16 +849,25 @@ def refinement_history_max_chars(configured_chars: int) -> int:
 
 
 def _normalize_fields(parsed: Dict[str, Any]) -> Tuple[str, str, str, str, str]:
-    action = str(parsed.get("action", "no_op")).strip().lower()
+    """Normalize nullable model fields without persisting JSON null as ``None``."""
+    def text(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    action = text(parsed.get("action", "no_op") if "action" in parsed else "no_op").strip().lower()
+    if not action:
+        action = "no_op"
     for verb in ("create", "patch"):
         for candidate_kind in ("skill", "memory", "prompt"):
             if action == f"{verb}_{candidate_kind}":
                 parsed.setdefault("kind", candidate_kind)
                 action = verb
-    kind = str(parsed.get("kind") or parsed.get("type") or "").strip().lower()
-    name = str(parsed.get("name", "")).strip()
-    content = str(parsed.get("content", ""))
-    category = str(parsed.get("category", "")).strip()
+    kind_value = parsed.get("kind")
+    if not kind_value:
+        kind_value = parsed.get("type")
+    kind = text(kind_value).strip().lower()
+    name = text(parsed.get("name", "")).strip()
+    content = text(parsed.get("content", ""))
+    category = text(parsed.get("category", "")).strip()
     if kind == "skill":
         name = _normalize_skill_name(name)
     return action, kind, name, content, category
@@ -1167,11 +1176,12 @@ def _finalize_edit(
         initial_fingerprint = replacement_fingerprint or initial_fingerprint
         if "evidence" in retry:
             initial_evidence = _ensure_list(retry.get("evidence"))
-        initial_reason = str(retry.get("reason", initial_reason))
-        if "expected_outcome" in retry:
-            initial_expected_outcome = normalize_expected_outcome(
-                retry.get("expected_outcome")
-            )
+        retry_reason = retry.get("reason")
+        if isinstance(retry_reason, str) and scrub_text(retry_reason).strip():
+            initial_reason = retry_reason
+        retry_expected_outcome = normalize_expected_outcome(retry.get("expected_outcome"))
+        if retry_expected_outcome:
+            initial_expected_outcome = retry_expected_outcome
 
     result = sanitize({
         "action": action,
@@ -1367,7 +1377,11 @@ def propose(
         if history_lines
         else ""
     )
-    context_block = run_context.strip() or "(none)"
+    context_block = (
+        _untrusted_json_record("run_context", run_context, escape_tags=True)
+        if run_context.strip()
+        else "(none)"
+    )
     reviewer_block = (
         _untrusted_json_record(
             "reviewer_recommendation", reviewer_context, escape_tags=True

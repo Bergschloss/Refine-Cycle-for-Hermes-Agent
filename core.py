@@ -132,19 +132,22 @@ _OVERRIDE_INTENT = re.compile(
 # that targets guidance/instructions/prompt (not benign uses like "skip the cache"
 # or "instead of retrying"). Wider _OVERRIDE_INTENT is too broad for Markdown bodies.
 _CONTEXT_OVERRIDE_INTENT = re.compile(
-    r"(?i)\b(?:ignore|disregard|override|bypass|forget)\b"
+    r"(?i)\b(?:ignore|disregard|override|bypass|forget|neglect|dismiss|supersede"
+    r"|abandon|drop|cancel|erase|overwrite|discard|revoke)\b"
     r"(?:\s+\w+){0,4}\s+"
     r"(?:all\s+)?(?:previous|prior|above|preceding|earlier|system|initial)?\s*"
     r"(?:instruction|guidance|prompt|rule|policy|directive|constraint|context)"
 )
 _CONTEXT_CONTROL_TAGS = re.compile(
-    r"(?i)<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result"
-    r"|assistant_response|developer|user_context|prompt)[^>]*>"
+    r"(?i)(?:<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result"
+    r"|assistant_response|assistant|developer|user|user_context|prompt|rules|guidelines|context)[^>]*>"
+    r"|<<\s*sys\s*>>|<\|(?:im_start|im_end|system|user|assistant)\|>)"
 )
 _AGENT_IMPERSONATION = re.compile(
-    r"(?i)(?:^|\n)\s*(?:you\s+are\s+now|from\s+now\s+on\s+you\s+are"
+    r"(?i)(?:^|\n)\s*(?:(?:note|remember)\s*:\s*)?"
+    r"(?:you\s+are\s+now|from\s+now\s+on\s+you\s+are"
     r"|your\s+new\s+(?:role|identity|instruction)\s+is"
-    r"|system\s*:\s*(?:you|ignore|disregard|override))"
+    r"|system\s*:\s*(?:you|ignore|disregard|override|execute))"
 )
 _HIGHER_PRIORITY_GUIDANCE = re.compile(
     r"(?i)\b(?:developer|system|prompt|instruction|guidance|constraint|policy|rule|guardrail)\b"
@@ -259,8 +262,26 @@ def _one_line(value: Any) -> str:
     return _RECORD_SEPARATOR.sub(" ", str(value)).strip()
 
 
+def _short_decimal_has_host_context(text: str, match: re.Match) -> bool:
+    """Whether a short decimal appears as an explicit host/address reference.
+
+    A bare decimal is common in prompt-note conditions (retry counts, durations,
+    status descriptions) and is not enough to prove a host literal. Legacy
+    single-number IPv4 notation stays blocked when the surrounding prose names a
+    network target, which is the only form this policy can safely distinguish.
+    """
+    before = text[max(0, match.start() - 48):match.start()]
+    return bool(
+        re.search(
+            r"(?i)\b(?:host|address|ip|server|target|connect(?:ion)?|endpoint)"
+            r"s?\s*(?:(?:is|to|at)\s*|[=,:;\-]\s*|\(\s*)?$",
+            before,
+        )
+    )
+
+
 def _has_host_reference(text: str) -> bool:
-    """Reject names plus conventional and legacy numeric IP address literals."""
+    """Reject names plus conventional and contextual legacy IP literals."""
     if (
         _HOST_REFERENCE.search(text)
         or _LEGACY_IPV4_LITERAL.search(text)
@@ -273,7 +294,7 @@ def _has_host_reference(text: str) -> bool:
             if m.group(gi) is not None:
                 status_spans.append(m.span(gi))
     return any(
-        match.span() not in status_spans
+        match.span() not in status_spans and _short_decimal_has_host_context(text, match)
         for match in _SHORT_DECIMAL_IPV4_LITERAL.finditer(text)
     )
 
@@ -465,6 +486,17 @@ def _is_error_content(content: str) -> bool:
         else content[:1000] + "\n…\n" + content[-3000:]
     )
     sample = re.sub(r'(?i)["\']?error["\']?\s*:\s*(?:null|""|\'\')', "", sample)
+    # These are complete runner summaries, not prose that happens to include
+    # "failed". Keep the forms deliberately narrow so a real failure elsewhere
+    # in arbitrary output cannot be hidden by an optimistic status line.
+    if re.search(
+        r"(?i)^\s*\d+\s+passed,\s*0\s+failed(?:\s+in\s+\S+)?\s*$",
+        sample,
+    ) or re.search(
+        r"(?is)^\s*ran\s+\d+\s+tests?\s+in\s+[^\n]+\n\s*ok\s*$",
+        sample,
+    ):
+        return False
     return bool(
         re.search(
             r"(?i)(?:^|[\s\[{(,:;])(?:traceback|error\b|failed\b|failure\b|file\s+not\s+found\b|no\s+such\s+file\b|cannot\s+find\s+the\s+(?:file|path)\b|ENOENT\b|timed?\s*out\b|timeout\b)",
@@ -480,7 +512,8 @@ def _is_correction(content: str) -> bool:
     text = re.sub(r"\s+", " ", content.strip().lower())
     strong = (
         r"\b(?:that(?:'s| is) (?:wrong|not right)|you (?:are|were) wrong|wrong answer|incorrect)\b",
-        r"\b(?:неправильно|це не так|ти помилив|ви помилили)\b",
+        r"\b(?:неправильно|ти помилив|ви помилили)\b",
+        r"\bце не так(?:\s*[:;,.]\s*|\s+)(?:перероби|виправ|зміни|використай|замість)\b",
         r"^(?:no|ні|нет)[,;:]\s+.{0,100}\b(?:wrong|not right|не так|неправильно|instead|замість)\b",
         r"\b(?:you used|ти використав|ви використали)\b.{0,120}\b(?:use|instead|замість)\b",
     )
@@ -1368,18 +1401,34 @@ def _skill_or_memory_injection_error(content: str) -> Optional[str]:
     3. Agent-impersonation patterns.
     4. Unicode categories that can restructure rendering (Cc/Cf/Cs/Co/Cn),
        except newline/tab/carriage-return which are normal in Markdown.
+
+    Compatibility normalization is inspection-only. Persisted content keeps its
+    original bytes so validation cannot silently rewrite a skill or memory.
     """
-    if _CONTEXT_CONTROL_TAGS.search(content):
+    normalized = unicodedata.normalize("NFKC", content)
+    if _CONTEXT_CONTROL_TAGS.search(content) or _CONTEXT_CONTROL_TAGS.search(normalized):
         return "Content contains context-control markup that could restructure agent context"
-    if _CONTEXT_OVERRIDE_INTENT.search(content):
+    if _CONTEXT_OVERRIDE_INTENT.search(content) or _CONTEXT_OVERRIDE_INTENT.search(normalized):
         return "Content contains imperative override phrasing targeting prior guidance"
-    if _AGENT_IMPERSONATION.search(content):
+    if _AGENT_IMPERSONATION.search(content) or _AGENT_IMPERSONATION.search(normalized):
         return "Content contains agent-impersonation or role-reassignment phrasing"
     for ch in content:
         if ch in ("\n", "\r", "\t"):
             continue
         if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
             return "Content contains control or non-character codepoints"
+    return None
+
+
+def _memory_resource_error(content: str) -> Optional[str]:
+    """Reject resources in memory, which is future behavioral context.
+
+    Skills may legitimately document commands and URLs. A memory is injected as
+    durable guidance instead, so a path, host, URL, environment expansion, or
+    shell metacharacter has no safe operational role there.
+    """
+    if _RESOURCE_REFERENCE.search(content) or _has_host_reference(content):
+        return "Memory content cannot reference resources, hosts, URLs, paths, environment variables, or shell syntax"
     return None
 
 
@@ -1463,6 +1512,10 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
         injection_error = _skill_or_memory_injection_error(content)
         if injection_error:
             return injection_error
+        if kind == "memory":
+            resource_error = _memory_resource_error(content)
+            if resource_error:
+                return resource_error
     if kind == "prompt":
         if not config.prompt_notes_enabled():
             return "Prompt notes are disabled"
@@ -2153,6 +2206,7 @@ def _refine_once(
         _signal_path = "gate_opened"
 
     _primary_attempts = 0
+    _primary_llm_meta: Dict[str, Any] = {}
     for _primary_attempt in range(_MAX_PRIMARY_ATTEMPTS):
         _primary_attempts = _primary_attempt + 1
         proposal = _llm.propose(
@@ -2170,6 +2224,18 @@ def _refine_once(
             skill_content_loader=journal.read_skill_content,
             target=_run_target,
         )
+        # propose() resets its per-call metadata at the start of every outer
+        # attempt. Snapshot immediately so retry costs remain attributable to
+        # this one refine pass while provider/model/mode describe the final try.
+        call_meta = _llm.last_call_meta()
+        if isinstance(call_meta, dict):
+            for key in ("latency_ms", "output_tokens"):
+                value = call_meta.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                    _primary_llm_meta[key] = int(_primary_llm_meta.get(key, 0) or 0) + int(value)
+            for key in ("reported_provider", "reported_model", "output_mode"):
+                if call_meta.get(key):
+                    _primary_llm_meta[key] = call_meta[key]
         _primary_failure = str(proposal.get("failure", "") or "")
         if (
             _primary_failure not in _PRIMARY_RETRY_FAILURES
@@ -2183,8 +2249,10 @@ def _refine_once(
             _primary_attempt + 1,
             _MAX_PRIMARY_ATTEMPTS,
         )
-    # Capture metadata from the LLM call that produced this proposal.
-    llm_meta = _llm.last_call_meta()
+    # Metadata was snapshotted after every outer proposal attempt above;
+    # reading it here would only return the final attempt after its predecessors
+    # were reset by propose().
+    llm_meta = _primary_llm_meta
     _run_llm_meta = {
         "requested_provider": _run_target.get("provider", ""),
         "requested_model": _run_target.get("model", ""),
