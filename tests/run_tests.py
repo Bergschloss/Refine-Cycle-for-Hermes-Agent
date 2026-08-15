@@ -11623,6 +11623,195 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             {"id": "unknown", "ts": old, "outcome": "applied", "proposal": {"action": "create", "kind": "other", "name": "unknown", "content": "b"}},
         ]
         self.assertEqual(set(ledger._latest_applied_skill_digests(entries)), {"legacy"})
+    def test_bearer_whitespace_redaction_is_complete_and_idempotent(self):
+        """Bearer tokens redact after every supported whitespace separator."""
+        token = "BearerSecret123456"
+        for separator in (" ", "  ", "\t", " \t "):
+            with self.subTest(separator=repr(separator)):
+                raw = f"Authorization: Bearer{separator}{token}"
+                scrubbed = sanitization.scrub_text(raw)
+                self.assertNotIn(token, scrubbed)
+                self.assertEqual(scrubbed, f"Authorization: Bearer{separator}[REDACTED]")
+                self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
+
+        raw_json = json.dumps({"authorization": f"Bearer  {token}"})
+        scrubbed_json = sanitization.scrub_text(raw_json)
+        self.assertNotIn(token, scrubbed_json)
+        self.assertEqual(
+            json.loads(scrubbed_json)["authorization"], "[REDACTED]"
+        )
+        self.assertEqual(sanitization.scrub_text(scrubbed_json), scrubbed_json)
+
+    def test_ledger_lifecycle_preserves_applied_artifact_until_replacement_applies(self):
+        """Staged or terminal attempts cannot erase a different live artifact."""
+        proposal = {
+            "name": "lifecycle-skill", "kind": "skill", "action": "create",
+            "expected_outcome": "the repeated failure no longer occurs",
+        }
+
+        def direct(outcomes):
+            ledger._save_stats({})
+            for journal_id, outcome, pending_id in outcomes:
+                ledger.record_edit(
+                    proposal, journal_id, outcome=outcome, pending_id=pending_id,
+                    llm_meta={"reported_model": "synthetic-model"},
+                )
+            return ledger.load_stats()["lifecycle-skill"]
+
+        rejected = direct([
+            ("id1", "applied", ""),
+            ("id2", "pending_approval", "pending-2"),
+            ("id2", "rejected", "pending-2"),
+        ])
+        self.assertEqual(
+            (rejected["journal_id"], rejected["outcome"], rejected["version"]),
+            ("id1", "applied", 1),
+        )
+        self.assertEqual(rejected["expected_outcome"], proposal["expected_outcome"])
+        self.assertEqual(rejected["reported_model"], "synthetic-model")
+
+        replaced = direct([
+            ("id1", "applied", ""),
+            ("id2", "pending_approval", "pending-2"),
+            ("id2", "applied", ""),
+        ])
+        self.assertEqual(
+            (replaced["journal_id"], replaced["outcome"], replaced["version"]),
+            ("id2", "applied", 2),
+        )
+
+        ledger._save_stats({})
+        ledger.record_edit(proposal, "same-id", outcome="pending_approval", pending_id="pending")
+        prepared = ledger.load_stats()["lifecycle-skill"]
+        ledger.record_edit(proposal, "same-id", outcome="applied")
+        same_id = ledger.load_stats()["lifecycle-skill"]
+        self.assertEqual(
+            (same_id["journal_id"], same_id["outcome"], same_id["version"]),
+            ("same-id", "applied", 1),
+        )
+        self.assertEqual(same_id["created_ts"], prepared["created_ts"])
+
+        def entry(journal_id, timestamp, outcome, pending_id=""):
+            return {
+                "id": journal_id, "ts": timestamp, "outcome": outcome,
+                "pending_id": pending_id, "proposal": proposal,
+                "llm_meta": {"reported_model": "synthetic-model"},
+            }
+
+        merged_rejected = ledger._merge_journal_stats({}, [
+            entry("id1", 10, "applied"),
+            entry("id2", 20, "pending_approval", "pending-2"),
+            entry("id2", 30, "rejected", "pending-2"),
+        ])["lifecycle-skill"]
+        self.assertEqual(
+            (merged_rejected["journal_id"], merged_rejected["outcome"], merged_rejected["version"]),
+            ("id1", "applied", 1),
+        )
+
+        merged_replaced = ledger._merge_journal_stats({}, [
+            entry("id1", 10, "applied"),
+            entry("id2", 20, "pending_approval", "pending-2"),
+            entry("id2", 30, "applied"),
+        ])["lifecycle-skill"]
+        self.assertEqual(
+            (merged_replaced["journal_id"], merged_replaced["outcome"], merged_replaced["version"]),
+            ("id2", "applied", 2),
+        )
+
+        merged_same_id = ledger._merge_journal_stats({}, [
+            entry("same-id", 10, "pending_approval", "pending"),
+            entry("same-id", 20, "applied"),
+        ])["lifecycle-skill"]
+        self.assertEqual(
+            (merged_same_id["journal_id"], merged_same_id["outcome"], merged_same_id["version"]),
+            ("same-id", "applied", 1),
+        )
+        self.assertEqual(merged_same_id["created_ts"], 10)
+
+    def test_skill_rollback_serializes_competing_refine_write(self):
+        """The supported rollback entry point owns the lock through ledger mirroring."""
+        rollback_name = "rollback-lock-target"
+        competing_name = "competing-after-rollback"
+        applied = self.run_proposal(skill_proposal(rollback_name))
+        entered_delete = threading.Event()
+        release_delete = threading.Event()
+        competing_started = threading.Event()
+        competing_finished = threading.Event()
+        rollback_result = {}
+        competing_result = {}
+        observed_at_competing_write = {}
+        manager = sys.modules["tools.skill_manager_tool"]
+        original_manage = manager.skill_manage
+
+        def blocking_manage(action, name, content=None, category=None):
+            if action == "delete" and name == rollback_name:
+                entered_delete.set()
+                if not release_delete.wait(5):
+                    raise RuntimeError("timed out waiting to release rollback")
+            if action == "create" and name == competing_name:
+                observed_at_competing_write["journal"] = journal.get_entry(
+                    applied["journal_id"]
+                )["outcome"]
+                observed_at_competing_write["ledger"] = ledger.load_stats()[
+                    rollback_name
+                ]["outcome"]
+            return original_manage(action, name, content, category)
+
+        def rollback_worker():
+            try:
+                rollback_result.update(core.refine_rollback(applied["journal_id"]))
+            finally:
+                pass
+
+        def competing_worker():
+            competing_started.set()
+            try:
+                competing_result.update(
+                    core.refine_run(MockLlm(skill_proposal(competing_name)))
+                )
+            finally:
+                competing_finished.set()
+
+        with patch.object(manager, "skill_manage", side_effect=blocking_manage):
+            rollback_thread = threading.Thread(target=rollback_worker)
+            rollback_thread.start()
+            self.assertTrue(entered_delete.wait(5))
+            competing_thread = threading.Thread(target=competing_worker)
+            competing_thread.start()
+            try:
+                self.assertTrue(competing_started.wait(5))
+                self.assertFalse(competing_finished.wait(0.1))
+                self.assertNotIn(competing_name, FakeHost.skills)
+            finally:
+                release_delete.set()
+            rollback_thread.join(5)
+            competing_thread.join(5)
+
+        self.assertFalse(rollback_thread.is_alive())
+        self.assertFalse(competing_thread.is_alive())
+        self.assertTrue(rollback_result.get("success"))
+        self.assertTrue(competing_result.get("success"))
+        self.assertNotIn(rollback_name, FakeHost.skills)
+        self.assertIn(competing_name, FakeHost.skills)
+        self.assertEqual(journal.get_entry(applied["journal_id"])["outcome"], "rolled_back")
+        self.assertEqual(observed_at_competing_write, {
+            "journal": "rolled_back", "ledger": "rolled_back",
+        })
+
+    def test_serialized_json_reply_applies_and_rolls_back(self):
+        """A raw JSON model reply traverses salvage, apply, journaling, and rollback."""
+        name = "salvaged-json-skill"
+        proposal = skill_proposal(name)
+        result = core.refine_run(MockLlm(MockResult(None, text=json.dumps(proposal))))
+        self.assertTrue(result["success"])
+        self.assertEqual(result["llm_meta"]["output_mode"], "json_schema_salvage")
+        self.assertEqual(FakeHost.skills[name], proposal["content"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "applied")
+        self.assertTrue(result["reversible"])
+        self.assertTrue(core.refine_rollback(result["journal_id"])["success"])
+        self.assertNotIn(name, FakeHost.skills)
+        self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "rolled_back")
 
 
 if __name__ == "__main__":
