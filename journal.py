@@ -64,9 +64,10 @@ _MODEL_ID = re.compile(rf"^{_MODEL_TOKEN_CHARS}(?:/{_MODEL_TOKEN_CHARS})*$")
 # loader and writer share this table so hand-edited/cross-process records cannot
 # bypass checks that finalize() applies to normal writes.
 _JOURNAL_TRANSITIONS = {
-    "prepared": {"applied", "error", "pending_approval"},
+    "prepared": {"applied", "error", "pending_approval", "cleanup_prepared"},
     "pending_approval": {"applied", "rejected"},
-    "applied": {"rollback_prepared"},
+    "applied": {"rollback_prepared", "cleanup_prepared"},
+    "cleanup_prepared": {"cleanup_resolved"},
     "rollback_prepared": {"pending_rollback", "rolled_back", "applied"},
     "pending_rollback": {"rolled_back", "applied"},
 }
@@ -74,6 +75,10 @@ _JOURNAL_IMMUTABLE_FIELDS = (
     "id", "ts", "trigger", "reason", "session_id", "proposal",
     "backup_path", "snapshot", "group", "llm_meta",
 )
+_CONSUMED_EDIT_OUTCOMES = frozenset({
+    "applied", "pending_approval", "prepared", "cleanup_prepared",
+    "cleanup_resolved", "rollback_prepared", "pending_rollback",
+})
 # How long a ``prepared`` record may sit before reconciliation treats it as the
 # remains of a dead pass rather than a mutation in flight. Generous on purpose:
 # the alternative to waiting is declaring a live edit failed, and only ``ts`` and
@@ -103,6 +108,14 @@ def _journal_transition_error(
     after = str(current.get("outcome", ""))
     if after not in _JOURNAL_TRANSITIONS.get(before, set()):
         return f"illegal journal transition {before!r} -> {after!r}"
+    if after in {"cleanup_prepared", "cleanup_resolved"}:
+        cleanup_session = normalize_prompt_note_session_id(
+            current.get("session_id", "")
+        )
+        if not cleanup_session or not _prompt_cleanup_identity_matches(
+            current, cleanup_session
+        ):
+            return "prompt cleanup transition requires exact session-note ownership"
     for field in _JOURNAL_IMMUTABLE_FIELDS:
         if previous.get(field) != current.get(field):
             return f"journal transition changed immutable field {field!r}"
@@ -805,13 +818,56 @@ def add_prompt_note(note: Dict[str, str]) -> Dict[str, Any]:
         return {"success": True, "note_id": safe_note["id"]}
 
 
+def _prompt_cleanup_identity_matches(
+    entry: Dict[str, Any], session_id: str
+) -> bool:
+    """Prove that one journal record owns a note for this exact session."""
+    proposal = entry.get("proposal", {})
+    recovery = entry.get("recovery", {})
+    note_id = recovery.get("note_id") if isinstance(recovery, dict) else None
+    return bool(
+        isinstance(proposal, dict)
+        and proposal.get("kind") == "prompt"
+        and proposal.get("action") == "create"
+        and proposal.get("scope") == "session"
+        and proposal.get("session_id") == session_id
+        and entry.get("session_id") == session_id
+        and recovery.get("type") == "prompt_note"
+        and isinstance(note_id, str)
+        and len(note_id) == 12
+        and all(char in "0123456789abcdef" for char in note_id)
+        and proposal.get("name") == note_id
+        and proposal.get("note_id") == note_id
+        and isinstance(proposal.get("content"), str)
+        and bool(proposal.get("content"))
+    )
+
+
+def _prompt_cleanup_note_matches(
+    entry: Dict[str, Any], note: Dict[str, str], session_id: str
+) -> bool:
+    """Bind cleanup intent to exact immutable journal and prompt-store data."""
+    proposal = entry.get("proposal", {})
+    recovery = entry.get("recovery", {})
+    return bool(
+        _prompt_cleanup_identity_matches(entry, session_id)
+        and note.get("id") == recovery.get("note_id")
+        and note.get("content") == proposal.get("content")
+        and note.get("scope") == proposal.get("scope")
+        and note.get("session_id") == proposal.get("session_id")
+    )
+
+
 def clear_session_prompt_notes(
     session_id: str, *, timeout: float = 30.0
-) -> Optional[int]:
-    """Remove all notes scoped to one ended/reset session; None means no mutation occurred.
+) -> Optional[Dict[str, Any]]:
+    """Durably expire exact notes owned by one ended/reset session.
 
-    Host callbacks pass a short ``timeout`` so a running refine pass cannot stall
-    the user's session-end or session-reset path behind the mutation lock.
+    ``cleanup_prepared`` is fsynced before the prompt store changes and
+    ``cleanup_resolved`` only after exact-id absence is proven. Both outcomes
+    remain consumed edits: normal session expiry is not rollback evidence.
+    Exact conflicts are retained without blocking independently proven siblings.
+    ``None`` means the durable operation itself did not complete.
     """
     safe_session_id = normalize_prompt_note_session_id(session_id)
     if not safe_session_id:
@@ -820,23 +876,139 @@ def clear_session_prompt_notes(
         notes = _load_prompt_notes()
         if notes is None:
             return None
-        remaining = [
-            note
-            for note in notes
-            if not (
-                note.get("scope") == "session"
-                and note.get("session_id") == safe_session_id
-            )
-        ]
-        removed = len(notes) - len(remaining)
-        if not removed:
-            return 0
         try:
-            _write_prompt_notes(remaining)
+            entries_value = _load_entries()
         except Exception as exc:
-            logger.warning("Cannot clear session prompt notes: %s", scrub_text(str(exc)))
+            logger.warning(
+                "Cannot clear session prompt notes because the journal is unreadable: %s",
+                scrub_text(str(exc)),
+            )
             return None
-        return removed
+
+        session_notes = [
+            note for note in notes
+            if note.get("scope") == "session"
+            and note.get("session_id") == safe_session_id
+        ]
+        by_note_id: Dict[str, List[Dict[str, Any]]] = {}
+        cleanup_pending: List[Dict[str, Any]] = []
+        rollback_pending: List[Dict[str, Any]] = []
+        for entry in entries_value:
+            if not _prompt_cleanup_identity_matches(entry, safe_session_id):
+                continue
+            note_id = str(entry.get("recovery", {}).get("note_id", ""))
+            by_note_id.setdefault(note_id, []).append(entry)
+            if entry.get("outcome") == "cleanup_prepared":
+                cleanup_pending.append(entry)
+            elif entry.get("outcome") == "rollback_prepared":
+                rollback_pending.append(entry)
+
+        selected_cleanup: List[tuple[Dict[str, str], Dict[str, Any]]] = []
+        selected_rollback: List[tuple[Dict[str, str], Dict[str, Any]]] = []
+        conflicts: List[str] = []
+        for note in session_notes:
+            matches = [
+                entry for entry in by_note_id.get(note["id"], [])
+                if entry.get("outcome") in {
+                    "prepared", "applied", "cleanup_prepared", "rollback_prepared",
+                }
+                and _prompt_cleanup_note_matches(entry, note, safe_session_id)
+            ]
+            if len(matches) != 1:
+                logger.warning(
+                    "Retained session prompt note %s: exact journal ownership is not unique",
+                    note["id"],
+                )
+                conflicts.append(note["id"])
+                continue
+            selected = (note, matches[0])
+            if matches[0].get("outcome") == "rollback_prepared":
+                selected_rollback.append(selected)
+            else:
+                selected_cleanup.append(selected)
+
+        prepared: Dict[str, Dict[str, Any]] = {
+            str(entry["id"]): entry for entry in cleanup_pending
+        }
+        rolling_back: Dict[str, Dict[str, Any]] = {
+            str(entry["id"]): entry for entry in rollback_pending
+        }
+        removed = selected_cleanup + selected_rollback
+        resolved: List[Dict[str, Any]] = []
+
+        def cleanup_result(error: str = "") -> Dict[str, Any]:
+            return {
+                "complete": not conflicts and not error,
+                "removed": len(removed),
+                "note_ids": [note["id"] for note, _entry in removed],
+                "conflicts": conflicts,
+                "error": scrub_text(error),
+                "journal_ids": [str(entry["id"]) for entry in resolved],
+                "entries": [sanitize(entry) for entry in resolved],
+            }
+
+        try:
+            # JSONL has no multi-record transaction. A partial preparation is
+            # still safe: every prepared id retains its note, and reconcile can
+            # later finish only those exact witnessed entries.
+            for _note, entry in selected_cleanup:
+                entry_id = str(entry["id"])
+                if entry.get("outcome") != "cleanup_prepared":
+                    entry = finalize(entry_id, "cleanup_prepared")
+                prepared[entry_id] = entry
+
+            remove_ids = {
+                note["id"]
+                for note, _entry in selected_cleanup + selected_rollback
+            }
+            if remove_ids:
+                _write_prompt_notes([
+                    note for note in notes if note["id"] not in remove_ids
+                ])
+
+            current_notes = _load_prompt_notes()
+            if current_notes is None:
+                return None
+            current_by_id = {note["id"]: note for note in current_notes}
+            for outcome, pending in (
+                ("cleanup_resolved", prepared),
+                ("rolled_back", rolling_back),
+            ):
+                source_outcome = (
+                    "cleanup_prepared"
+                    if outcome == "cleanup_resolved"
+                    else "rollback_prepared"
+                )
+                for entry_id, snapshot in pending.items():
+                    note_id = str(snapshot.get("recovery", {}).get("note_id", ""))
+                    current_note = current_by_id.get(note_id)
+                    if current_note is not None:
+                        # A changed/recreated note is not the exact target whose
+                        # absence this durable intent is allowed to certify.
+                        if not _prompt_cleanup_note_matches(
+                            snapshot, current_note, safe_session_id
+                        ):
+                            if note_id not in conflicts:
+                                conflicts.append(note_id)
+                            continue
+                        return None
+                    current = get_entry(entry_id)
+                    if current and current.get("outcome") == source_outcome:
+                        resolved.append(finalize(entry_id, outcome))
+                    elif current and current.get("outcome") == outcome:
+                        resolved.append(current)
+                    else:
+                        return None
+        except Exception as exc:
+            safe_error = scrub_text(str(exc))
+            logger.warning("Cannot clear session prompt notes: %s", safe_error)
+            # A prior terminal transition in this batch is already durable and
+            # reconciliation will not emit it again. Return those exact entries
+            # so callers can mirror journal authority even though a later id
+            # remains pending.
+            return cleanup_result(safe_error) if resolved else None
+
+        return cleanup_result()
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -1204,7 +1376,8 @@ def recent_refinements(limit: int) -> List[Dict[str, Any]]:
         return []
     included_outcomes = {
         "applied", "pending_approval", "error", "rejected", "rolled_back",
-        "rollback_prepared", "pending_rollback",
+        "cleanup_prepared", "cleanup_resolved", "rollback_prepared",
+        "pending_rollback",
     }
     refinements: List[Dict[str, Any]] = []
     for entry in entries():
@@ -1432,16 +1605,13 @@ def count_today_applied() -> int:
     gate stays closed rather than silently allowing unlimited edits.
     """
     today = datetime.now(timezone.utc).date()
-    consumed = {
-        "applied", "pending_approval", "prepared", "rollback_prepared", "pending_rollback"
-    }
     try:
         all_entries = _load_entries()
     except IOError:
         return max_edits_per_day()
     count = 0
     for entry in all_entries:
-        if entry.get("outcome") not in consumed:
+        if entry.get("outcome") not in _CONSUMED_EDIT_OUTCOMES:
             continue
         try:
             if datetime.fromtimestamp(entry.get("ts", 0), tz=timezone.utc).date() == today:
@@ -1459,15 +1629,12 @@ def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:
     """Return True when an identical edit exists or journal is unreadable (fail closed)."""
     target = proposal_hash(proposal)
     cutoff = time.time() - (within_days * 86400)
-    consumed = {
-        "applied", "pending_approval", "prepared", "rollback_prepared", "pending_rollback"
-    }
     try:
         all_entries = _load_entries()
     except IOError:
         return True
     for entry in all_entries:
-        if entry.get("outcome") not in consumed:
+        if entry.get("outcome") not in _CONSUMED_EDIT_OUTCOMES:
             continue
         if (entry.get("ts") or 0) >= cutoff and proposal_hash(entry.get("proposal", {})) == target:
             return True
@@ -1959,19 +2126,67 @@ def _pending_exists(subsystem: str, pending_id: str) -> Optional[bool]:
         return None
 
 
+def _reconcile_cleanup_prepared(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Complete one exact cleanup intent without inferring from legacy absence."""
+    entry_id = str(snapshot.get("id", ""))
+    session_id = normalize_prompt_note_session_id(snapshot.get("session_id", ""))
+    if not entry_id or not session_id:
+        return None
+    with try_mutation_lock() as acquired:
+        if not acquired:
+            logger.warning(
+                "Left journal entry %s cleanup_prepared: another process holds the mutation lock",
+                entry_id,
+            )
+            return None
+        current = get_entry(entry_id)
+        if (
+            not current
+            or current.get("outcome") != "cleanup_prepared"
+            or not _prompt_cleanup_identity_matches(current, session_id)
+        ):
+            return None
+        notes = _load_prompt_notes()
+        if notes is None:
+            return None
+        note_id = str(current.get("recovery", {}).get("note_id", ""))
+        index = next(
+            (position for position, note in enumerate(notes) if note["id"] == note_id),
+            None,
+        )
+        if index is not None:
+            if not _prompt_cleanup_note_matches(current, notes[index], session_id):
+                logger.warning(
+                    "Left journal entry %s cleanup_prepared: exact prompt note changed",
+                    entry_id,
+                )
+                return None
+            _write_prompt_notes(notes[:index] + notes[index + 1:])
+            verified = _load_prompt_notes()
+            if verified is None or any(note["id"] == note_id for note in verified):
+                return None
+        return finalize(entry_id, "cleanup_resolved")
+
+
 def reconcile() -> List[Dict[str, Any]]:
-    """Lazily reconcile forward and rollback approvals from host and target state."""
+    """Lazily reconcile approvals, rollback intents, and prompt cleanup intents."""
     changed: List[Dict[str, Any]] = []
     for snapshot in _load_entries():
         entry_id = str(snapshot.get("id", ""))
         outcome = snapshot.get("outcome")
         if outcome not in {
-            "prepared", "pending_approval", "rollback_prepared", "pending_rollback"
+            "prepared", "pending_approval", "cleanup_prepared",
+            "rollback_prepared", "pending_rollback",
         }:
             continue
         proposal = snapshot.get("proposal", {})
         subsystem = "skills" if proposal.get("kind") == "skill" else "memory"
         try:
+            if outcome == "cleanup_prepared":
+                resolved = _reconcile_cleanup_prepared(snapshot)
+                if resolved is not None:
+                    changed.append(resolved)
+                continue
             if outcome == "prepared":
                 applied_state = target_matches_applied(snapshot)
                 if applied_state is True:

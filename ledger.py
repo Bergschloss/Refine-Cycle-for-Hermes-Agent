@@ -76,9 +76,15 @@ def _save_stats(stats: Dict[str, Any]) -> None:
 
 
 # Outcomes that leave nothing behind on the host, so they describe a record
-# rather than an artifact the audit can measure.
-_NO_ARTIFACT_OUTCOMES = frozenset({"error", "rejected", "rolled_back"})
-_STAGED_OUTCOMES = frozenset({"prepared", "pending_approval"})
+# rather than an artifact the audit can measure. A resolved session cleanup did
+# leave a real note temporarily; it is listed here only because no artifact
+# remains now, not because the original edit failed to land.
+_NO_ARTIFACT_OUTCOMES = frozenset({
+    "error", "rejected", "rolled_back", "cleanup_resolved",
+})
+_STAGED_OUTCOMES = frozenset({
+    "prepared", "pending_approval", "cleanup_prepared",
+})
 
 
 def _kind_is_skill(kind: Any) -> bool:
@@ -313,8 +319,9 @@ def _merge_journal_stats(
         for key, value in stats.items()
     }
     tracked_outcomes = {
-        "prepared", "applied", "pending_approval", "rollback_prepared",
-        "pending_rollback", "rolled_back", "rejected",
+        "prepared", "applied", "pending_approval", "cleanup_prepared",
+        "cleanup_resolved", "rollback_prepared", "pending_rollback",
+        "rolled_back", "rejected",
     }
     ordered = sorted(
         (entry for entry in (journal_entries or []) if isinstance(entry, dict)),
@@ -484,6 +491,12 @@ def audit(
         elif outcome == "pending_approval":
             uses, usage_scope = None, "unavailable"
             verdict = "pending approval"
+        elif outcome == "cleanup_prepared":
+            uses, usage_scope = None, "unavailable"
+            verdict = "session cleanup pending"
+        elif outcome == "cleanup_resolved":
+            uses, usage_scope = None, "unavailable"
+            verdict = "session note expired"
         elif outcome in ("rollback_prepared", "pending_rollback"):
             uses, usage_scope = None, "unavailable"
             verdict = "rollback pending"

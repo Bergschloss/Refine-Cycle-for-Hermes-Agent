@@ -10,9 +10,9 @@ from typing import Any, Dict, Optional
 from agent.plugin_llm import PluginLlm
 
 try:
-    from . import config, core, journal
+    from . import config, core, journal, ledger
 except ImportError:
-    import config, core, journal  # noqa: F811
+    import config, core, journal, ledger  # noqa: F811
 
 logger = logging.getLogger(__name__)
 _ROLLBACK_COMMAND = re.compile(r"^rollback\s+([0-9a-fA-F]{12})$")
@@ -262,11 +262,32 @@ def _clear_session_prompt_notes(
         return True
     try:
         if timeout is None:
-            removed = journal.clear_session_prompt_notes(session_id)
+            cleanup = journal.clear_session_prompt_notes(session_id)
         else:
-            removed = journal.clear_session_prompt_notes(session_id, timeout=timeout)
-        if removed is None:
+            cleanup = journal.clear_session_prompt_notes(session_id, timeout=timeout)
+        if cleanup is None:
             message = "Session prompt-note cleanup did not complete"
+            logger.warning(message)
+            core.note_auto_event("prompt_note_cleanup_failed", message)
+            return False
+        for entry in cleanup.get("entries", []):
+            try:
+                ledger.record_journal_state(entry)
+            except Exception as exc:
+                logger.warning(
+                    "Cannot mirror prompt-note cleanup in ledger: %s",
+                    core.scrub_text(str(exc)),
+                )
+        conflicts = cleanup.get("conflicts", [])
+        cleanup_error = core.scrub_text(str(cleanup.get("error", "")))
+        if conflicts or cleanup_error or cleanup.get("complete") is False:
+            if cleanup_error:
+                message = f"Session prompt-note cleanup did not complete: {cleanup_error}"
+            else:
+                message = (
+                    "Session prompt-note cleanup retained "
+                    f"{len(conflicts)} note(s) with ownership conflicts"
+                )
             logger.warning(message)
             core.note_auto_event("prompt_note_cleanup_failed", message)
             return False

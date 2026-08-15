@@ -4718,6 +4718,374 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(FakeHost.memory_entries)
         self.assertFalse(FakeHost.skills)
 
+    def test_session_prompt_cleanup_is_durable_consumed_and_auditable(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        policy = "When retrying a scoped request, verify the exact target."
+        result = self.run_proposal(prompt_proposal(policy), session_id="session")
+        entry_id = result["journal_id"]
+        note_id = journal.get_entry(entry_id)["recovery"]["note_id"]
+
+        with self.assertRaises(ValueError):
+            journal.finalize(entry_id, "cleanup_resolved")
+        self.assertTrue(plugin_init._clear_session_prompt_notes("session"))
+
+        entry = journal.get_entry(entry_id)
+        self.assertEqual(entry["outcome"], "cleanup_resolved")
+        self.assertFalse(journal.is_reversible(entry))
+        self.assertEqual(journal.count_today_applied(), 1)
+        self.assertTrue(journal.was_applied_recently(result["proposal"], 7))
+        self.assertIn(
+            entry_id,
+            [item["id"] for item in journal.recent_refinements(10)],
+        )
+        self.assertFalse(any(note["id"] == note_id for note in journal.load_prompt_notes()))
+        rollback = core.refine_rollback(entry_id)
+        self.assertFalse(rollback["success"])
+        self.assertIn("not reversible", rollback["error"])
+        row = next(
+            item for item in core.refine_audit()["rows"]
+            if item["journal_id"] == entry_id
+        )
+        self.assertEqual(row["outcome"], "cleanup_resolved")
+        self.assertEqual(row["verdict"], "session note expired")
+        self.assertEqual(
+            ledger.load_stats()[f"prompt:{note_id}"]["outcome"],
+            "cleanup_resolved",
+        )
+
+    def test_session_prompt_cleanup_reconciles_crash_before_store_write(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        policy = "When retrying a crash-bound request, verify its endpoint."
+        result = self.run_proposal(prompt_proposal(policy), session_id="session")
+        entry_id = result["journal_id"]
+        note_id = journal.get_entry(entry_id)["recovery"]["note_id"]
+
+        with patch.object(journal, "_write_prompt_notes", side_effect=OSError("disk full")):
+            self.assertIsNone(journal.clear_session_prompt_notes("session"))
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "cleanup_prepared")
+        self.assertTrue(any(note["id"] == note_id for note in journal.load_prompt_notes()))
+        self.assertEqual(journal.count_today_applied(), 1)
+        self.assertTrue(journal.was_applied_recently(result["proposal"], 7))
+
+        changed = journal.reconcile()
+        self.assertEqual([entry["id"] for entry in changed], [entry_id])
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "cleanup_resolved")
+        self.assertFalse(any(note["id"] == note_id for note in journal.load_prompt_notes()))
+
+    def test_session_prompt_cleanup_reconciles_crash_after_store_write(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        policy = "When retrying an interrupted cleanup, verify its response."
+        result = self.run_proposal(prompt_proposal(policy), session_id="session")
+        entry_id = result["journal_id"]
+        original_finalize = journal.finalize
+
+        def fail_resolution(journal_id, outcome, **kwargs):
+            if outcome == "cleanup_resolved":
+                raise OSError("final fsync failed")
+            return original_finalize(journal_id, outcome, **kwargs)
+
+        with patch.object(journal, "finalize", side_effect=fail_resolution):
+            self.assertIsNone(journal.clear_session_prompt_notes("session"))
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "cleanup_prepared")
+        self.assertFalse(journal.load_prompt_notes())
+        self.assertEqual(journal.count_today_applied(), 1)
+
+        changed = journal.reconcile()
+        self.assertEqual([entry["id"] for entry in changed], [entry_id])
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "cleanup_resolved")
+
+    def test_session_prompt_cleanup_recovers_landed_prepared_note(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        policy = "When retrying an unfinished apply, verify its target."
+        original_finalize = journal.finalize
+
+        def fail_applied(journal_id, outcome, **kwargs):
+            if outcome == "applied":
+                raise OSError("apply finalization failed")
+            return original_finalize(journal_id, outcome, **kwargs)
+
+        with patch.object(journal, "finalize", side_effect=fail_applied):
+            result = self.run_proposal(prompt_proposal(policy), session_id="session")
+        self.assertFalse(result["success"])
+        entry_id = result["journal_id"]
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        self.assertTrue(journal.load_prompt_notes())
+
+        cleanup = journal.clear_session_prompt_notes("session")
+        self.assertEqual(cleanup["journal_ids"], [entry_id])
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "cleanup_resolved")
+        self.assertFalse(journal.load_prompt_notes())
+        self.assertEqual(journal.count_today_applied(), 1)
+
+    def test_session_prompt_cleanup_isolates_changed_or_unowned_note(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        changed = self.run_proposal(
+            prompt_proposal("When retrying a changed note, verify its target."),
+            session_id="session",
+        )
+        clean = self.run_proposal(
+            prompt_proposal("When retrying a clean sibling, verify its endpoint."),
+            session_id="session",
+        )
+        changed_id = changed["journal_id"]
+        clean_id = clean["journal_id"]
+        changed_note_id = journal.get_entry(changed_id)["recovery"]["note_id"]
+        clean_note_id = journal.get_entry(clean_id)["recovery"]["note_id"]
+        with journal.mutation_lock():
+            notes = journal.load_prompt_notes()
+            for note in notes:
+                if note["id"] == changed_note_id:
+                    note["content"] = (
+                        "When retrying a changed note, verify its response."
+                    )
+            journal._write_prompt_notes(notes)
+
+        cleanup = journal.clear_session_prompt_notes("session")
+        self.assertFalse(cleanup["complete"])
+        self.assertEqual(cleanup["removed"], 1)
+        self.assertEqual(cleanup["note_ids"], [clean_note_id])
+        self.assertEqual(cleanup["conflicts"], [changed_note_id])
+        self.assertEqual(journal.get_entry(changed_id)["outcome"], "applied")
+        self.assertEqual(journal.get_entry(clean_id)["outcome"], "cleanup_resolved")
+        self.assertEqual(
+            [note["id"] for note in journal.load_prompt_notes()],
+            [changed_note_id],
+        )
+        self.assertFalse(plugin_init._clear_session_prompt_notes("session"))
+        self.assertEqual(
+            core.refine_status()["last_auto_event"]["code"],
+            "prompt_note_cleanup_failed",
+        )
+
+        absent_id = "0123456789ab"
+        legacy_id = journal.prepare(
+            trigger="manual",
+            reason="legacy absent prompt",
+            session_id="other-session",
+            proposal={
+                "action": "create", "kind": "prompt", "name": absent_id,
+                "note_id": absent_id, "content": "When retrying, verify the target.",
+                "scope": "session", "session_id": "other-session",
+            },
+            recovery={"type": "prompt_note", "note_id": absent_id},
+        )
+        cleanup = journal.clear_session_prompt_notes("other-session")
+        self.assertEqual(cleanup["removed"], 0)
+        self.assertEqual(journal.get_entry(legacy_id)["outcome"], "prepared")
+
+    def test_pending_cleanup_reports_notes_moved_across_scope_or_session(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        moved_global = self.run_proposal(
+            prompt_proposal("When retrying a moved global note, verify its target."),
+            session_id="session",
+        )
+        moved_session = self.run_proposal(
+            prompt_proposal("When retrying a moved session note, verify its endpoint."),
+            session_id="session",
+        )
+        moved_ids = []
+        for result in (moved_global, moved_session):
+            entry_id = result["journal_id"]
+            moved_ids.append(journal.get_entry(entry_id)["recovery"]["note_id"])
+            journal.finalize(entry_id, "cleanup_prepared")
+        with journal.mutation_lock():
+            notes = journal.load_prompt_notes()
+            notes[0]["scope"] = "global"
+            notes[0].pop("session_id", None)
+            notes[1]["session_id"] = "other-session"
+            journal._write_prompt_notes(notes)
+
+        cleanup = journal.clear_session_prompt_notes("session")
+        self.assertFalse(cleanup["complete"])
+        self.assertEqual(cleanup["removed"], 0)
+        self.assertEqual(set(cleanup["conflicts"]), set(moved_ids))
+        self.assertEqual(len(journal.load_prompt_notes()), 2)
+        for result in (moved_global, moved_session):
+            self.assertEqual(
+                journal.get_entry(result["journal_id"])["outcome"],
+                "cleanup_prepared",
+            )
+
+    def test_partial_cleanup_finalization_mirrors_committed_entries(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        first = self.run_proposal(
+            prompt_proposal("When retrying the first terminal cleanup, verify its target."),
+            session_id="session",
+        )
+        second = self.run_proposal(
+            prompt_proposal("When retrying the second terminal cleanup, verify its endpoint."),
+            session_id="session",
+        )
+        first_id = first["journal_id"]
+        second_id = second["journal_id"]
+        first_note_id = journal.get_entry(first_id)["recovery"]["note_id"]
+        second_note_id = journal.get_entry(second_id)["recovery"]["note_id"]
+        original_finalize = journal.finalize
+
+        def fail_second_resolution(journal_id, outcome, **kwargs):
+            if journal_id == second_id and outcome == "cleanup_resolved":
+                raise OSError("second resolution fsync failed")
+            return original_finalize(journal_id, outcome, **kwargs)
+
+        with patch.object(journal, "finalize", side_effect=fail_second_resolution):
+            self.assertFalse(plugin_init._clear_session_prompt_notes("session"))
+        self.assertEqual(journal.get_entry(first_id)["outcome"], "cleanup_resolved")
+        self.assertEqual(journal.get_entry(second_id)["outcome"], "cleanup_prepared")
+        stats = ledger.load_stats()
+        self.assertEqual(stats[f"prompt:{first_note_id}"]["outcome"], "cleanup_resolved")
+        self.assertEqual(stats[f"prompt:{second_note_id}"]["outcome"], "applied")
+
+        core._reconcile_pending()
+        self.assertEqual(journal.get_entry(second_id)["outcome"], "cleanup_resolved")
+        self.assertEqual(
+            ledger.load_stats()[f"prompt:{second_note_id}"]["outcome"],
+            "cleanup_resolved",
+        )
+
+    def test_partial_mixed_cleanup_and_rollback_mirrors_committed_entries(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        cleanup_item = self.run_proposal(
+            prompt_proposal("When retrying mixed cleanup, verify its target."),
+            session_id="session",
+        )
+        rollback_item = self.run_proposal(
+            prompt_proposal("When retrying mixed rollback, verify its endpoint."),
+            session_id="session",
+        )
+        cleanup_id = cleanup_item["journal_id"]
+        rollback_id = rollback_item["journal_id"]
+        cleanup_note_id = journal.get_entry(cleanup_id)["recovery"]["note_id"]
+        rollback_note_id = journal.get_entry(rollback_id)["recovery"]["note_id"]
+        journal.finalize(rollback_id, "rollback_prepared")
+        original_finalize = journal.finalize
+
+        def fail_rollback_resolution(journal_id, outcome, **kwargs):
+            if journal_id == rollback_id and outcome == "rolled_back":
+                raise OSError("rollback resolution fsync failed")
+            return original_finalize(journal_id, outcome, **kwargs)
+
+        with patch.object(journal, "finalize", side_effect=fail_rollback_resolution):
+            self.assertFalse(plugin_init._clear_session_prompt_notes("session"))
+        self.assertEqual(journal.get_entry(cleanup_id)["outcome"], "cleanup_resolved")
+        self.assertEqual(journal.get_entry(rollback_id)["outcome"], "rollback_prepared")
+        stats = ledger.load_stats()
+        self.assertEqual(stats[f"prompt:{cleanup_note_id}"]["outcome"], "cleanup_resolved")
+        self.assertEqual(stats[f"prompt:{rollback_note_id}"]["outcome"], "applied")
+
+        core._reconcile_pending()
+        self.assertEqual(journal.get_entry(rollback_id)["outcome"], "rolled_back")
+        self.assertEqual(
+            ledger.load_stats()[f"prompt:{rollback_note_id}"]["outcome"],
+            "rolled_back",
+        )
+
+    def test_session_cleanup_finishes_exact_prompt_rollback_intent(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        result = self.run_proposal(
+            prompt_proposal("When retrying a rollback-bound note, verify its target."),
+            session_id="session",
+        )
+        entry_id = result["journal_id"]
+        journal.finalize(entry_id, "rollback_prepared")
+
+        cleanup = journal.clear_session_prompt_notes("session")
+        self.assertTrue(cleanup["complete"])
+        self.assertEqual(cleanup["journal_ids"], [entry_id])
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "rolled_back")
+        self.assertFalse(journal.load_prompt_notes())
+        self.assertEqual(journal.count_today_applied(), 0)
+
+    def test_multi_note_partial_cleanup_preparation_reconciles_exact_ids(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        first = self.run_proposal(
+            prompt_proposal("When retrying a first cleanup, verify its target."),
+            session_id="session",
+        )
+        second = self.run_proposal(
+            prompt_proposal("When retrying a second cleanup, verify its endpoint."),
+            session_id="session",
+        )
+        first_id = first["journal_id"]
+        second_id = second["journal_id"]
+        original_finalize = journal.finalize
+
+        def fail_second(journal_id, outcome, **kwargs):
+            if journal_id == second_id and outcome == "cleanup_prepared":
+                raise OSError("second prepare fsync failed")
+            return original_finalize(journal_id, outcome, **kwargs)
+
+        with patch.object(journal, "finalize", side_effect=fail_second):
+            self.assertIsNone(journal.clear_session_prompt_notes("session"))
+        self.assertEqual(journal.get_entry(first_id)["outcome"], "cleanup_prepared")
+        self.assertEqual(journal.get_entry(second_id)["outcome"], "applied")
+        self.assertEqual(len(journal.load_prompt_notes()), 2)
+
+        changed = journal.reconcile()
+        self.assertEqual([entry["id"] for entry in changed], [first_id])
+        self.assertEqual(journal.get_entry(first_id)["outcome"], "cleanup_resolved")
+        self.assertEqual(len(journal.load_prompt_notes()), 1)
+        cleanup = journal.clear_session_prompt_notes("session")
+        self.assertEqual(cleanup["journal_ids"], [second_id])
+        self.assertEqual(journal.get_entry(second_id)["outcome"], "cleanup_resolved")
+        self.assertFalse(journal.load_prompt_notes())
+        self.assertEqual(journal.count_today_applied(), 2)
+
+    def test_concurrent_session_prompt_cleanup_resolves_each_id_once(self):
+        FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
+        result = self.run_proposal(
+            prompt_proposal("When retrying concurrent cleanup, verify its target."),
+            session_id="session",
+        )
+        entry_id = result["journal_id"]
+        barrier = threading.Barrier(3)
+        results = []
+        errors = []
+        result_lock = threading.Lock()
+
+        def worker():
+            barrier.wait()
+            try:
+                cleanup = journal.clear_session_prompt_notes("session")
+            except Exception as exc:
+                with result_lock:
+                    errors.append(exc)
+            else:
+                with result_lock:
+                    results.append(cleanup)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertFalse(errors)
+        self.assertEqual(sorted(item["removed"] for item in results), [0, 1])
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "cleanup_resolved")
+        physical = [
+            json.loads(line) for line in
+            journal.journal_path().read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            sum(
+                item.get("id") == entry_id
+                and item.get("outcome") == "cleanup_prepared"
+                for item in physical
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                item.get("id") == entry_id
+                and item.get("outcome") == "cleanup_resolved"
+                for item in physical
+            ),
+            1,
+        )
+
     def test_prompt_note_rollback_removes_only_exact_unchanged_note(self):
         first = self.run_proposal(prompt_proposal("When retrying a request, verify its shape."))
         later = self.run_proposal(prompt_proposal("When handling an error, keep the response narrow."))
@@ -5191,7 +5559,8 @@ class RefineTests(unittest.TestCase):
         self.assertIn(session_policy, own_context)
         self.assertIn(global_policy, other_context)
         self.assertNotIn(session_policy, other_context)
-        self.assertEqual(journal.clear_session_prompt_notes("session"), 1)
+        cleanup = journal.clear_session_prompt_notes("session")
+        self.assertEqual(cleanup["removed"], 1)
         self.assertEqual(
             plugin_init._on_pre_llm_call(session_id="session"),
             {"context": f"Refine notes:\n- {global_policy}"},
@@ -5269,7 +5638,9 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(stored[0].get("session_id", ""))
         # It reaches the live session instead of being stranded on the dead one.
         self.assertIn(policy, plugin_init._on_pre_llm_call(session_id="session")["context"])
-        self.assertEqual(journal.clear_session_prompt_notes("past-session"), 0)
+        self.assertEqual(
+            journal.clear_session_prompt_notes("past-session")["removed"], 0
+        )
 
         # Analysing the live session still produces a session-scoped note.
         live = self.run_proposal(
@@ -5356,7 +5727,9 @@ class RefineTests(unittest.TestCase):
             core.refine_status()["last_auto_event"]["code"], "prompt_note_kept_global"
         )
         # It survives the cleanup that runs in the same worker.
-        self.assertEqual(journal.clear_session_prompt_notes("session"), 0)
+        self.assertEqual(
+            journal.clear_session_prompt_notes("session")["removed"], 0
+        )
         self.assertIn(
             policy, plugin_init._on_pre_llm_call(session_id="session")["context"]
         )
@@ -9618,6 +9991,16 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         with self.assertRaises(ValueError):
             journal.finalize(terminal_id, "applied")
 
+    def test_cleanup_transition_rejects_non_prompt_journal_entries(self):
+        entry_id = journal.prepare(
+            trigger="manual", reason="seed", session_id="session",
+            proposal=skill_proposal("not-a-prompt-cleanup"),
+            recovery={"type": "skill_create", "name": "not-a-prompt-cleanup"},
+        )
+        with self.assertRaisesRegex(ValueError, "session-note ownership"):
+            journal.finalize(entry_id, "cleanup_prepared")
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+
     def test_legal_journal_transition_preserves_immutable_recovery(self):
         proposal = skill_proposal("legal-transition")
         entry_id = journal.prepare(
@@ -10561,7 +10944,10 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_dedup_pending_approval_counts_as_consumed(self):
         """R7-05: pending_approval is a consumed outcome for dedup."""
         proposal = {"action": "create", "kind": "skill", "name": "dedup-pend", "content": "x"}
-        for outcome in ("pending_approval", "prepared", "rollback_prepared", "pending_rollback"):
+        for outcome in (
+            "pending_approval", "prepared", "cleanup_prepared",
+            "cleanup_resolved", "rollback_prepared", "pending_rollback",
+        ):
             entries = [{
                 "id": "e1", "ts": time.time() - 100,
                 "outcome": outcome,
