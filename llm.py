@@ -1357,7 +1357,9 @@ def propose(
         max_chars=overview_max_chars,
     )
     corrections = "\n".join(
-        f"  - {item[:200].replace('<', '&lt;').replace('>', '&gt;')}"
+        "  " + _untrusted_json_record(
+            "user_correction", item[:200], escape_tags=True
+        )
         for item in user_corrections[:5]
     ) or "  (none)"
     unused_block = ""
