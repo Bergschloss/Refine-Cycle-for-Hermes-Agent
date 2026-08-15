@@ -14,7 +14,7 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 try:
     from .config import journal_dir, max_edits_per_day
@@ -1300,51 +1300,57 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+def _replay_entries(lines: Iterable[str]) -> List[Dict[str, Any]]:
+    """Collapse physical JSONL records into validated latest logical states."""
+    latest: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError("journal contains an invalid JSON record") from exc
+        if not isinstance(entry, dict):
+            raise ValueError("journal record must be an object")
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            raise ValueError("journal record id must be a non-empty string")
+        timestamp = entry.get("ts")
+        if (
+            not isinstance(timestamp, (int, float))
+            or isinstance(timestamp, bool)
+            or not math.isfinite(float(timestamp))
+        ):
+            raise ValueError("journal record timestamp must be finite numeric data")
+        if not isinstance(entry.get("outcome"), str) or not entry["outcome"]:
+            raise ValueError("journal record outcome must be a non-empty string")
+        if not isinstance(entry.get("proposal"), dict):
+            raise ValueError("journal record proposal must be an object")
+        if entry_id not in latest:
+            order.append(entry_id)
+        else:
+            _validate_journal_transition(latest[entry_id], entry)
+        latest[entry_id] = entry
+    return [latest[entry_id] for entry_id in order]
+
+
 def _load_entries_state() -> "tuple[List[Dict[str, Any]], str]":
     """Return collapsed entries plus ``ok``, ``absent``, or ``unreadable``."""
     path = journal_read_path()
-    latest: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
 
     def _read():
         with path.open("r", encoding="utf-8", errors="strict") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError("journal contains an invalid JSON record") from exc
-                if not isinstance(entry, dict):
-                    raise ValueError("journal record must be an object")
-                entry_id = entry.get("id")
-                if not isinstance(entry_id, str) or not entry_id.strip():
-                    raise ValueError("journal record id must be a non-empty string")
-                timestamp = entry.get("ts")
-                if (
-                    not isinstance(timestamp, (int, float))
-                    or isinstance(timestamp, bool)
-                    or not math.isfinite(float(timestamp))
-                ):
-                    raise ValueError("journal record timestamp must be finite numeric data")
-                if not isinstance(entry.get("outcome"), str) or not entry["outcome"]:
-                    raise ValueError("journal record outcome must be a non-empty string")
-                if not isinstance(entry.get("proposal"), dict):
-                    raise ValueError("journal record proposal must be an object")
-                if entry_id not in latest:
-                    order.append(entry_id)
-                else:
-                    _validate_journal_transition(latest[entry_id], entry)
-                latest[entry_id] = entry
+            return _replay_entries(handle)
 
     try:
-        _retry_on_contention(_read, _READ_RETRY_BUDGET_SECONDS)
+        entries_value = _retry_on_contention(_read, _READ_RETRY_BUDGET_SECONDS)
     except FileNotFoundError:
         return [], "absent"
     except Exception as exc:
         logger.error("Failed to read journal: %s", scrub_text(str(exc)))
         return [], "unreadable"
-    return [latest[entry_id] for entry_id in order], "ok"
+    return entries_value, "ok"
 
 
 def _load_entries() -> List[Dict[str, Any]]:

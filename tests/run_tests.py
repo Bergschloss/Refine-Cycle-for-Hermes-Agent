@@ -9703,6 +9703,89 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertFalse(lock_path.exists())
         self.assertNotIn(str(lock_path), journal._ORPHANED_LOCK_TOKENS)
 
+    def test_replay_helper_preserves_order_and_latest_valid_transition(self):
+        first = {
+            "id": "first", "ts": 1.0, "outcome": "prepared",
+            "proposal": {"action": "no_op"},
+        }
+        second = {
+            "id": "second", "ts": 2.0, "outcome": "no_op",
+            "proposal": {"action": "no_op"},
+        }
+        finalized = dict(
+            first, outcome="error", error="did not land", finalized_ts=3.0
+        )
+        replayed = journal._replay_entries([
+            "\n", json.dumps(first) + "\n", json.dumps(second) + "\n",
+            json.dumps(finalized),
+        ])
+        self.assertEqual([entry["id"] for entry in replayed], ["first", "second"])
+        self.assertEqual(replayed[0]["outcome"], "error")
+        self.assertEqual(replayed[1], second)
+
+    def test_replay_helper_rejects_malformed_physical_records(self):
+        valid = {
+            "id": "valid", "ts": 1.0, "outcome": "no_op", "proposal": {},
+        }
+        malformed = (
+            "{bad json",
+            json.dumps([]),
+            json.dumps(dict(valid, id="")),
+            json.dumps(dict(valid, ts=True)),
+            json.dumps(dict(valid, outcome="")),
+            json.dumps(dict(valid, proposal=[])),
+        )
+        for record in malformed:
+            with self.subTest(record=record):
+                with self.assertRaises(ValueError):
+                    journal._replay_entries([record])
+
+    def test_journal_replay_accepts_existing_physical_line_endings(self):
+        records = [
+            json.dumps({
+                "id": f"line-{index}", "ts": float(index),
+                "outcome": "no_op", "proposal": {"action": "no_op"},
+            }, separators=(",", ":"))
+            for index in range(1, 4)
+        ]
+        for separator in (b"\n", b"\r\n", b"\r"):
+            for final_separator in (True, False):
+                with self.subTest(
+                    separator=separator, final_separator=final_separator
+                ):
+                    payload = separator.join(record.encode("utf-8") for record in records)
+                    if final_separator:
+                        payload += separator
+                    journal.journal_path().write_bytes(payload)
+                    entries_value, state = journal._load_entries_safe()
+                    self.assertEqual(state, "ok")
+                    self.assertEqual(
+                        [entry["id"] for entry in entries_value],
+                        ["line-1", "line-2", "line-3"],
+                    )
+
+    def test_replay_helper_processes_all_ten_thousand_physical_records(self):
+        physical_count = 0
+
+        def records():
+            nonlocal physical_count
+            for index in range(5_000):
+                prepared = {
+                    "id": f"{index:012x}", "ts": float(index + 1),
+                    "outcome": "prepared", "proposal": {"action": "no_op"},
+                }
+                resolved = dict(
+                    prepared, outcome="error", finalized_ts=float(index + 2)
+                )
+                for entry in (prepared, resolved):
+                    physical_count += 1
+                    yield json.dumps(entry, separators=(",", ":")) + "\n"
+
+        replayed = journal._replay_entries(records())
+        self.assertEqual(physical_count, 10_000)
+        self.assertEqual(len(replayed), 5_000)
+        self.assertTrue(all(entry["outcome"] == "error" for entry in replayed))
+
     def test_journal_state_does_not_probe_is_file_before_open(self):
         entry_id = journal.log(
             trigger="test", reason="exists", session_id="session",
