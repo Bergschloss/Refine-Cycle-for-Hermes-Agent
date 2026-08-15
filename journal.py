@@ -14,7 +14,7 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 try:
     from .config import journal_dir, max_edits_per_day
@@ -859,7 +859,10 @@ def _prompt_cleanup_note_matches(
 
 
 def clear_session_prompt_notes(
-    session_id: str, *, timeout: float = 30.0
+    session_id: str,
+    *,
+    timeout: float = 30.0,
+    mirror: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Durably expire exact notes owned by one ended/reset session.
 
@@ -868,6 +871,18 @@ def clear_session_prompt_notes(
     remain consumed edits: normal session expiry is not rollback evidence.
     Exact conflicts are retained without blocking independently proven siblings.
     ``None`` means the durable operation itself did not complete.
+
+    ``removed``/``note_ids`` describe notes actually taken out of the store;
+    ``journal_ids``/``entries`` the subset whose terminal transition is durable.
+
+    ``mirror`` receives each returned entry while this call still holds the
+    mutation lock, and callers of *this* function must not mirror afterwards:
+    ``ledger.record_edit`` takes the same lock with its own 30s default, which on
+    a host callback thread would reintroduce exactly the stall ``timeout`` exists
+    to bound, and would leave a window where the journal says the note expired
+    and the ledger still says it is live. The rule is about the short host
+    timeout, so it does not extend to ``reconcile()``, whose caller mirrors after
+    the lock on an ordinary refine thread that may wait the full default.
     """
     safe_session_id = normalize_prompt_note_session_id(session_id)
     if not safe_session_id:
@@ -933,10 +948,30 @@ def clear_session_prompt_notes(
         rolling_back: Dict[str, Dict[str, Any]] = {
             str(entry["id"]): entry for entry in rollback_pending
         }
-        removed = selected_cleanup + selected_rollback
+        pending_removal = selected_cleanup + selected_rollback
+        # Read back from the store rather than assumed from the selection, so
+        # this cannot report a note as expired that is in fact still present.
+        removed: List[tuple[Dict[str, str], Dict[str, Any]]] = []
         resolved: List[Dict[str, Any]] = []
+        store_written = False
 
         def cleanup_result(error: str = "") -> Dict[str, Any]:
+            # Exactly one return path builds a result, so mirroring here sends
+            # each resolved entry once.
+            entries_out = [sanitize(entry) for entry in resolved]
+            if mirror is not None:
+                for entry in entries_out:
+                    try:
+                        mirror(entry)
+                    except Exception as exc:
+                        # The journal is the authority; a ledger mirror is a
+                        # display convenience that ``_merge_journal_stats``
+                        # rebuilds later. It must never undo a durable
+                        # transition or fail the cleanup that already happened.
+                        logger.warning(
+                            "Cannot mirror prompt-note cleanup in ledger: %s",
+                            scrub_text(str(exc)),
+                        )
             return {
                 "complete": not conflicts and not error,
                 "removed": len(removed),
@@ -944,8 +979,23 @@ def clear_session_prompt_notes(
                 "conflicts": conflicts,
                 "error": scrub_text(error),
                 "journal_ids": [str(entry["id"]) for entry in resolved],
-                "entries": [sanitize(entry) for entry in resolved],
+                "entries": entries_out,
             }
+
+        def incomplete(reason: str) -> Dict[str, Any]:
+            """Abandon the pass with a named cause, keeping durable work.
+
+            The cause travels in the result, not only in the log, because the
+            caller turns ``error`` into the operator-visible auto event while a
+            bare ``None`` collapses every distinct cause into one generic
+            "did not complete". ``complete`` is already False and the entry list
+            is empty when nothing resolved, so the failure contract is unchanged.
+            The result may legitimately carry no durable work at all -- a rollback
+            intent whose note was already gone reaches this without any store
+            write -- so read ``journal_ids``/``removed`` rather than assuming it.
+            """
+            logger.warning("Cannot complete session prompt cleanup: %s", scrub_text(reason))
+            return cleanup_result(reason)
 
         try:
             # JSONL has no multi-record transaction. A partial preparation is
@@ -957,19 +1007,29 @@ def clear_session_prompt_notes(
                     entry = finalize(entry_id, "cleanup_prepared")
                 prepared[entry_id] = entry
 
-            remove_ids = {
-                note["id"]
-                for note, _entry in selected_cleanup + selected_rollback
-            }
+            remove_ids = {note["id"] for note, _entry in pending_removal}
             if remove_ids:
                 _write_prompt_notes([
                     note for note in notes if note["id"] not in remove_ids
                 ])
+                # True as of this instant; corrected below by reading the store
+                # back. If the pass dies in between, reporting the write is more
+                # accurate than reporting that nothing was removed.
+                store_written = True
+                removed = pending_removal
 
             current_notes = _load_prompt_notes()
             if current_notes is None:
-                return None
+                # The store write already landed, so this is not "nothing
+                # happened": name it rather than reporting a generic failure.
+                return incomplete(
+                    "prompt note store became unreadable after the cleanup write"
+                )
             current_by_id = {note["id"]: note for note in current_notes}
+            removed = [
+                item for item in pending_removal
+                if item[0]["id"] not in current_by_id
+            ]
             for outcome, pending in (
                 ("cleanup_resolved", prepared),
                 ("rolled_back", rolling_back),
@@ -991,22 +1051,32 @@ def clear_session_prompt_notes(
                             if note_id not in conflicts:
                                 conflicts.append(note_id)
                             continue
-                        return None
+                        # The exact note survived its own removal, so absence
+                        # cannot be certified.
+                        return incomplete(
+                            f"exact prompt note {note_id} survived the store write"
+                        )
                     current = get_entry(entry_id)
                     if current and current.get("outcome") == source_outcome:
                         resolved.append(finalize(entry_id, outcome))
                     elif current and current.get("outcome") == outcome:
                         resolved.append(current)
                     else:
-                        return None
+                        return incomplete(
+                            f"journal entry {entry_id} is no longer {source_outcome}"
+                        )
         except Exception as exc:
             safe_error = scrub_text(str(exc))
             logger.warning("Cannot clear session prompt notes: %s", safe_error)
             # A prior terminal transition in this batch is already durable and
             # reconciliation will not emit it again. Return those exact entries
             # so callers can mirror journal authority even though a later id
-            # remains pending.
-            return cleanup_result(safe_error) if resolved else None
+            # remains pending. Once the store write has landed the same applies
+            # to the cause itself: notes are gone and the journal has not caught
+            # up, which is not the same event as "there was nothing to clean up".
+            if resolved or store_written:
+                return cleanup_result(safe_error)
+            return None
 
         return cleanup_result()
 
@@ -2162,9 +2232,15 @@ def _reconcile_cleanup_prepared(snapshot: Dict[str, Any]) -> Optional[Dict[str, 
         )
         if index is not None:
             if not _prompt_cleanup_note_matches(current, notes[index], session_id):
+                # Refine will not remove a note whose content, scope, or session
+                # no longer matches the intent it recorded, so this entry stays
+                # cleanup_prepared until the store is repaired. Name the note:
+                # nothing else in the plugin can resolve it.
                 logger.warning(
-                    "Left journal entry %s cleanup_prepared: exact prompt note changed",
+                    "Left journal entry %s cleanup_prepared: prompt note %s "
+                    "no longer matches the recorded intent",
                     entry_id,
+                    note_id,
                 )
                 return None
             _write_prompt_notes(notes[:index] + notes[index + 1:])
@@ -2207,10 +2283,14 @@ def reconcile() -> List[Dict[str, Any]]:
                 # that really happened. ``rollback_target_matches`` is the
                 # positive test: the target looks exactly as it would after a
                 # rollback, so the edit is genuinely not there.
-                # A prompt note is exempt: session-scoped notes are removed at
-                # session end without journaling anything, so absence proves
-                # nothing about whether the note was ever written. Session end is
-                # also exactly when the automatic pass runs.
+                # A prompt note is exempt. Session end does journal its own
+                # cleanup intent now (``cleanup_prepared`` ->
+                # ``cleanup_resolved``), but only for a note whose exact
+                # ownership it can prove: a note dropped by an older build, by
+                # hand, or by a cleanup that could not prove ownership leaves no
+                # receipt at all. Absence therefore still proves nothing about
+                # whether this note was ever written, and session end is also
+                # exactly when the automatic pass runs.
                 if (
                     proposal.get("kind") != "prompt"
                     and rollback_target_matches(snapshot) is True

@@ -1393,7 +1393,7 @@ def propose(
     )
     instructions = (
         "Ground the proposal in one repeated failure or explicit correction.\n\n"
-        "=== RUN REQUEST / PRIOR PASS CONTEXT ===\n"
+        "=== RUN REQUEST / PRIOR PASS CONTEXT (UNTRUSTED JSON) ===\n"
         f"{context_block}\n\n"
         "=== REVIEWER OUTPUT (UNTRUSTED JSON) ===\n"
         f"{reviewer_block}\n\n"
@@ -1401,7 +1401,7 @@ def propose(
         "<untrusted_tool_result>\n"
         f"{_patterns.format_patterns(error_patterns)}\n"
         "</untrusted_tool_result>\n\n"
-        "=== USER CORRECTIONS ===\n"
+        "=== USER CORRECTIONS (UNTRUSTED JSON) ===\n"
         f"{corrections}\n\n"
         "=== EXISTING SKILLS ===\n"
         f"{skills_list}\n\n"

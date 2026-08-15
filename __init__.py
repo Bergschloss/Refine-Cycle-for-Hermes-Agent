@@ -261,33 +261,51 @@ def _clear_session_prompt_notes(
     if not isinstance(session_id, str) or not session_id.strip():
         return True
     try:
+        # Mirroring is delegated so it happens under the cleanup's own lock.
+        # ``ledger.record_edit`` waits up to its own 30s default for the mutation
+        # lock, which on this callback thread would defeat ``timeout`` entirely.
         if timeout is None:
-            cleanup = journal.clear_session_prompt_notes(session_id)
+            cleanup = journal.clear_session_prompt_notes(
+                session_id, mirror=ledger.record_journal_state
+            )
         else:
-            cleanup = journal.clear_session_prompt_notes(session_id, timeout=timeout)
+            cleanup = journal.clear_session_prompt_notes(
+                session_id, timeout=timeout, mirror=ledger.record_journal_state
+            )
         if cleanup is None:
             message = "Session prompt-note cleanup did not complete"
             logger.warning(message)
             core.note_auto_event("prompt_note_cleanup_failed", message)
             return False
-        for entry in cleanup.get("entries", []):
-            try:
-                ledger.record_journal_state(entry)
-            except Exception as exc:
-                logger.warning(
-                    "Cannot mirror prompt-note cleanup in ledger: %s",
-                    core.scrub_text(str(exc)),
-                )
         conflicts = cleanup.get("conflicts", [])
         cleanup_error = core.scrub_text(str(cleanup.get("error", "")))
         if conflicts or cleanup_error or cleanup.get("complete") is False:
-            if cleanup_error:
-                message = f"Session prompt-note cleanup did not complete: {cleanup_error}"
-            else:
-                message = (
-                    "Session prompt-note cleanup retained "
-                    f"{len(conflicts)} note(s) with ownership conflicts"
+            # Name the exact notes. Refine will not remove a note it cannot prove
+            # it owns, so this state does not clear itself; without the ids the
+            # operator has nothing to inspect in the note store. A failure and a
+            # retained note happen together, so neither may hide the other.
+            retained = ""
+            if conflicts:
+                named = ", ".join(
+                    core.scrub_text(str(note_id)) for note_id in conflicts[:5]
                 )
+                if len(conflicts) > 5:
+                    named += f" (+{len(conflicts) - 5} more)"
+                retained = (
+                    f"retained {len(conflicts)} note(s) with ownership conflicts"
+                    f": {named}"
+                )
+            if cleanup_error and retained:
+                message = (
+                    "Session prompt-note cleanup did not complete: "
+                    f"{cleanup_error}; {retained}"
+                )
+            elif cleanup_error:
+                message = f"Session prompt-note cleanup did not complete: {cleanup_error}"
+            elif retained:
+                message = f"Session prompt-note cleanup {retained}"
+            else:
+                message = "Session prompt-note cleanup did not complete"
             logger.warning(message)
             core.note_auto_event("prompt_note_cleanup_failed", message)
             return False

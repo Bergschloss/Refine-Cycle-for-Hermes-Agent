@@ -322,6 +322,25 @@ mutation lock instead of the full lock timeout. If a refine pass still owns the
 lock, the note is left in place — it can no longer be injected, because its
 session is gone — and it is removed at the next end or reset for that id.
 
+That expiry is itself journaled, so a crash cannot turn "the note landed and was
+then cleaned up" into "the note never landed": the entry moves `applied` (or
+`prepared`, for a note that landed before its own finalization completed) →
+`cleanup_prepared`, fsynced *before* the store changes, and only reaches
+`cleanup_resolved` once the exact note is proven absent from a fresh read. Both
+states count against the daily budget, because the edit really happened — normal
+session expiry is not a refund and not rollback evidence. Consequently a
+session-scoped note stops being reversible once its session ends: `/refine
+rollback <id>` then reports the entry as not reversible, since the artifact it
+would remove is already gone. Ledger rows for the two states read *session
+cleanup pending* and *session note expired*.
+
+Cleanup removes only a note whose id, content, scope, and session still match
+the intent recorded in the journal. A note that was hand-edited or moved to
+another scope or session is **retained** and reported by id, and an entry already
+at `cleanup_prepared` stays there until the store is repaired. That is
+deliberate — refine does not delete what it cannot prove it owns — but it does
+not clear itself; see *Known integration gaps*.
+
 The prompt-note store is plugin-owned, so there is **no host approval gate** for
 these notes. Creation, target-state proof, audit rows, and conflict-aware
 rollback are still journaled; host approval remains in force for host-managed
@@ -626,6 +645,16 @@ llm:
 - **No host approval for the prompt-note store:** it is a plugin-owned atomic
   file, not a host memory or skill write. Host-managed skill and memory changes
   still respect staged approvals and reconciliation.
+- **A session note that stops matching its cleanup intent has no terminal
+  state:** if the note store is hand-edited or a note is moved to another scope
+  or session after `cleanup_prepared` was journaled, the note is retained and
+  the entry stays `cleanup_prepared` — non-terminal, and not reversible, because
+  the artifact rollback would remove is not the one the entry describes. Every
+  later end or reset of that same session id reports it again by note id. A
+  terminal state would have to keep counting against the daily budget (the edit
+  did happen) and needs its own crash-ordering matrix, so it is deliberately
+  left as a design decision rather than approximated. Repairing or removing the
+  offending entry in `prompt_notes.json` by hand clears it.
 - **Rollback is not modeled as an ordinary proposal:** rolling back a skill
   `create` means deleting it, and the no-delete guardrail rejects any proposal
   carrying a delete. Routing rollback through the proposal path would therefore

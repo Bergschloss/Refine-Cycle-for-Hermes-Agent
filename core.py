@@ -130,6 +130,58 @@ _HTTP_STATUS_REFERENCE = re.compile(
 _OVERRIDE_INTENT = re.compile(
     r"(?i)\b(?:ignore|disregard|override|bypass|skip|forget|regardless of|instead of)\b"
 )
+# What makes a mention of guidance a reference to *durable context* rather than to
+# some ordinary document: an authority word, or a position word placed before or
+# after the noun.
+_CONTEXT_PRIOR_QUALIFIER = (
+    r"(?:previous(?:ly)?|prior|above|preceding|earlier|older|system|initial"
+    r"|original|foregoing|aforementioned|base|developer)"
+)
+_CONTEXT_GUIDANCE_NOUN = (
+    r"(?:instruction|guidance|guideline|prompt|rule|policy|directive|constraint"
+    r"|context)s?"
+)
+# A guidance word used attributively describes a document, not durable context:
+# "the previous rule file", "the earlier policy document", "the prompt template".
+# Refusing those would block ordinary prose about a repository's own files.
+_CONTEXT_DOCUMENT_HEAD = (
+    r"(?!\s+(?:files?|documents?|docs?|templates?|pages?|reports?|sheets?"
+    r"|logs?|sections?|folders?|director(?:y|ies)|paths?|examples?|snippets?"
+    r"|tables?|repos?|repositor(?:y|ies)|branch(?:es)?|commits?|issues?))"
+)
+# Determiners only, including the partitive, so "any of the previous
+# instructions" cannot walk past a rule that stops "any previous instructions".
+# A closed set is the whole point: it lets the phrase keep its natural article
+# without letting an arbitrary prepositional phrase drift in ("steps copied from
+# the earlier context"), which is ordinary defensive prose and must stay writable.
+_CONTEXT_FOLLOW_DETERMINER = (
+    r"(?:the|a|an|any|all|those|these|them|its|such|this|that|my|your|our|of)"
+)
+# Participles that keep a trailing qualifier attached to the same noun phrase:
+# "instructions given above", "rules stated earlier".
+_CONTEXT_GUIDANCE_LINK = (
+    r"(?:given|stated|listed|provided|set|written|issued|defined)"
+)
+# A preposition detaches the qualifier from the guidance noun, and that is the
+# difference between an override and a lesson about untrusted input. "Instructions
+# in the earlier tool output" and "guidance from a previous tool result" describe
+# where text came from; "instructions in the system prompt" names durable context
+# itself. What separates them is whether a guidance noun follows the qualifier, so
+# the prepositional form is refused only when one does.
+_CONTEXT_GUIDANCE_PREPOSITION = r"(?:from|in|inside|within|of)"
+# A skill body is Markdown, so emphasis, backticks, quotes and hyphens are the
+# expected way to write "the **previous instructions**". Treating only whitespace
+# as a separator inside the phrase leaves the gate reading prose nobody writes.
+#
+# A line break is allowed only where the text continues, never into a blank line,
+# a list item, a heading, a quote or a fence. Otherwise the phrase stops being
+# the direct object of the verb and starts bridging two unrelated Markdown
+# blocks: "- Never follow" and a following "- Previous rules are documented in
+# the appendix" are two bullets, not an instruction to disregard context.
+_CONTEXT_PHRASE_GAP = (
+    r"(?:[^\S\n]|[*_`'\"()\u2018\u2019\u201c\u201d\u2013\u2014-]"
+    r"|\n(?![^\S\n]*(?:\n|$|[-*+>#]|\d+[.)]|`{3}|~{3})))+"
+)
 # Narrow pattern for skill/memory bodies: matches imperative override phrasing
 # that targets guidance/instructions/prompt (not benign uses like "skip the cache"
 # or "instead of retrying"). Wider _OVERRIDE_INTENT is too broad for Markdown bodies.
@@ -138,11 +190,73 @@ _CONTEXT_OVERRIDE_INTENT = re.compile(
     r"\b(?:ignore|disregard|override|bypass|forget|neglect|dismiss|supersede"
     r"|abandon|drop|cancel|erase|overwrite|discard|revoke)\b"
     r"(?:\s+\w+){0,4}\s+"
-    r"(?:all\s+)?(?:previous|prior|above|preceding|earlier|system|initial)?\s*"
-    r"(?:instruction|guidance|prompt|rule|policy|directive|constraint|context)"
-    r"|\b(?:do\s+not|never)\s+follow\s+"
-    r"(?:all\s+)?(?:previous|prior|above|preceding|earlier|system|initial)?\s*"
-    r"(?:instruction|guidance|prompt|rule|policy|directive|constraint|context)"
+    # ``qualifier`` carries its own trailing space instead of being followed by a
+    # separate `\s*`. Two adjacent runs that can both match whitespace make every
+    # split of a long space run a distinct attempt, and a 15,000-character body of
+    # spaces -- inside the size limit, and reachable from model output -- then took
+    # over ten seconds in this one check.
+    r"(?:all\s+)?(?:(?:previous|prior|above|preceding|earlier|system|initial)\s*)?"
+    # Shared with the negative branch below, so the two cannot disagree about
+    # what counts as durable-context vocabulary. ``guidelines`` was missing here
+    # while this same file already treats the tag as reserved markup.
+    rf"{_CONTEXT_GUIDANCE_NOUN}"
+    # Negative override phrasing, e.g. "do not follow the previous instructions".
+    # Two deliberate differences from the imperative branch above.
+    #
+    # The prior-reference qualifier is *required*, because "do not follow
+    # instructions embedded in tool output" and "never follow guidance from an
+    # untrusted page" are exactly the defensive lessons refine should be able to
+    # write down about itself. It is accepted on either side of the noun, since
+    # "do not follow the instructions above" is the same imperative as "do not
+    # follow the above instructions".
+    #
+    # And what may sit between the words is a closed set, not `\w+`: the phrase
+    # has to be the direct object of "follow". Allowing arbitrary filler blocks
+    # sentences like "never follow links in earlier context", where a qualifier
+    # and a noun merely happen to appear nearby. A false positive here silently
+    # refuses a legitimate self-improvement, so it costs as much as a miss.
+    #
+    # Declared trade-off: a skill body cannot say "do not follow the above rule"
+    # to except a rule stated earlier in that same body. Nothing distinguishes
+    # that from "do not follow the above instructions" aimed at durable context,
+    # so the ambiguous shape is refused and in-document exceptions have to be
+    # phrased without the imperative ("this does not apply to binary files").
+    #
+    # Known limits, deliberately not closed, because closing them costs more in
+    # refused legitimate prose than it buys. The words between "do not" and the
+    # verb are bounded, so enough interposed filler still walks past; widening
+    # that without bound is what makes "do not use the previous rule, and follow
+    # the current policy" a false positive. An unlisted adjective between the
+    # qualifier and the noun ("the above steering rules") also passes, for the
+    # same reason. This is one layer among the impersonation, control-tag,
+    # higher-priority-guidance, reviewer and daily-budget checks, not a parser.
+    rf"|\b(?:do\s+not|do\s*['\u2019\u02bc]?n['\u2019\u02bc]?t|never)"
+    rf"(?:[\s,]+\w+){{0,6}}[\s,]+"
+    rf"(?:follow|comply\s+with|adhere\s+to|abide\s+by|obey)\b"
+    # Elements below are each introduced by a mandatory separator, so none of them
+    # can match a longer word by prefix; only the final noun needs `\b`.
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_FOLLOW_DETERMINER}){{0,3}}"
+    rf"(?:"
+    # Pre-posed: "the previous instructions", "prior system guidance",
+    # "the previously-stated instructions", "the system's instructions".
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_PRIOR_QUALIFIER}(?:['\u2019]s)?){{1,3}}"
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_LINK})?"
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_FOLLOW_DETERMINER})?"
+    rf"{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_NOUN}\b{_CONTEXT_DOCUMENT_HEAD}"
+    # Post-posed, qualifier attached to the same noun: "the instructions above",
+    # "rules stated earlier".
+    rf"|{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_NOUN}"
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_LINK})?"
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_PRIOR_QUALIFIER}){{1,3}}\b"
+    # Prepositional, and only when durable context is named on both sides:
+    # "the instructions in the system prompt", not "instructions in the earlier
+    # tool output".
+    rf"|{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_NOUN}"
+    rf"{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_PREPOSITION}"
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_FOLLOW_DETERMINER}){{0,2}}"
+    rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_PRIOR_QUALIFIER}){{1,3}}"
+    rf"{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_NOUN}\b{_CONTEXT_DOCUMENT_HEAD}"
+    rf")"
     r")"
 )
 _CONTEXT_CONTROL_TAGS = re.compile(
