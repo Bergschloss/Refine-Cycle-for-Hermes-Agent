@@ -134,15 +134,20 @@ _OVERRIDE_INTENT = re.compile(
 # that targets guidance/instructions/prompt (not benign uses like "skip the cache"
 # or "instead of retrying"). Wider _OVERRIDE_INTENT is too broad for Markdown bodies.
 _CONTEXT_OVERRIDE_INTENT = re.compile(
-    r"(?i)\b(?:ignore|disregard|override|bypass|forget|neglect|dismiss|supersede"
+    r"(?i)(?:"
+    r"\b(?:ignore|disregard|override|bypass|forget|neglect|dismiss|supersede"
     r"|abandon|drop|cancel|erase|overwrite|discard|revoke)\b"
     r"(?:\s+\w+){0,4}\s+"
     r"(?:all\s+)?(?:previous|prior|above|preceding|earlier|system|initial)?\s*"
     r"(?:instruction|guidance|prompt|rule|policy|directive|constraint|context)"
+    r"|\b(?:do\s+not|never)\s+follow\s+"
+    r"(?:all\s+)?(?:previous|prior|above|preceding|earlier|system|initial)?\s*"
+    r"(?:instruction|guidance|prompt|rule|policy|directive|constraint|context)"
+    r")"
 )
 _CONTEXT_CONTROL_TAGS = re.compile(
     r"(?i)(?:<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result"
-    r"|assistant_response|assistant|developer|user|user_context|prompt|rules|guidelines|context)[^>]*>"
+    r"|assistant_response|assistant|developer|user|user_context|prompt|rules|guidelines|context|custom_instructions)[^>]*>"
     r"|<<\s*sys\s*>>|<\|(?:im_start|im_end|system|user|assistant)\|>)"
 )
 _AGENT_IMPERSONATION = re.compile(
