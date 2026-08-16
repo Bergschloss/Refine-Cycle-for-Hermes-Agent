@@ -2150,10 +2150,13 @@ def rollback_target_matches(entry: Dict[str, Any]) -> Optional[bool]:
         recovery = entry.get("recovery", {})
         if recovery.get("type") != "prompt_note":
             return False
+        note_id = recovery.get("note_id")
+        if not isinstance(note_id, str) or not note_id:
+            return None
         notes = _load_prompt_notes()
         if notes is None:
             return None
-        return not any(note["id"] == recovery.get("note_id") for note in notes)
+        return not any(note["id"] == note_id for note in notes)
     return False
 
 

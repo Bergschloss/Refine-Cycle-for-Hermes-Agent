@@ -5371,6 +5371,24 @@ class RefineTests(unittest.TestCase):
             "rolled_back",
         )
 
+    def test_prompt_rollback_missing_note_id_is_not_proven(self):
+        entry_id = journal.log(
+            trigger="trace",
+            reason="trace",
+            session_id="session",
+            proposal={
+                "action": "create",
+                "kind": "prompt",
+                "content": "When retrying a malformed rollback, verify its identity.",
+            },
+            outcome="rollback_prepared",
+            recovery={"type": "prompt_note"},
+        )
+
+        self.assertIsNone(journal.rollback_target_matches(journal.get_entry(entry_id)))
+        self.assertEqual(journal.reconcile(), [])
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "rollback_prepared")
+
     def test_session_cleanup_finishes_exact_prompt_rollback_intent(self):
         FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
         result = self.run_proposal(
