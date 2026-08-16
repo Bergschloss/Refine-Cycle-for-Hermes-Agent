@@ -70,7 +70,8 @@ _FORGED_BEARER_MARKER_FIELD = re.compile(
 )
 _BEARER_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
 _URL_CREDENTIALS = re.compile(
-    r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/?#]+@(?=[^\s/?#]+(?:[/?#]|\s|$))"
+    r"(?<![A-Za-z0-9+.-])([a-zA-Z][a-zA-Z0-9+.-]*://)"
+    r"[^\s/?#]+@(?=[^\s/?#]+(?:[/?#]|\s|$))"
 )
 _ENV_SECRET = re.compile(
     r"(?m)^(\s*(?:export\s+|set\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*\s*=\s*)\S+$"

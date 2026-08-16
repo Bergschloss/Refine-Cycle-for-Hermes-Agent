@@ -1233,6 +1233,11 @@ class RefineTests(unittest.TestCase):
                 self.assertNotIn("user", result)
                 self.assertNotIn("s3cret", result)
 
+    def test_url_credential_scan_is_bounded(self):
+        started = time.perf_counter()
+        sanitization.scrub_text("a" * 40_000 + "://")
+        self.assertLess(time.perf_counter() - started, 0.5)
+
     def test_content_retry_reuses_json_mode_after_schema_fallback(self):
         name = "json-mode-content-retry"
         initial = {
