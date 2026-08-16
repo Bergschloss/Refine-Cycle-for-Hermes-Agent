@@ -3320,6 +3320,46 @@ class RefineTests(unittest.TestCase):
                     self.assertNotIn(secret, scrubbed)
                 self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
 
+    def test_basic_auth_credentials_are_redacted_and_idempotent(self):
+        cases = (
+            (
+                "authorization=Basic FAKEBASICTOKEN005 next=SAFE_BASIC_SUFFIX",
+                "FAKEBASICTOKEN005",
+                "authorization=Basic [REDACTED] next=SAFE_BASIC_SUFFIX",
+            ),
+            (
+                "Authorization: Basic dXNlcjpwYQ==",
+                "dXNlcjpwYQ==",
+                "Authorization: Basic [REDACTED]",
+            ),
+            (
+                '{"authorization": "Basic dXNlcjpwYXNz", "safe": "visible"}',
+                "dXNlcjpwYXNz",
+                '{"authorization": "Basic [REDACTED]", "safe": "visible"}',
+            ),
+            (
+                "Basic dXNlcjpwYXNz",
+                "dXNlcjpwYXNz",
+                "Basic [REDACTED]",
+            ),
+            (
+                "authorization=Basic [REDACTED]secret-token-123 next=SAFE_SUFFIX",
+                "secret-token-123",
+                "authorization=Basic [REDACTED] next=SAFE_SUFFIX",
+            ),
+            (
+                "authorization=Basic [REDACTED] secret-token-123",
+                "secret-token-123",
+                "authorization=Basic [REDACTED]",
+            ),
+        )
+        for raw, secret, expected in cases:
+            with self.subTest(raw=raw):
+                scrubbed = sanitization.scrub_text(raw)
+                self.assertEqual(scrubbed, expected)
+                self.assertNotIn(secret, scrubbed)
+                self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
+
     def test_pgp_private_key_block_is_redacted(self):
         private_key = (
             "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"

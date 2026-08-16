@@ -48,16 +48,17 @@ _QUOTED_SECRET = re.compile(
 )
 _UNQUOTED_SECRET = re.compile(
     rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
-    r"(?P<value>(?:[\"']?bearer\s+\[REDACTED\][\"']?|[^\s,;&\}\]\[]{6,}))"
+    r"(?P<value>(?:[\"']?(?:bearer|basic)\s+\[REDACTED\][\"']?|[^\s,;&\}\]\[]{6,}))"
 )
-_BEARER = re.compile(
-    r"(?i)(?P<label>\bbearer\s+)(?P<quote>[\"']?)[A-Za-z0-9._~+/=-]{8,}(?P<close>[\"']?)"
+_AUTH_TOKEN = re.compile(
+    r"(?i)(?P<label>\b(?:bearer|basic)\s+)(?P<quote>[\"']?)"
+    r"[A-Za-z0-9._~+/=-]{8,}(?P<close>[\"']?)"
 )
-# Preserve only already-canonical credential fields as units before marker
-# splitting. Without this, a later boundary pass sees the pre-marker fragment
+# Preserve only already-canonical auth fields as units before marker splitting.
+# Without this, a later boundary pass sees the pre-marker fragment
 # (``credentials=Bearer ``) by itself and destroys the auth scheme.
-_CANONICAL_BEARER_FIELD = re.compile(
-    rf"(?i){_SECRET_PREFIX}(?:[\"']?bearer\s+)\[REDACTED\]"
+_CANONICAL_AUTH_FIELD = re.compile(
+    rf"(?i){_SECRET_PREFIX}(?:[\"']?(?:bearer|basic)\s+)\[REDACTED\]"
     r"(?:[\"'](?=$|[\s,;&\}\]])|(?=$|[\s,;&\}\]]))"
 )
 # A marker inside a credential value is untrusted input, not proof that the
@@ -65,10 +66,11 @@ _CANONICAL_BEARER_FIELD = re.compile(
 # so it cannot leak through a forged `[REDACTED]` fragment. Whitespace only
 # continues an unquoted credential when it is not starting another key/value
 # field; otherwise repeated scrubbing would erase neighboring telemetry.
-_FORGED_BEARER_MARKER_FIELD = re.compile(
+_FORGED_AUTH_MARKER_FIELD = re.compile(
     rf"(?ix)(?P<prefix>{_SECRET_PREFIX})(?:"
-    r"(?P<quote>[\"'])bearer\s+\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
-    r"|bearer\s+\[REDACTED\](?:[^\s,;&\}\]]+|"
+    r"(?P<quote>[\"'])(?P<quoted_scheme>bearer|basic)\s+"
+    r"\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
+    r"|(?P<unquoted_scheme>bearer|basic)\s+\[REDACTED\](?:[^\s,;&\}\]]+|"
     r"\s+(?![A-Za-z_][A-Za-z0-9_.-]*\s*[:=])[^\s,;&\}\]]+))"
 )
 _FORGED_SECRET_MARKER_FIELD = re.compile(
@@ -76,7 +78,7 @@ _FORGED_SECRET_MARKER_FIELD = re.compile(
     r"(?P<quote>[\"'])\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
     r"|\[REDACTED\][^\s,;&\}\]]+)"
 )
-_BEARER_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
+_AUTH_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
 _URL_CREDENTIALS = re.compile(
     r"(?<![A-Za-z0-9+.-])([a-zA-Z][a-zA-Z0-9+.-]*://)"
     r"[^\s/?#]+@(?=[^\s/?#]+(?:[/?#]|\s|$))"
@@ -112,14 +114,17 @@ def _replace_quoted(match: re.Match) -> str:
     prefix = match.group("prefix")
     key = _key_from_prefix(prefix)
     value = match.group("value")
-    # The Bearer pass has already reduced this exact credential form to the
+    # The auth-token pass has already reduced this exact credential form to the
     # canonical marker. Do not let the generic auth-field pass erase its scheme
     # (or add a second marker) on the same scrub cycle.
     if (
         _preserve_non_secret_token_field(prefix)
         or (
-            key in _BEARER_SCHEME_KEYS
-            and value.lower() == f"bearer {_REDACTED}".lower()
+            key in _AUTH_SCHEME_KEYS
+            and value.lower() in {
+                f"bearer {_REDACTED}".lower(),
+                f"basic {_REDACTED}".lower(),
+            }
         )
         or value.lower() in _NON_SECRETS
         or (_is_number(value) and key in _NUMERIC_METRIC_KEYS)
@@ -150,8 +155,11 @@ def _replace_unquoted(match: re.Match) -> str:
     if (
         _preserve_non_secret_token_field(prefix)
         or (
-            key in _BEARER_SCHEME_KEYS
-            and re.fullmatch(r"(?i)[\"']?bearer\s+\[REDACTED\][\"']?", value)
+            key in _AUTH_SCHEME_KEYS
+            and re.fullmatch(
+                r"(?i)[\"']?(?:bearer|basic)\s+\[REDACTED\][\"']?",
+                value,
+            )
         )
         or literal.lower() in _NON_SECRETS
         or (_is_number(literal) and key in _NUMERIC_METRIC_KEYS)
@@ -167,12 +175,20 @@ def _scrub_chunk(text: str) -> str:
         text = pattern.sub(_REDACTED, text)
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
     text = _ENV_SECRET.sub(r"\1[REDACTED]", text)
-    text = _BEARER.sub(
+    text = _AUTH_TOKEN.sub(
         lambda m: f"{m.group('label')}{m.group('quote')}{_REDACTED}{m.group('close')}",
         text,
     )
     text = _QUOTED_SECRET.sub(_replace_quoted, text)
     return _UNQUOTED_SECRET.sub(_replace_unquoted, text)
+
+
+def _replace_forged_auth_marker(match: re.Match) -> str:
+    scheme = match.group("quoted_scheme") or match.group("unquoted_scheme")
+    return (
+        f"{match.group('prefix')}{match.group('quote') or ''}"
+        f"{scheme.title()} {_REDACTED}{match.group('close') or ''}"
+    )
 
 
 def scrub_text(text: str) -> str:
@@ -187,11 +203,7 @@ def scrub_text(text: str) -> str:
         f"{_REDACTED}{match.group('close') or ''}",
         text,
     )
-    text = _FORGED_BEARER_MARKER_FIELD.sub(
-        lambda match: f"{match.group('prefix')}{match.group('quote') or ''}"
-        f"Bearer {_REDACTED}{match.group('close') or ''}",
-        text,
-    )
+    text = _FORGED_AUTH_MARKER_FIELD.sub(_replace_forged_auth_marker, text)
 
     def scrub_unprotected(chunk: str) -> str:
         # Sanitized proposals cross several trust boundaries. Splitting around
@@ -199,12 +211,12 @@ def scrub_text(text: str) -> str:
         # making repeated scrubbing idempotent.
         return _REDACTED.join(_scrub_chunk(part) for part in chunk.split(_REDACTED))
 
-    # A canonical Bearer field includes no secret, but it must stay intact as a
+    # A canonical auth field includes no secret, but it must stay intact as a
     # record. Protect it before the ordinary marker split so aliases such as
     # ``credentials`` retain the protocol scheme on subsequent boundaries.
     protected: list[str] = []
     position = 0
-    for match in _CANONICAL_BEARER_FIELD.finditer(text):
+    for match in _CANONICAL_AUTH_FIELD.finditer(text):
         protected.append(scrub_unprotected(text[position:match.start()]))
         protected.append(match.group(0))
         position = match.end()
