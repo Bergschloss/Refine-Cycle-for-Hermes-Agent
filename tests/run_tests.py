@@ -3271,6 +3271,12 @@ class RefineTests(unittest.TestCase):
         )
         self.assertEqual(sanitization.scrub_text(private_key), "[REDACTED]")
 
+    def test_stripe_bare_secret_key_is_redacted(self):
+        for environment in ("live", "test"):
+            secret = f"sk_{environment}_" + "A" * 24
+            with self.subTest(environment=environment):
+                self.assertEqual(sanitization.scrub_text(secret), "[REDACTED]")
+
     def test_aws_access_and_temporary_session_keys_both_redact(self):
         """R9 §10: AWS long-term (AKIA) and STS temporary (ASIA) key prefixes
         both must redact; ASIA was missing from the fixed-pattern list."""
