@@ -19,7 +19,8 @@ _FIXED_PATTERNS = [
     re.compile(r"dop_v1_[a-f0-9]{60,}"),
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
     re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?"
+        r"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----",
         re.S,
     ),
 ]

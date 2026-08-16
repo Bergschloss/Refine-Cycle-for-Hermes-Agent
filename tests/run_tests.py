@@ -3263,6 +3263,14 @@ class RefineTests(unittest.TestCase):
                 self.assertNotIn("credential-value-123", scrubbed)
                 self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
 
+    def test_pgp_private_key_block_is_redacted(self):
+        private_key = (
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+            "FAKEBODYDATA1234567890\n"
+            "-----END PGP PRIVATE KEY BLOCK-----"
+        )
+        self.assertEqual(sanitization.scrub_text(private_key), "[REDACTED]")
+
     def test_aws_access_and_temporary_session_keys_both_redact(self):
         """R9 §10: AWS long-term (AKIA) and STS temporary (ASIA) key prefixes
         both must redact; ASIA was missing from the fixed-pattern list."""
