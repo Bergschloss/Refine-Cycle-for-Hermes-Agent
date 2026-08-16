@@ -661,22 +661,24 @@ class RefineTests(unittest.TestCase):
     def test_reasoning_block_cannot_supply_the_salvaged_proposal(self):
         """Only final answer text, never a completed reasoning draft, is authoritative."""
         for tag in ("think", "thought", "reasoning", "reflection"):
-            with self.subTest(tag=tag):
-                reply = llm._salvage_parsed(
-                    MockResult(
-                        None,
-                        text=(
-                            f'<{tag.upper()}>{{"action":"create","kind":"skill",'
-                            '"name":"draft","content":"draft"}'
-                            f'</{tag.upper()}>\n'
-                            '{"action":"no_op","reason":"final answer"}'
+            for prefix in ("", "Preface before reasoning.\n"):
+                with self.subTest(tag=tag, prefix=bool(prefix)):
+                    reply = llm._salvage_parsed(
+                        MockResult(
+                            None,
+                            text=(
+                                prefix
+                                + f'<{tag.upper()}>{{"action":"create","kind":"skill",'
+                                '"name":"draft","content":"draft"}'
+                                f'</{tag.upper()}>\n'
+                                '{"action":"no_op","reason":"final answer"}'
+                            ),
                         ),
-                    ),
-                    requested_max_tokens=llm.PROPOSAL_MAX_TOKENS,
-                )
-                self.assertFalse(reply.failure)
-                self.assertEqual(reply.parsed["action"], "no_op")
-                self.assertEqual(reply.parsed["reason"], "final answer")
+                        requested_max_tokens=llm.PROPOSAL_MAX_TOKENS,
+                    )
+                    self.assertFalse(reply.failure)
+                    self.assertEqual(reply.parsed["action"], "no_op")
+                    self.assertEqual(reply.parsed["reason"], "final answer")
 
         unclosed = llm._salvage_parsed(
             MockResult(

@@ -417,23 +417,26 @@ def _has_incomplete_json_structure(text: str) -> bool:
 
 
 _REASONING_TAGS = "think|thought|reasoning|reflection"
-_LEADING_REASONING_OPEN = re.compile(
-    rf"^\s*<(?P<tag>{_REASONING_TAGS})\s*>", re.IGNORECASE
+_ANSWER_REASONING_OPEN = re.compile(
+    rf"<(?P<tag>{_REASONING_TAGS})\s*>", re.IGNORECASE
 )
 
 
 def _final_answer_text(text: str) -> str:
-    """Drop complete leading reasoning blocks before considering salvage JSON.
+    """Drop reasoning blocks that precede the first candidate answer JSON.
 
-    A model may emit an internally consistent draft inside a reasoning tag before
-    its actual answer. That draft is not an authorized proposal. An unclosed
-    leading block has no final answer at all, so it deliberately yields an empty
-    string rather than searching inside it for JSON.
+    A model may emit harmless prose before an internally consistent draft inside
+    a reasoning tag. That draft is not an authorized proposal. Reasoning markup
+    after answer JSON is left alone so literal tags inside proposal content are
+    not rewritten. An unclosed pre-answer block has no final answer at all.
     """
     remaining = text
     while True:
-        opening = _LEADING_REASONING_OPEN.match(remaining)
+        opening = _ANSWER_REASONING_OPEN.search(remaining)
         if opening is None:
+            return remaining
+        first_object = remaining.find("{")
+        if first_object >= 0 and first_object < opening.start():
             return remaining
         tag = opening.group("tag")
         closing = re.search(
