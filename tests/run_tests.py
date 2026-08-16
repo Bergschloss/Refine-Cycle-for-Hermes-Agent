@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from collections import Counter
 from contextlib import contextmanager
+from contextvars import ContextVar
 import sqlite3
 import sys
 import tempfile
@@ -529,6 +530,7 @@ class RefineTests(unittest.TestCase):
         # Turn marks are process-lifetime state keyed by session id; clear them so
         # one test's attempt point cannot suppress the next test's trigger.
         plugin_init._AUTO_TURN_MARKS.clear()
+        plugin_init._AUTO_PENDING_SESSION_ENDS.clear()
         core._AUTO_EVENTS.clear()
         # Both are process-lifetime globals: left set, they leak across tests.
         plugin_init._REGISTER_WARNED = False
@@ -4212,7 +4214,9 @@ class RefineTests(unittest.TestCase):
             plugin_init._on_session_end(session_id="session")
             self.assertTrue(called.wait(1))
         self.assertEqual(limits, [4])
-        run_auto.assert_called_once_with("session", cleanup_session_notes=True)
+        run_auto.assert_called_once_with(
+            "session", None, cleanup_session_notes=True
+        )
         self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
 
     def test_session_end_keeps_minimum_message_trigger_when_turn_trigger_is_disabled(self):
@@ -4296,19 +4300,57 @@ class RefineTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
 
-    def test_session_end_defers_while_a_turn_worker_is_active(self):
+    def test_session_end_race_preserves_contextvar_routes_without_lost_wakeup(self):
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
         threshold = config.auto_min_messages()
+        route_var = ContextVar("test_refine_invocation_route")
+        turn_route = types.SimpleNamespace(invocation_bound=True, name="turn")
+        end_route = types.SimpleNamespace(invocation_bound=True, name="session-end")
+
+        class ContextVarHost:
+            @property
+            def llm(self):
+                return route_var.get()
+
+        plugin_init._REGISTERED_CONTEXT = ContextVarHost()
         turn_started = threading.Event()
         release_turn = threading.Event()
+        finishing = threading.Event()
+        session_claiming = threading.Event()
         calls = []
+        original_finish = plugin_init._finish_auto_worker
+        original_session_claim = plugin_init._defer_or_claim_session_end
 
-        def run(**kwargs):
-            calls.append(kwargs)
+        def run(llm, **kwargs):
+            calls.append((llm, kwargs))
             if len(calls) == 1:
                 turn_started.set()
-                release_turn.wait(1)
+                release_turn.wait(2)
             return {"success": True}
+
+        def observed_finish():
+            finishing.set()
+            return original_finish()
+
+        def observed_session_claim(session_id, llm):
+            session_claiming.set()
+            return original_session_claim(session_id, llm)
+
+        def invoke_turn():
+            token = route_var.set(turn_route)
+            try:
+                plugin_init._on_post_llm_call(
+                    "session", [{"role": "assistant"}]
+                )
+            finally:
+                route_var.reset(token)
+
+        def invoke_session_end():
+            token = route_var.set(end_route)
+            try:
+                plugin_init._on_session_end(session_id="session")
+            finally:
+                route_var.reset(token)
 
         with patch.object(
             plugin_init.core,
@@ -4316,21 +4358,41 @@ class RefineTests(unittest.TestCase):
             return_value={"count": threshold, "collection_status": "ok"},
         ), patch.object(
             plugin_init.core, "refine_run", side_effect=run
+        ), patch.object(
+            plugin_init, "_finish_auto_worker", side_effect=observed_finish
+        ), patch.object(
+            plugin_init,
+            "_defer_or_claim_session_end",
+            side_effect=observed_session_claim,
         ):
-            plugin_init._on_post_llm_call("session", [{"role": "assistant"}])
+            turn_callback = threading.Thread(target=invoke_turn)
+            turn_callback.start()
             self.assertTrue(turn_started.wait(1))
-            plugin_init._on_session_end(session_id="session")
-            self.assertEqual(len(calls), 1)
-            release_turn.set()
-            deadline = time.monotonic() + 1
+            turn_callback.join(1)
+
+            with plugin_init._AUTO_PENDING_LOCK:
+                release_turn.set()
+                self.assertTrue(finishing.wait(1))
+                end_callback = threading.Thread(target=invoke_session_end)
+                end_callback.start()
+                self.assertTrue(session_claiming.wait(1))
+
+            end_callback.join(1)
+            deadline = time.monotonic() + 2
             while len(calls) < 2 and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertEqual(len(calls), 2)
-            deadline = time.monotonic() + 1
+            deadline = time.monotonic() + 2
             while plugin_init._AUTO_THREAD_GUARD.locked() and time.monotonic() < deadline:
                 time.sleep(0.01)
-            self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
-        self.assertTrue(all(call["auto"] for call in calls))
+
+        self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
+        self.assertEqual(plugin_init._AUTO_PENDING_SESSION_ENDS, {})
+        self.assertIs(calls[0][0], turn_route)
+        self.assertIs(calls[1][0], end_route)
+        self.assertTrue(all(call[1]["auto"] for call in calls))
+        self.assertFalse(calls[0][1]["session_ending"])
+        self.assertTrue(calls[1][1]["session_ending"])
 
     def test_gateway_style_concurrent_post_hooks_start_only_one_worker(self):
         """Concurrent gateway callback threads must coalesce to one auto worker."""
@@ -12172,8 +12234,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         # Defer two sessions
         with plugin_init._AUTO_PENDING_LOCK:
             plugin_init._AUTO_PENDING_SESSION_ENDS.clear()
-            plugin_init._AUTO_PENDING_SESSION_ENDS.add("deferred_a")
-            plugin_init._AUTO_PENDING_SESSION_ENDS.add("deferred_b")
+            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_a"] = None
+            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_b"] = None
         # Simulate auto disabled
         original = config.auto_enabled
         config.auto_enabled = lambda: False

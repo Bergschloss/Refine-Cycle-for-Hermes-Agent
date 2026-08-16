@@ -19,9 +19,12 @@ _ROLLBACK_COMMAND = re.compile(r"^rollback\s+([0-9a-fA-F]{12})$")
 
 
 _AUTO_THREAD_GUARD = threading.Lock()
-_AUTO_PENDING_SESSION_ENDS: set[str] = set()
+# A deferred session-end must retain the invocation-bound facade captured by
+# its host callback. Bare worker threads do not inherit the host ContextVar.
+_AUTO_PENDING_SESSION_ENDS: dict[str, Optional[PluginLlm]] = {}
 _AUTO_PENDING_LOCK = threading.Lock()
 _REGISTERED_CONTEXT: Optional[Any] = None
+_BOUND_LLM_UNSET = object()
 
 # Assistant-message count observed when each session last started an attempt.
 # One host turn can append several assistant messages, so the trigger compares a
@@ -33,30 +36,47 @@ _AUTO_TURN_MARKS_MAX = 64
 _HOST_PATH_LOCK_TIMEOUT = 2.0
 
 
-def _defer_session_end(session_id: str) -> None:
-    """Coalesce session-end fallbacks without creating blocked worker threads."""
+def _defer_or_claim_session_end(
+    session_id: str, llm: Optional[PluginLlm]
+) -> bool:
+    """Atomically claim the worker slot or publish one deferred fallback."""
     with _AUTO_PENDING_LOCK:
-        _AUTO_PENDING_SESSION_ENDS.add(session_id)
+        if _AUTO_THREAD_GUARD.acquire(blocking=False):
+            return True
+        _AUTO_PENDING_SESSION_ENDS[session_id] = llm
+        return False
+
+
+def _claim_auto_worker() -> bool:
+    """Claim the worker slot under the same lock used by the pending queue."""
+    with _AUTO_PENDING_LOCK:
+        return _AUTO_THREAD_GUARD.acquire(blocking=False)
 
 
 def _finish_auto_worker() -> None:
-    """Release one worker slot, then drain coalesced session-end entries."""
-    _AUTO_THREAD_GUARD.release()
+    """Atomically hand the worker slot to pending session-end work or release it."""
     while True:
         with _AUTO_PENDING_LOCK:
-            session_id = next(iter(_AUTO_PENDING_SESSION_ENDS), None)
-            if session_id is not None:
-                _AUTO_PENDING_SESSION_ENDS.remove(session_id)
-        if session_id is None:
-            break
+            pending = next(iter(_AUTO_PENDING_SESSION_ENDS.items()), None)
+            if pending is None:
+                _AUTO_THREAD_GUARD.release()
+                return
+            session_id, llm = pending
+            del _AUTO_PENDING_SESSION_ENDS[session_id]
         if not config.auto_enabled():
             # Auto is disabled — clean up prompt notes and continue draining
-            # instead of delegating to _on_session_end (which would return
-            # synchronously without continuing the chain).
+            # while retaining the claimed worker slot.
             _clear_session_prompt_notes(session_id, timeout=_HOST_PATH_LOCK_TIMEOUT)
             continue
-        _on_session_end(session_id=session_id)
-        break
+        try:
+            _on_session_end(
+                session_id=session_id, _bound_llm=llm, _worker_claimed=True
+            )
+        except Exception:
+            logger.exception("deferred refine session-end hook failed")
+            _clear_session_prompt_notes(session_id, timeout=_HOST_PATH_LOCK_TIMEOUT)
+            continue
+        return
 
 
 def _session_llm() -> Optional[PluginLlm]:
@@ -128,8 +148,13 @@ def _auto_refine_allowed() -> bool:
     return config.auto_enabled() and _cooldown_elapsed()
 
 
-def _run_auto_refine(session_id: str, *, cleanup_session_notes: bool = False) -> None:
-    """Run one guarded automatic pass after its worker thread has started."""
+def _run_auto_refine(
+    session_id: str,
+    llm: Optional[PluginLlm] = None,
+    *,
+    cleanup_session_notes: bool = False,
+) -> None:
+    """Run one guarded automatic pass with the callback-captured LLM facade."""
     try:
         if not _auto_refine_allowed():
             if cleanup_session_notes:
@@ -143,7 +168,7 @@ def _run_auto_refine(session_id: str, *, cleanup_session_notes: bool = False) ->
                     core.note_auto_event("mutation_lock_busy", message)
                 elif _cooldown_elapsed():
                     core.refine_run(
-                        llm=_session_llm(),
+                        llm=llm,
                         session_id=session_id,
                         auto=True,
                         # The same worker clears this session's notes below, so a
@@ -170,12 +195,14 @@ def _run_auto_refine(session_id: str, *, cleanup_session_notes: bool = False) ->
         _finish_auto_worker()
 
 
-def _start_auto_refine(session_id: str, assistant_turns: int) -> None:
-    """Start at most one non-queued automatic attempt when its gates permit it."""
+def _start_auto_refine(
+    session_id: str, assistant_turns: int, llm: Optional[PluginLlm]
+) -> None:
+    """Start one pass with the bound facade captured in the host callback."""
     if (
         not _auto_refine_allowed()
         or not _turn_interval_reached(session_id, assistant_turns)
-        or not _AUTO_THREAD_GUARD.acquire(blocking=False)
+        or not _claim_auto_worker()
     ):
         return
     # Charge the attempt to this turn point before the worker starts, so a
@@ -184,7 +211,7 @@ def _start_auto_refine(session_id: str, assistant_turns: int) -> None:
     try:
         threading.Thread(
             target=_run_auto_refine,
-            args=(session_id,),
+            args=(session_id, llm),
             daemon=True,
             name="refine-auto",
         ).start()
@@ -321,7 +348,12 @@ def _on_post_llm_call(
     """Record the session and schedule auto-refine without breaking the host hook."""
     try:
         core.note_session_id(session_id)
-        _start_auto_refine(session_id, _assistant_turn_count(conversation_history))
+        # Resolve while Hermes still has this callback's invocation ContextVar.
+        # The worker is a bare thread and cannot resolve the same route later.
+        llm = _session_llm()
+        _start_auto_refine(
+            session_id, _assistant_turn_count(conversation_history), llm
+        )
     except Exception as exc:
         safe_error = core.scrub_text(str(exc))
         message = f"Post-LLM refine hook failed: {safe_error or 'unknown error'}"
@@ -810,16 +842,22 @@ def _on_session_end(
     turn_id: str = "",
     completed: bool = False,
     interrupted: bool = False,
+    _bound_llm: Any = _BOUND_LLM_UNSET,
+    _worker_claimed: bool = False,
     **kwargs,
 ) -> None:
-    """Run the session-end fallback without blocking or dropping it behind a turn run."""
+    """Run the session-end fallback without blocking or losing its bound route."""
+    # A deferred drain calls this function from a worker and supplies the facade
+    # captured by the original callback. Only a real host callback resolves it.
+    bound_llm = _session_llm() if _bound_llm is _BOUND_LLM_UNSET else _bound_llm
     core.note_session_id(session_id)
     _forget_turn_marks(session_id)
     if not config.auto_enabled() or interrupted:
         _clear_session_prompt_notes(session_id, timeout=_HOST_PATH_LOCK_TIMEOUT)
+        if _worker_claimed:
+            _finish_auto_worker()
         return
-    if not _AUTO_THREAD_GUARD.acquire(blocking=False):
-        _defer_session_end(session_id)
+    if not _worker_claimed and not _defer_or_claim_session_end(session_id, bound_llm):
         return
 
     def _collect_and_run() -> None:
@@ -833,7 +871,9 @@ def _on_session_end(
                 # Let the normal source gate create the non-budget journal record,
                 # but do not fetch even one trajectory row in this preflight.
                 handed_off = True
-                _run_auto_refine(session_id, cleanup_session_notes=True)
+                _run_auto_refine(
+                    session_id, bound_llm, cleanup_session_notes=True
+                )
                 return
             # Session-end only gates on ``auto_min_messages``. Count at most that
             # many active rows without selecting role/content/tool payloads; the
@@ -866,7 +906,9 @@ def _on_session_end(
                 logger.debug("refine auto: not enough messages (%d)", message_count)
                 return
             handed_off = True
-            _run_auto_refine(session_id, cleanup_session_notes=True)
+            _run_auto_refine(
+                session_id, bound_llm, cleanup_session_notes=True
+            )
         except Exception:
             logger.exception("refine auto session-end hook failed")
         finally:
