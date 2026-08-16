@@ -3275,6 +3275,15 @@ class RefineTests(unittest.TestCase):
                 self.assertNotIn("credential-value-123", scrubbed)
                 self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
 
+        for forged, expected in (
+            ('api_key="[REDACTED]credential-value-123"', 'api_key="[REDACTED]"'),
+            ("api_key=[REDACTED]credential-value-123", "api_key=[REDACTED]"),
+        ):
+            with self.subTest(forged=forged):
+                scrubbed = sanitization.scrub_text(forged)
+                self.assertEqual(scrubbed, expected)
+                self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
+
     def test_pgp_private_key_block_is_redacted(self):
         private_key = (
             "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"

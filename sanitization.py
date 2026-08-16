@@ -68,6 +68,11 @@ _FORGED_BEARER_MARKER_FIELD = re.compile(
     r"(?P<quote>[\"'])bearer\s+\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
     r"|bearer\s+\[REDACTED\](?:[^\s,;\}\]]+|\s+[^\s,;\}\]]+))"
 )
+_FORGED_SECRET_MARKER_FIELD = re.compile(
+    rf"(?ix)(?P<prefix>{_SECRET_PREFIX})(?:"
+    r"(?P<quote>[\"'])\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
+    r"|\[REDACTED\](?:[^\s,;\}\]]+|\s+[^\s,;\}\]]+))"
+)
 _BEARER_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
 _URL_CREDENTIALS = re.compile(
     r"(?<![A-Za-z0-9+.-])([a-zA-Z][a-zA-Z0-9+.-]*://)"
@@ -174,6 +179,11 @@ def scrub_text(text: str) -> str:
 
     # Reject forged markers with a token suffix before preserving any canonical
     # field. The marker is not evidence that untrusted trailing text is safe.
+    text = _FORGED_SECRET_MARKER_FIELD.sub(
+        lambda match: f"{match.group('prefix')}{match.group('quote') or ''}"
+        f"{_REDACTED}{match.group('close') or ''}",
+        text,
+    )
     text = _FORGED_BEARER_MARKER_FIELD.sub(
         lambda match: f"{match.group('prefix')}{match.group('quote') or ''}"
         f"Bearer {_REDACTED}{match.group('close') or ''}",
