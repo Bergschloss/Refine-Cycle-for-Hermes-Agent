@@ -71,7 +71,7 @@ _FORGED_BEARER_MARKER_FIELD = re.compile(
 _FORGED_SECRET_MARKER_FIELD = re.compile(
     rf"(?ix)(?P<prefix>{_SECRET_PREFIX})(?:"
     r"(?P<quote>[\"'])\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
-    r"|\[REDACTED\](?:[^\s,;\}\]]+|\s+[^\s,;\}\]]+))"
+    r"|\[REDACTED\][^\s,;\}\]]+)"
 )
 _BEARER_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
 _URL_CREDENTIALS = re.compile(
