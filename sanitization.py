@@ -103,6 +103,7 @@ def _preserve_non_secret_token_field(prefix: str) -> bool:
 def _replace_quoted(match: re.Match) -> str:
     prefix = match.group("prefix")
     key = _key_from_prefix(prefix)
+    value = match.group("value")
     # The Bearer pass has already reduced this exact credential form to the
     # canonical marker. Do not let the generic auth-field pass erase its scheme
     # (or add a second marker) on the same scrub cycle.
@@ -110,8 +111,10 @@ def _replace_quoted(match: re.Match) -> str:
         _preserve_non_secret_token_field(prefix)
         or (
             key in _BEARER_SCHEME_KEYS
-            and match.group("value").lower() == f"bearer {_REDACTED}".lower()
+            and value.lower() == f"bearer {_REDACTED}".lower()
         )
+        or value.lower() in _NON_SECRETS
+        or (_is_number(value) and key in _NUMERIC_METRIC_KEYS)
     ):
         return match.group(0)
     return (
@@ -133,14 +136,17 @@ def _replace_unquoted(match: re.Match) -> str:
     value = match.group("value")
     prefix = match.group("prefix")
     key = _key_from_prefix(prefix)
+    literal = value
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        literal = value[1:-1]
     if (
         _preserve_non_secret_token_field(prefix)
         or (
             key in _BEARER_SCHEME_KEYS
             and re.fullmatch(r"(?i)[\"']?bearer\s+\[REDACTED\][\"']?", value)
         )
-        or value.lower() in _NON_SECRETS
-        or (_is_number(value) and key in _NUMERIC_METRIC_KEYS)
+        or literal.lower() in _NON_SECRETS
+        or (_is_number(literal) and key in _NUMERIC_METRIC_KEYS)
     ):
         return match.group(0)
     # Canonical markers are protected before the ordinary marker split. Do not

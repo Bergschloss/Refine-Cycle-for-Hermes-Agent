@@ -3253,6 +3253,13 @@ class RefineTests(unittest.TestCase):
         # Numeric values remain secret when the key names a credential.
         self.assertEqual(sanitization.scrub_text("token=1700000000.5"), "token=[REDACTED]")
         self.assertEqual(sanitization.scrub_text("token=1700000000"), "token=[REDACTED]")
+        # Quoting does not turn known telemetry or literal non-secrets into secrets.
+        self.assertEqual(
+            sanitization.scrub_text('max_tokens: "128"'),
+            'max_tokens: "128"',
+        )
+        self.assertEqual(sanitization.scrub_text('token: "enabled"'), 'token: "enabled"')
+        self.assertEqual(sanitization.scrub_text('token: "null"'), 'token: "null"')
         # But actual nonnumeric secrets still are
         self.assertIn("[REDACTED]", sanitization.scrub_text("token=abcSecretValue123"))
 
