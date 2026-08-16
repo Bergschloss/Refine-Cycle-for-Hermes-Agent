@@ -4790,7 +4790,8 @@ class RefineTests(unittest.TestCase):
     def test_session_prompt_cleanup_is_durable_consumed_and_auditable(self):
         FakeHost.entry_config()["prompt_notes_default_scope"] = "session"
         policy = "When retrying a scoped request, verify the exact target."
-        result = self.run_proposal(prompt_proposal(policy), session_id="session")
+        original_proposal = prompt_proposal(policy)
+        result = self.run_proposal(original_proposal, session_id="session")
         entry_id = result["journal_id"]
         note_id = journal.get_entry(entry_id)["recovery"]["note_id"]
 
@@ -4802,7 +4803,7 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(entry["outcome"], "cleanup_resolved")
         self.assertFalse(journal.is_reversible(entry))
         self.assertEqual(journal.count_today_applied(), 1)
-        self.assertTrue(journal.was_applied_recently(result["proposal"], 7))
+        self.assertTrue(journal.was_applied_recently(original_proposal, 7))
         self.assertIn(
             entry_id,
             [item["id"] for item in journal.recent_refinements(10)],

@@ -1724,9 +1724,10 @@ def proposal_hash(proposal: Dict[str, Any]) -> str:
     may legitimately need a patch with the same rendered content inside the dedup
     window. Memory is different: both accepted actions call the same
     ``MemoryStore.add("memory", content)`` append, and the proposal's ``name`` is
-    ignored by that store. Canonicalizing both fields prevents the model from
-    appending identical future-context text again merely by changing ``create``
-    to ``patch`` or choosing another unused name.
+    ignored by that store. Prompt-note IDs are generated only when the write is
+    prepared, so they are not part of the semantic create operation either.
+    Canonicalizing these fields prevents the same future-context text from being
+    added again under a storage-generated identity.
     """
     kind = str(proposal.get("kind", ""))
     action = str(proposal.get("action", ""))
@@ -1740,6 +1741,8 @@ def proposal_hash(proposal: Dict[str, Any]) -> str:
         # window misses a padded re-proposal, which then spends a budget slot
         # only for the host to refuse it as an exact duplicate.
         content = content.strip()
+    elif kind == "prompt" and action == "create":
+        name = "prompt"
     key = "|".join([
         kind,
         action,
