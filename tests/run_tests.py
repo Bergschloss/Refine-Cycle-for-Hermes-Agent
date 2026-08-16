@@ -3284,6 +3284,42 @@ class RefineTests(unittest.TestCase):
                 self.assertEqual(scrubbed, expected)
                 self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
 
+    def test_structured_credential_boundaries_preserve_following_fields(self):
+        cases = (
+            (
+                "Authorization: Bearer FAKEBEARERTOKEN004 trailing=SAFE_BEARER_SUFFIX",
+                "FAKEBEARERTOKEN004",
+                "Authorization: Bearer [REDACTED] trailing=SAFE_BEARER_SUFFIX",
+            ),
+            (
+                "credentials=Bearer [REDACTED] keep=SAFE_CANONICAL_SUFFIX",
+                None,
+                "credentials=Bearer [REDACTED] keep=SAFE_CANONICAL_SUFFIX",
+            ),
+            (
+                "credentials=Bearer [REDACTED]FAKE_FORGED_SECRET024 keep=SAFE_FORGED_SUFFIX",
+                "FAKE_FORGED_SECRET024",
+                "credentials=Bearer [REDACTED] keep=SAFE_FORGED_SUFFIX",
+            ),
+            (
+                "GET https://example.test/p?api_key=FAKE_QUERY_SECRET009&keep=SAFE_QUERY_SUFFIX",
+                "FAKE_QUERY_SECRET009",
+                "GET https://example.test/p?api_key=[REDACTED]&keep=SAFE_QUERY_SUFFIX",
+            ),
+            (
+                "GET https://example.test/p?token=FAKE%2FQUERY%2BSECRET010&tail=SAFE_PERCENT_SUFFIX",
+                "FAKE%2FQUERY%2BSECRET010",
+                "GET https://example.test/p?token=[REDACTED]&tail=SAFE_PERCENT_SUFFIX",
+            ),
+        )
+        for raw, secret, expected in cases:
+            with self.subTest(raw=raw):
+                scrubbed = sanitization.scrub_text(raw)
+                self.assertEqual(scrubbed, expected)
+                if secret:
+                    self.assertNotIn(secret, scrubbed)
+                self.assertEqual(sanitization.scrub_text(scrubbed), scrubbed)
+
     def test_pgp_private_key_block_is_redacted(self):
         private_key = (
             "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"

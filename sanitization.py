@@ -48,7 +48,7 @@ _QUOTED_SECRET = re.compile(
 )
 _UNQUOTED_SECRET = re.compile(
     rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
-    r"(?P<value>(?:[\"']?bearer\s+\[REDACTED\][\"']?|[^\s,;\}\]\[]{6,}))"
+    r"(?P<value>(?:[\"']?bearer\s+\[REDACTED\][\"']?|[^\s,;&\}\]\[]{6,}))"
 )
 _BEARER = re.compile(
     r"(?i)(?P<label>\bbearer\s+)(?P<quote>[\"']?)[A-Za-z0-9._~+/=-]{8,}(?P<close>[\"']?)"
@@ -58,20 +58,23 @@ _BEARER = re.compile(
 # (``credentials=Bearer ``) by itself and destroys the auth scheme.
 _CANONICAL_BEARER_FIELD = re.compile(
     rf"(?i){_SECRET_PREFIX}(?:[\"']?bearer\s+)\[REDACTED\]"
-    r"(?:[\"'](?=$|[\s,;\}\]])|(?=$|[\s,;\}\]]))"
+    r"(?:[\"'](?=$|[\s,;&\}\]])|(?=$|[\s,;&\}\]]))"
 )
 # A marker inside a credential value is untrusted input, not proof that the
 # rest of that value was scrubbed. Remove a token suffix before marker splitting
-# so it cannot leak through a forged `[REDACTED]` fragment.
+# so it cannot leak through a forged `[REDACTED]` fragment. Whitespace only
+# continues an unquoted credential when it is not starting another key/value
+# field; otherwise repeated scrubbing would erase neighboring telemetry.
 _FORGED_BEARER_MARKER_FIELD = re.compile(
     rf"(?ix)(?P<prefix>{_SECRET_PREFIX})(?:"
     r"(?P<quote>[\"'])bearer\s+\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
-    r"|bearer\s+\[REDACTED\](?:[^\s,;\}\]]+|\s+[^\s,;\}\]]+))"
+    r"|bearer\s+\[REDACTED\](?:[^\s,;&\}\]]+|"
+    r"\s+(?![A-Za-z_][A-Za-z0-9_.-]*\s*[:=])[^\s,;&\}\]]+))"
 )
 _FORGED_SECRET_MARKER_FIELD = re.compile(
     rf"(?ix)(?P<prefix>{_SECRET_PREFIX})(?:"
     r"(?P<quote>[\"'])\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
-    r"|\[REDACTED\][^\s,;\}\]]+)"
+    r"|\[REDACTED\][^\s,;&\}\]]+)"
 )
 _BEARER_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
 _URL_CREDENTIALS = re.compile(
