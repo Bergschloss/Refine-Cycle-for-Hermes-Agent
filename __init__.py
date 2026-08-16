@@ -21,7 +21,7 @@ _ROLLBACK_COMMAND = re.compile(r"^rollback\s+([0-9a-fA-F]{12})$")
 _AUTO_THREAD_GUARD = threading.Lock()
 _AUTO_PENDING_SESSION_ENDS: set[str] = set()
 _AUTO_PENDING_LOCK = threading.Lock()
-_REGISTERED_LLM: Optional[PluginLlm] = None
+_REGISTERED_CONTEXT: Optional[Any] = None
 
 # Assistant-message count observed when each session last started an attempt.
 # One host turn can append several assistant messages, so the trigger compares a
@@ -59,31 +59,22 @@ def _finish_auto_worker() -> None:
         break
 
 
-def _get_llm(ctx) -> PluginLlm:
-    try:
-        llm = ctx.llm
-        if llm is not None:
-            return llm
-    except Exception as exc:
-        logger.warning(
-            "Cannot use the host-provided refine LLM; using a plugin client: %s",
-            core.scrub_text(str(exc)),
-        )
-    return PluginLlm(plugin_id="refine")
+def _session_llm() -> Optional[PluginLlm]:
+    """Resolve the LLM facade for the current host invocation only.
 
-
-def _session_llm() -> PluginLlm:
-    """Return the host-provided client, falling back to a fresh one.
-
-    Reusing the host-provided facade keeps every path on one client instead of
-    building a new one per invocation. It does not by itself decide the model:
-    ``ctx.llm`` is a ``PluginLlm(plugin_id=...)`` and Hermes resolves the model
-    inside its own ``call_llm``, preferring the live main model. Pin
-    ``plugins.entries.refine.llm.model`` when a deterministic target is needed.
+    ``PluginContext.llm`` is route-bound by Hermes through a ContextVar. It must
+    therefore be read while the command or tool handler is executing; retaining
+    the registration-time facade or constructing a fallback client would send
+    private trajectory evidence through a different route.
     """
-    return _REGISTERED_LLM if _REGISTERED_LLM is not None else PluginLlm(
-        plugin_id="refine"
-    )
+    if _REGISTERED_CONTEXT is None:
+        return None
+    try:
+        llm = _REGISTERED_CONTEXT.llm
+    except Exception as exc:
+        logger.warning("Cannot resolve the active refine LLM: %s", core.scrub_text(str(exc)))
+        return None
+    return llm if getattr(llm, "invocation_bound", False) else None
 
 
 def _assistant_turn_count(conversation_history: Any) -> int:
@@ -383,6 +374,13 @@ def _is_model_target(remainder: str) -> bool:
 
 def _handle_model_subcommand(remainder: str) -> str:
     """Handle /refine model [auto | <provider/model> | <model>]."""
+    if _session_llm() is not None:
+        if not remainder:
+            return "model: active host invocation (bound route; stored overrides are ignored)"
+        return (
+            "❌ Refine uses the active host invocation model; /refine model cannot "
+            "change a bound route."
+        )
     trust_model = config.llm_allow_model_override()
     trust_prov = config.llm_allow_provider_override()
 
@@ -920,8 +918,8 @@ REFINE_RUN_SCHEMA = {
 
 
 def register(ctx) -> None:
-    global _REGISTERED_LLM
-    _REGISTERED_LLM = _get_llm(ctx)
+    global _REGISTERED_CONTEXT
+    _REGISTERED_CONTEXT = ctx
     # One-time migration of runtime data out of the plugin install directory.
     # Must not fail registration — a broken migration just leaves data in place.
     try:

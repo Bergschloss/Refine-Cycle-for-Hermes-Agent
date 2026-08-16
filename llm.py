@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 from agent.plugin_llm import (
     PluginLlm,
     PluginLlmInput,
+    PluginLlmInvocationError,
     PluginLlmTextInput,
     PluginLlmTrustError,
 )
@@ -158,6 +159,21 @@ def _bounded_trajectory(text: str) -> str:
     # No bytes are added after accounting. Keep this defensive slice so future
     # marker or separator changes cannot silently turn the advertised cap soft.
     return result[:limit]
+
+
+def _is_invocation_bound(llm: PluginLlm) -> bool:
+    """Return whether Hermes locked this facade to the active invocation route."""
+    return bool(getattr(llm, "invocation_bound", False))
+
+
+def _invocation_failure(exc: PluginLlmInvocationError) -> Dict[str, str]:
+    """Map a host-stable route error without persisting route or credential text."""
+    failure = (
+        "llm_transport_unsupported"
+        if getattr(exc, "code", "") == "unsupported_api_mode"
+        else "llm_route_error"
+    )
+    return {"action": "no_op", "reason": "Bound LLM route is unavailable.", "failure": failure}
 
 
 def _pinned_target() -> Dict[str, str]:
@@ -507,7 +523,9 @@ def _propose_structured(
         if text is None:
             raise TypeError("Refine accepts only text model inputs")
         safe_blocks.append(PluginLlmTextInput(text=scrub_text(str(text))))
-    resolved_target = target if target is not None else _pinned_target()
+    resolved_target = (
+        {} if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
+    )
     common = dict(
         instructions=scrub_text(str(instructions)),
         input=safe_blocks,
@@ -543,7 +561,10 @@ def _propose_structured(
             _call_transport.preferred_output_mode = "json_mode"
         return reply
 
-    if getattr(_call_transport, "preferred_output_mode", "") == "json_mode":
+    if (
+        not _is_invocation_bound(llm)
+        and getattr(_call_transport, "preferred_output_mode", "") == "json_mode"
+    ):
         reply = _call_json_mode()
         return reply.parsed or _incomplete_proposal(reply)
 
@@ -559,6 +580,8 @@ def _propose_structured(
         schema_meta_recorded = True
         reply = _salvage_parsed(result, requested_max_tokens=max_tokens)
         if reply.failure:
+            if _is_invocation_bound(llm):
+                return _incomplete_proposal(reply)
             raise ValueError(
                 f"json_schema parse failed: {reply.failure} — {reply.detail}"
             )
@@ -566,6 +589,10 @@ def _propose_structured(
             "json_schema_salvage" if reply.salvaged else "json_schema"
         )
         return reply.parsed
+    except PluginLlmInvocationError:
+        if not schema_meta_recorded:
+            _record_call_meta(None, call_started)
+        raise
     except PluginLlmTrustError:
         if not schema_meta_recorded:
             _record_call_meta(None, call_started)
@@ -573,6 +600,8 @@ def _propose_structured(
     except Exception as first_exc:
         if not schema_meta_recorded:
             _record_call_meta(None, call_started)
+        if _is_invocation_bound(llm):
+            raise
         logger.warning(
             "json_schema proposal failed (%s); falling back to json_mode",
             scrub_text(str(first_exc)),
@@ -693,7 +722,9 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
     """Return one conservative reviewer verdict; all failures decline safely."""
     _call_meta.value = {}
     safe_evidence = scrub_text(str(evidence_text))
-    resolved_target = target if target is not None else _pinned_target()
+    resolved_target = (
+        {} if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
+    )
     instructions = (
         "Assess this trajectory only for a durable lesson worth persisting. "
         "Return the required JSON object.\n\n=== RECENT TRAJECTORY ===\n"
@@ -717,10 +748,14 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
             _record_call_meta(result, call_started)
             schema_meta_recorded = True
             reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
-            if reply.failure:
+            if reply.failure and not _is_invocation_bound(llm):
                 raise ValueError(
                     f"Reviewer json_schema parse failed: {reply.failure} — {reply.detail}"
                 )
+        except PluginLlmInvocationError:
+            if not schema_meta_recorded:
+                _record_call_meta(None, call_started)
+            raise
         except PluginLlmTrustError:
             if not schema_meta_recorded:
                 _record_call_meta(None, call_started)
@@ -728,6 +763,8 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
         except Exception as schema_exc:
             if not schema_meta_recorded:
                 _record_call_meta(None, call_started)
+            if _is_invocation_bound(llm):
+                raise
             logger.warning(
                 "Reviewer json_schema failed (%s); falling back to json_mode",
                 scrub_text(str(schema_exc)),
@@ -776,6 +813,15 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                 "failure": reply.failure,
             }
         parsed = _ensure_dict(reply.parsed)
+    except PluginLlmInvocationError as exc:
+        failure = _invocation_failure(exc)["failure"]
+        logger.warning("Bound reviewer LLM route failed: %s", exc.code)
+        return {
+            "should_refine": False,
+            "rationale": "Reviewer route is unavailable.",
+            "instructions": "",
+            "failure": failure,
+        }
     except PluginLlmTrustError as exc:
         safe_error = scrub_text(str(exc))
         logger.warning("Reviewer trust denied: %s", safe_error)
@@ -1453,6 +1499,9 @@ def propose(
             skill_content_loader=skill_content_loader,
             target=target,
         )
+    except PluginLlmInvocationError as exc:
+        logger.warning("Bound plugin LLM route failed: %s", exc.code)
+        return _invocation_failure(exc)
     except PluginLlmTrustError as exc:
         safe_error = scrub_text(str(exc))
         logger.warning("PluginLlm trust denied: %s", safe_error)

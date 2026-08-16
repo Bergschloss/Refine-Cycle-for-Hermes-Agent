@@ -1953,7 +1953,7 @@ def _reviewer_cooldown_elapsed() -> bool:
 
 
 def _refine_once(
-    llm: PluginLlm,
+    llm: Optional[PluginLlm],
     *,
     reason: str = "",
     session_id: Optional[str] = None,
@@ -2036,6 +2036,41 @@ def _refine_once(
             response["message"] += " The skip decision could not be journaled."
         return response
 
+    if llm is None:
+        failure_message = (
+            "No invocation-bound host LLM is available; refine did not send "
+            "trajectory evidence."
+        )
+        entry_id = _journal_nonmutation(
+            trigger=trigger,
+            reason=safe_reason or failure_message,
+            session_id=resolved_session,
+            proposal={
+                "action": "no_op",
+                "reason": failure_message,
+                "expected_outcome": "",
+            },
+            outcome="llm_invocation_unavailable",
+            error=failure_message,
+            llm_meta={"target_source": "invocation_bound", "primary_attempts": 0},
+        )
+        response = {
+            "success": False,
+            "outcome": "llm_invocation_unavailable",
+            "failure": "llm_invocation_unavailable",
+            "message": failure_message,
+            "evidence": {
+                "session_id": resolved_session,
+                "session_id_source": resolved_source,
+                "session_source": session_db_source,
+                "source_lookup_status": source_lookup_status,
+            },
+            "reversible": False,
+        }
+        if entry_id:
+            response["journal_id"] = entry_id
+        return response
+
     if not dry_run and journal.daily_limit_reached():
         return {
             "success": False,
@@ -2049,28 +2084,35 @@ def _refine_once(
             },
         }
 
-    # Resolve the LLM target once per pass so every call within it uses the same
-    # model. This makes the choice deterministic and attributable in the journal.
+    # Resolve the LLM target once per pass so every unbound compatibility call
+    # is deterministic and attributable. An invocation-bound facade already
+    # carries the gateway's exact route, so persisted refine overrides must not
+    # be expanded into provider/model kwargs.
+    _invocation_bound = bool(getattr(llm, "invocation_bound", False))
     try:
         _effective = config.effective_llm_target()
         _run_target: Dict[str, str] = {}
-        _run_target_source = _effective.get("source", "host_default")
-        # Only targets the user explicitly chose are sent to the host.  A "live"
-        # target is the host's own current model; re-sending it converts an
-        # implicit working resolution into an explicit one that can fail.
-        if _run_target_source in ("command", "config"):
-            if _effective.get("provider") and config.llm_allow_provider_override():
-                _run_target["provider"] = _effective["provider"]
-            if _effective.get("model") and config.llm_allow_model_override():
-                _run_target["model"] = _effective["model"]
-        _run_target_issues = [str(i) for i in _effective.get("issues", []) if i]
-        _run_target_issues.extend(
-            config.llm_target_trust_denials(_effective).values()
-        )
+        if _invocation_bound:
+            _run_target_source = "invocation_bound"
+            _run_target_issues: List[str] = []
+        else:
+            _run_target_source = _effective.get("source", "host_default")
+            # Only targets the user explicitly chose are sent to the host.  A "live"
+            # target is the host's own current model; re-sending it converts an
+            # implicit working resolution into an explicit one that can fail.
+            if _run_target_source in ("command", "config"):
+                if _effective.get("provider") and config.llm_allow_provider_override():
+                    _run_target["provider"] = _effective["provider"]
+                if _effective.get("model") and config.llm_allow_model_override():
+                    _run_target["model"] = _effective["model"]
+            _run_target_issues = [str(i) for i in _effective.get("issues", []) if i]
+            _run_target_issues.extend(
+                config.llm_target_trust_denials(_effective).values()
+            )
     except Exception:
         _run_target = {}
-        _run_target_source = "unknown"
-        _run_target_issues = ["the effective model could not be resolved"]
+        _run_target_source = "invocation_bound" if _invocation_bound else "unknown"
+        _run_target_issues = [] if _invocation_bound else ["the effective model could not be resolved"]
     _run_target_unusable = bool(
         _run_target_issues
         and not _run_target
@@ -2346,7 +2388,8 @@ def _refine_once(
 
     _primary_attempts = 0
     _primary_llm_meta: Dict[str, Any] = {}
-    for _primary_attempt in range(_MAX_PRIMARY_ATTEMPTS):
+    _primary_attempt_limit = 1 if _invocation_bound else _MAX_PRIMARY_ATTEMPTS
+    for _primary_attempt in range(_primary_attempt_limit):
         _primary_attempts = _primary_attempt + 1
         proposal = _llm.propose(
             llm=llm,
@@ -2379,14 +2422,14 @@ def _refine_once(
         if (
             _primary_failure not in _PRIMARY_RETRY_FAILURES
             or any(marker in str(proposal.get("reason", "")).lower() for marker in _PRIMARY_NONRETRY_MARKERS)
-            or _primary_attempt >= _MAX_PRIMARY_ATTEMPTS - 1
+            or _primary_attempt >= _primary_attempt_limit - 1
         ):
             break
         logger.warning(
             "Refine primary backend returned %s (attempt %d/%d); retrying",
             _primary_failure,
             _primary_attempt + 1,
-            _MAX_PRIMARY_ATTEMPTS,
+            _primary_attempt_limit,
         )
     # Metadata was snapshotted after every outer proposal attempt above;
     # reading it here would only return the final attempt after its predecessors
@@ -2443,6 +2486,10 @@ def _refine_once(
                 "The model returned only reasoning and no final refine proposal."
             ),
             "llm_call_error": "The refine model call failed.",
+            "llm_route_error": "The active host route is unavailable for refine.",
+            "llm_transport_unsupported": (
+                "The active host route uses a transport refine cannot safely use."
+            ),
             "llm_trust_denied": "The host trust policy denied the refine model call.",
             "local_safety": scrub_text(str(proposal.get("reason", "")))
             or "The refine proposal could not be completed safely.",
@@ -2450,7 +2497,12 @@ def _refine_once(
         failure_message = failure_messages.get(
             failure, "The refine proposal could not be completed."
         )
-        if failure in ("llm_call_error", "llm_trust_denied"):
+        if failure in (
+            "llm_call_error",
+            "llm_route_error",
+            "llm_transport_unsupported",
+            "llm_trust_denied",
+        ):
             failure_outcome = "llm_error"
         elif failure == "local_safety":
             failure_outcome = "safety_blocked"
@@ -3456,7 +3508,7 @@ def _recoveries_for(applied: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def refine_run(
-    llm: PluginLlm,
+    llm: Optional[PluginLlm],
     *,
     reason: str = "",
     session_id: Optional[str] = None,

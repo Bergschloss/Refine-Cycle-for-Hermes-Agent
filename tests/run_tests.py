@@ -36,6 +36,12 @@ class PluginLlmTrustError(Exception):
     pass
 
 
+class PluginLlmInvocationError(RuntimeError):
+    def __init__(self, code="incomplete_route"):
+        super().__init__(code)
+        self.code = code
+
+
 class PluginLlmInput:
     pass
 
@@ -96,6 +102,7 @@ plugin_module.PluginLlmInput = PluginLlmInput
 plugin_module.PluginLlmTextInput = PluginLlmTextInput
 plugin_module.PluginLlmStructuredResult = object
 plugin_module.PluginLlmTrustError = PluginLlmTrustError
+plugin_module.PluginLlmInvocationError = PluginLlmInvocationError
 agent_module.plugin_llm = plugin_module
 sys.modules.update({"agent": agent_module, "agent.plugin_llm": plugin_module})
 
@@ -525,7 +532,7 @@ class RefineTests(unittest.TestCase):
         core._AUTO_EVENTS.clear()
         # Both are process-lifetime globals: left set, they leak across tests.
         plugin_init._REGISTER_WARNED = False
-        plugin_init._REGISTERED_LLM = None
+        plugin_init._REGISTERED_CONTEXT = None
         llm._call_transport.preferred_output_mode = ""
         llm._call_meta.value = {}
         config._set_runtime_journal_dir(None)
@@ -1106,7 +1113,7 @@ class RefineTests(unittest.TestCase):
             with self.subTest(control=repr(control)):
                 self.assertIsNone(_extract_first_json_object(text))
 
-    def test_get_llm_logs_and_falls_back_when_context_property_raises(self):
+    def test_session_llm_scrubs_context_property_failure(self):
         secret = "api_key=property-secret-123456"
 
         class BrokenContext:
@@ -1114,12 +1121,12 @@ class RefineTests(unittest.TestCase):
             def llm(self):
                 raise RuntimeError(secret)
 
+        plugin_init._REGISTERED_CONTEXT = BrokenContext()
         with self.assertLogs(plugin_init.logger, "WARNING") as logs:
-            resolved = plugin_init._get_llm(BrokenContext())
-        self.assertIsInstance(resolved, PluginLlm)
-        self.assertEqual(resolved.plugin_id, "refine")
+            resolved = plugin_init._session_llm()
+        self.assertIsNone(resolved)
         output = "\n".join(logs.output)
-        self.assertIn("host-provided refine LLM", output)
+        self.assertIn("active refine LLM", output)
         self.assertNotIn(secret, output)
         self.assertIn("[REDACTED]", output)
 
@@ -3066,8 +3073,8 @@ class RefineTests(unittest.TestCase):
     def test_session_subcommand_routes_an_explicit_historical_session(self):
         """An explicit historical session keeps the registered host LLM."""
         # 'session' exists in the synthetic fixture DB built by setUp.
-        session_client = object()
-        plugin_init._REGISTERED_LLM = session_client
+        session_client = types.SimpleNamespace(invocation_bound=True)
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=session_client)
         with patch.object(plugin_init.core, "refine_run", return_value={
             "success": True, "message": "OK", "journal_id": "abcdef123456",
             "reversible": False,
@@ -3119,8 +3126,8 @@ class RefineTests(unittest.TestCase):
         self.assertIsNone(run.call_args.kwargs.get("session_id"))
 
     def test_dry_run_session_routes_registered_llm_and_exact_session(self):
-        session_client = object()
-        plugin_init._REGISTERED_LLM = session_client
+        session_client = types.SimpleNamespace(invocation_bound=True)
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=session_client)
         with patch.object(plugin_init.core, "refine_run", return_value={
             "success": True,
             "outcome": "dry_run",
@@ -4075,7 +4082,7 @@ class RefineTests(unittest.TestCase):
         refine.assert_not_called()
         self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
 
-    def test_post_llm_hook_runs_in_background_with_registered_llm(self):
+    def test_post_llm_hook_runs_in_background_without_a_bound_route(self):
         class RegisterContext:
             def __init__(self):
                 self.llm = object()
@@ -4132,7 +4139,7 @@ class RefineTests(unittest.TestCase):
             set(context.hooks),
             {"pre_llm_call", "post_llm_call", "on_session_end", "on_session_reset"},
         )
-        self.assertIs(calls[0][0], context.llm)
+        self.assertIsNone(calls[0][0])
         # A mid-session pass is not an ending one: its session can still hold a
         # session-scoped note.
         self.assertEqual(
@@ -6157,6 +6164,10 @@ agent_module = types.ModuleType("agent")
 plugin_module = types.ModuleType("agent.plugin_llm")
 class PluginLlmTrustError(Exception):
     pass
+class PluginLlmInvocationError(RuntimeError):
+    def __init__(self, code="incomplete_route"):
+        super().__init__(code)
+        self.code = code
 class PluginLlmInput:
     pass
 class PluginLlmTextInput(PluginLlmInput):
@@ -6184,6 +6195,7 @@ plugin_module.PluginLlmInput = PluginLlmInput
 plugin_module.PluginLlmTextInput = PluginLlmTextInput
 plugin_module.PluginLlmStructuredResult = object
 plugin_module.PluginLlmTrustError = PluginLlmTrustError
+plugin_module.PluginLlmInvocationError = PluginLlmInvocationError
 agent_module.plugin_llm = plugin_module
 sys.modules.update({"agent": agent_module, "agent.plugin_llm": plugin_module})
 
@@ -8047,15 +8059,15 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_auto_enabled_defaults_to_true(self):
         self.assertTrue(config.auto_enabled())
 
-    def test_manual_command_and_tool_use_the_session_client(self):
-        # One host-provided facade for every path, instead of a new client per
-        # invocation. A falsy-but-present client must still be honored.
+    def test_manual_command_and_tool_resolve_the_active_bound_client(self):
         class FalsyClient:
+            invocation_bound = True
+
             def __bool__(self):
                 return False
 
         session_client = FalsyClient()
-        plugin_init._REGISTERED_LLM = session_client
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=session_client)
         with patch.object(plugin_init.core, "refine_run", return_value={
             "success": True, "message": "done", "outcome": "no_op",
         }) as run:
@@ -8066,8 +8078,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             self.assertIs(call.kwargs["llm"], session_client)
 
     def test_refine_run_tool_forwards_explicit_dry_run_contract(self):
-        session_client = object()
-        plugin_init._REGISTERED_LLM = session_client
+        session_client = types.SimpleNamespace(invocation_bound=True)
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=session_client)
         with patch.object(plugin_init.core, "refine_run", return_value={
             "success": True, "outcome": "dry_run",
         }) as run:
@@ -8106,11 +8118,59 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(properties["dry_run"]["type"], "boolean")
         self.assertIn("active host-provided LLM", plugin_init.REFINE_RUN_SCHEMA["description"])
 
-    def test_session_client_falls_back_when_host_gave_none(self):
-        plugin_init._REGISTERED_LLM = None
-        sentinel = object()
-        with patch.object(plugin_init, "PluginLlm", return_value=sentinel):
-            self.assertIs(plugin_init._session_llm(), sentinel)
+    def test_session_client_fails_closed_when_no_bound_route_exists(self):
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=None)
+        self.assertIsNone(plugin_init._session_llm())
+
+    def test_bound_run_uses_active_route_without_provider_or_model_overrides(self):
+        FakeHost.entry_config()["llm"] = {
+            "provider": "other-provider",
+            "model": "other-model",
+            "allow_provider_override": True,
+            "allow_model_override": True,
+        }
+        model = MockLlm({"action": "no_op", "reason": "nothing to change"})
+        model.invocation_bound = True
+
+        result = core.refine_run(model)
+
+        self.assertTrue(result["success"])
+        self.assertNotIn("provider", model.calls[0])
+        self.assertNotIn("model", model.calls[0])
+        self.assertEqual(result["llm_meta"]["target_source"], "invocation_bound")
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 1)
+
+    def test_bound_route_error_is_journaled_without_retry_or_no_op(self):
+        model = MockLlm(PluginLlmInvocationError("unsupported_api_mode"))
+        model.invocation_bound = True
+
+        result = core.refine_run(model)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "llm_error")
+        self.assertEqual(result["failure"], "llm_transport_unsupported")
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 1)
+        self.assertEqual(len(model.calls), 1)
+        latest = journal.entries()[-1]
+        self.assertEqual(latest["outcome"], "llm_error")
+        self.assertNotIn("unsupported_api_mode", json.dumps(latest))
+
+    def test_missing_bound_route_is_journaled_without_a_model_call(self):
+        result = core.refine_run(None)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "llm_invocation_unavailable")
+        self.assertEqual(journal.entries()[-1]["outcome"], "llm_invocation_unavailable")
+        self.assertEqual(journal.entries()[-1]["llm_meta"]["primary_attempts"], 0)
+
+    def test_bound_model_command_cannot_persist_an_ignored_override(self):
+        bound = types.SimpleNamespace(invocation_bound=True)
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=bound)
+
+        result = plugin_init._handle_refine_command("model other-provider/other-model")
+
+        self.assertIn("cannot change", result)
+        self.assertFalse(journal.model_override_read_path().exists())
 
     # ── Session identity (Part A) ─────────────────────────────────────────────
 
@@ -9517,12 +9577,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         from unittest.mock import MagicMock
         ctx = MagicMock()
         ctx.llm = object()
-        old_llm = plugin_init._REGISTERED_LLM
+        old_context = plugin_init._REGISTERED_CONTEXT
         try:
             with patch.object(journal, "migrate_legacy_journal_dir", side_effect=RuntimeError("boom")):
                 plugin_init.register(ctx)
         finally:
-            plugin_init._REGISTERED_LLM = old_llm
+            plugin_init._REGISTERED_CONTEXT = old_context
         self.assertTrue(ctx.register_command.called)
 
     def test_migration_copy_failure_leaves_old_dir_intact(self):
