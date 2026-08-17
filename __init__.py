@@ -501,6 +501,15 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         except Exception as exc:
             logger.exception("refine status failed")
             return f"❌ Status failed: {core.scrub_text(str(exc))}"
+        command_blockers = list(status["blockers"])
+        if _session_llm() is None:
+            command_blockers.append({
+                "code": "llm_invocation_unavailable",
+                "message": (
+                    "No invocation-bound host LLM is available in this command "
+                    "context; proposal-producing /refine commands cannot run here."
+                ),
+            })
         lines = [
             f"auto: {'on' if status['auto_enabled'] else 'off'}",
             f"turn interval: {status['auto_turn_interval']}"
@@ -548,9 +557,9 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 f"  • {event.get('code', 'unknown')} — {event.get('message', '')}"
                 for event in status["recent_auto_events"][-3:]
             )
-        if status["blockers"]:
+        if command_blockers:
             lines.append("blockers:")
-            lines.extend(f"  • {item['message']}" for item in status["blockers"])
+            lines.extend(f"  • {item['message']}" for item in command_blockers)
         else:
             lines.append("blockers: none — automatic refinement is active")
         if status["warnings"]:

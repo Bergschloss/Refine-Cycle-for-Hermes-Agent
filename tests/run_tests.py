@@ -7292,6 +7292,25 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(status["auto_enabled"])
         self.assertEqual(status["blocker_codes"], [])
 
+    def test_status_command_reports_missing_invocation_bound_route(self):
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=None)
+
+        text = plugin_init._handle_refine_command("status")
+
+        self.assertIn("No invocation-bound host LLM", text)
+        self.assertIn("proposal-producing /refine commands cannot run", text)
+        self.assertNotIn("blockers: none", text)
+
+    def test_status_command_stays_clear_with_invocation_bound_route(self):
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
+            llm=types.SimpleNamespace(invocation_bound=True)
+        )
+
+        text = plugin_init._handle_refine_command("status")
+
+        self.assertNotIn("No invocation-bound host LLM", text)
+        self.assertIn("blockers: none — automatic refinement is active", text)
+
     def test_unreadable_config_keeps_auto_off_and_says_so(self):
         # An unreadable config must not resurrect analysis the user turned off.
         FakeHost.entry_config()["auto_enabled"] = False
