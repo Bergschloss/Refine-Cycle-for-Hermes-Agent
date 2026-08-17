@@ -10,10 +10,24 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 from agent.plugin_llm import (
     PluginLlm,
     PluginLlmInput,
-    PluginLlmInvocationError,
     PluginLlmTextInput,
     PluginLlmTrustError,
 )
+
+try:
+    from agent.plugin_llm import PluginLlmInvocationError
+except ImportError:
+    class PluginLlmInvocationError(RuntimeError):
+        """Compatibility error for hosts predating invocation-bound routes.
+
+        Such hosts cannot raise the route-specific error, but Refine still needs
+        to import so its status surface can report that the bound route is
+        unavailable. The invocation-bound gate remains authoritative.
+        """
+
+        def __init__(self, code: str = "incomplete_route") -> None:
+            super().__init__(code)
+            self.code = code
 
 try:
     from . import config

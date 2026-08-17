@@ -821,6 +821,37 @@ class RefineTests(unittest.TestCase):
         with patch.object(core._llm, "propose", return_value=proposal):
             return core.refine_run(MockLlm(), **kwargs)
 
+    def test_llm_import_compatibility_keeps_unbound_host_blocked(self):
+        """Older host APIs may omit the route error, never the route gate."""
+        host_llm = sys.modules["agent.plugin_llm"]
+        invocation_error = host_llm.PluginLlmInvocationError
+        package_name = "refine_llm_compat_test"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(ROOT)]
+        package.__package__ = package_name
+        sys.modules[package_name] = package
+        del host_llm.PluginLlmInvocationError
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"{package_name}.llm", ROOT / "llm.py"
+            )
+            module = importlib.util.module_from_spec(spec)
+            assert spec and spec.loader
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+
+            error = module.PluginLlmInvocationError("unsupported_api_mode")
+            self.assertEqual(error.code, "unsupported_api_mode")
+            plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
+                llm=types.SimpleNamespace()
+            )
+            self.assertIsNone(plugin_init._session_llm())
+        finally:
+            host_llm.PluginLlmInvocationError = invocation_error
+            for name in tuple(sys.modules):
+                if name == package_name or name.startswith(package_name + "."):
+                    sys.modules.pop(name, None)
+
     def test_evidence_is_sandboxed_scrubbed_and_classified(self):
         secret = "ghp_" + "Z" * 36
         now = time.time()
