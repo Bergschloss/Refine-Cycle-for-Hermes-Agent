@@ -2168,8 +2168,13 @@ def _refine_once(
             "evidence": evidence,
         }
 
+    # An explicitly selected session is a strict trajectory boundary. Do not
+    # query or echo patterns derived from any other session.
+    cross_session_patterns = (
+        [] if explicit_session else collect_cross_session_patterns()
+    )
     all_error_patterns = patterns.merge_patterns(
-        evidence.get("error_patterns", []), collect_cross_session_patterns()
+        evidence.get("error_patterns", []), cross_session_patterns
     )
     # Keep the complete aggregation local to signal selection. Evidence is
     # returned through several tool-result paths and rendered to the proposal
@@ -2399,7 +2404,13 @@ def _refine_once(
             error_patterns=error_patterns,
             user_corrections=[item.get("snippet", "") for item in corrections],
             unused_skills=_unused_skills_safe(),
-            refinement_history=journal.recent_refinements(config.history_max_entries()),
+            # Journal entries can contain trajectory-derived summaries. Exact
+            # historical-session analysis must not import those global records.
+            refinement_history=(
+                []
+                if explicit_session
+                else journal.recent_refinements(config.history_max_entries())
+            ),
             purpose="refine",
             run_context=proposal_context,
             reviewer_context=reviewer_context,

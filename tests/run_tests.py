@@ -2386,6 +2386,66 @@ class RefineTests(unittest.TestCase):
         history = propose.call_args.kwargs["refinement_history"]
         self.assertEqual([item["proposal"]["name"] for item in history], ["newer"])
 
+    def test_explicit_session_isolates_model_inputs_from_global_trajectory_state(self):
+        """Exact-session analysis must not query cross-session rows or journal history."""
+        now = time.time()
+        selected_marker = "No, inspect only this selected synthetic session instead."
+        other_pattern_marker = "ERROR: private-other-session-marker"
+        history_marker = "private-global-history-marker"
+        FakeHost.make_db([
+            ("selected", "user", selected_marker, "", now - 5, 1),
+            ("selected", "assistant", "Acknowledged.", "", now - 4, 1),
+            ("selected", "assistant", "Ready.", "", now - 3, 1),
+            ("other", "tool", other_pattern_marker, "shell", now - 2, 1),
+            ("other", "tool", other_pattern_marker, "shell", now - 1, 1),
+        ])
+        journal.log(
+            trigger="test",
+            reason=history_marker,
+            session_id="other",
+            proposal={
+                "action": "create", "kind": "skill", "name": "other-history",
+                "content": "historical content",
+            },
+            outcome="applied",
+        )
+        captured = {}
+
+        def capture_proposal(**kwargs):
+            captured.update(kwargs)
+            return {"action": "no_op", "reason": "No selected-session defect."}
+
+        with patch.object(
+            core,
+            "collect_cross_session_patterns",
+            side_effect=AssertionError("explicit session queried cross-session rows"),
+        ), patch.object(
+            core.journal,
+            "recent_refinements",
+            side_effect=AssertionError("explicit session queried global journal history"),
+        ), patch.object(core._llm, "propose", side_effect=capture_proposal):
+            result = core.refine_run(
+                MockLlm(),
+                session_id="selected",
+                dry_run=True,
+                explicit_session=True,
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertEqual(captured["refinement_history"], [])
+        self.assertEqual(captured["error_patterns"], [])
+        self.assertIn(selected_marker, captured["evidence_text"])
+        self.assertIn(selected_marker, captured["user_corrections"])
+        model_inputs = json.dumps({
+            "evidence_text": captured["evidence_text"],
+            "error_patterns": captured["error_patterns"],
+            "user_corrections": captured["user_corrections"],
+            "refinement_history": captured["refinement_history"],
+        })
+        self.assertNotIn(other_pattern_marker, model_inputs)
+        self.assertNotIn(history_marker, model_inputs)
+
     def test_skill_patch_gets_current_complete_content(self):
         name = "existing-skill"
         current = skill_content(name, "# Existing\n\nImportant old guidance.")
