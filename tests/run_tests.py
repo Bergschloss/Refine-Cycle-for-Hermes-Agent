@@ -569,6 +569,71 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(str(config.state_db_path()).startswith(str(self.root)))
         self.assertTrue(str(journal.journal_path()).startswith(str(self.root)))
 
+    def test_correction_context_uses_stable_order_and_hidden_predecessor(self):
+        marker = (
+            "No, for this synthetic exercise replace the old response format. "
+            "Reply exactly SYNTHETIC_NEW_FORMAT and do not call tools."
+        )
+        assistant_marker = "SYNTHETIC_OLD_FORMAT_HIDDEN"
+        timestamp = time.time()
+        FakeHost.make_db([
+            ("session", "assistant", assistant_marker, "", timestamp, 1),
+            ("session", "user", marker, "", timestamp, 1),
+        ])
+
+        evidence = core.collect_evidence(session_id="session", limit=1)
+
+        self.assertEqual(evidence["messages"], [{
+            "role": "user", "content": marker, "tool_name": "",
+        }])
+        self.assertEqual(evidence["user_corrections"], [{"snippet": marker}])
+        self.assertNotIn(assistant_marker, json.dumps(evidence))
+
+        FakeHost.make_db([
+            ("session", "user", marker, "", timestamp, 1),
+            ("session", "assistant", assistant_marker, "", timestamp, 1),
+        ])
+        evidence = core.collect_evidence(session_id="session", limit=2)
+        self.assertEqual(
+            [message["role"] for message in evidence["messages"]],
+            ["user", "assistant"],
+        )
+        self.assertEqual(evidence["user_corrections"], [])
+
+        FakeHost.make_db([
+            ("session", "assistant", assistant_marker, "", timestamp - 2, 1),
+            ("session", "user", "Start a separate task.", "", timestamp - 1, 1),
+            ("session", "user", marker, "", timestamp, 1),
+        ])
+        for limit in (1, 2, 3):
+            with self.subTest(limit=limit):
+                evidence = core.collect_evidence(session_id="session", limit=limit)
+                self.assertEqual(evidence["user_corrections"], [])
+
+        future_only = (
+            "No, in your next response use the previous response format",
+            "No, use the previous response format for this new file",
+        )
+        for instruction in future_only:
+            FakeHost.make_db([
+                ("session", "assistant", assistant_marker, "", timestamp - 1, 1),
+                ("session", "user", instruction, "", timestamp, 1),
+            ])
+            for limit in (1, 2):
+                with self.subTest(instruction=instruction, limit=limit):
+                    evidence = core.collect_evidence(session_id="session", limit=limit)
+                    self.assertEqual(evidence["user_corrections"], [])
+
+        mixed = "No, revise your previous answer instead. Going forward, use JSON"
+        FakeHost.make_db([
+            ("session", "assistant", assistant_marker, "", timestamp - 1, 1),
+            ("session", "user", mixed, "", timestamp, 1),
+        ])
+        for limit in (1, 2):
+            with self.subTest(mixed=True, limit=limit):
+                evidence = core.collect_evidence(session_id="session", limit=limit)
+                self.assertEqual(evidence["user_corrections"], [{"snippet": mixed}])
+
     def test_error_patterns_carry_resolved_session_id(self):
         """Wave 2.2: error_items must use the resolved session, not the raw argument."""
         # Need ≥3 identical errors to extract a pattern (threshold is 3)
@@ -1341,17 +1406,58 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(merged["skill:test-skill"]["reported_model"], "gpt-4")
 
     def test_correction_requires_explicit_context(self):
+        synthetic_correction = (
+            "No, for this synthetic exercise replace the old response format. "
+            "Reply exactly SYNTHETIC_NEW_FORMAT and do not call tools."
+        )
         routine = (
             "Use the API for this task", "Do not forget the tests", "Try again tomorrow",
             "Use JSON instead of YAML for this new file", "Перероби документ у короткому форматі",
+            "Replace the old response format for this exercise",
+            "For this new task, replace the old response format",
+            "No, for this new task replace the previous placeholder in the template",
+            synthetic_correction,
         )
         explicit = (
             "No, that is not right; use the other endpoint instead",
             "You used the old API; use the new API instead",
             "Це неправильно, перероби через інший endpoint",
+            "You were wrong about the old answer; for the next task use JSON",
+            "Incorrect: for another request use JSON instead",
+        )
+        contextual = (
+            synthetic_correction,
+            "No, replace your previous response with the new format",
+            "No, reformat the prior answer using JSON",
+            "No, change the old reply format to YAML",
+            "No, revise your previous answer about the new task",
+            "No, rewrite your answer in JSON and keep it concise",
+            "Please revise your previous answer using JSON",
+            "No, revise your previous answer instead. Going forward, use JSON",
+        )
+        prospective = (
+            "No, for this new task replace the old response format",
+            "No, for the next request revise the previous response format",
+            "No, in the next exercise rewrite the old answer format",
+            "No, for all future responses use the prior format",
+            "No, use the old response format for this new task",
+            "No, for this new task use JSON instead of YAML",
+            "No, for future tasks use the old response format",
+            "No, for upcoming requests use the previous response format",
+            "No, going forward use the old response format",
+            "No, from now on use the old response format",
+            "No, next time use the previous response format",
+            "No, in your next response use the previous response format",
+            "No, use the previous response format for this new file",
         )
         self.assertTrue(all(not core._is_correction(item) for item in routine))
         self.assertTrue(all(core._is_correction(item) for item in explicit))
+        self.assertTrue(all(core._is_correction(
+            item, has_prior_assistant_response=True
+        ) for item in contextual))
+        self.assertTrue(all(not core._is_correction(
+            item, has_prior_assistant_response=True
+        ) for item in prospective))
 
     def test_full_fingerprint_and_unbounded_audit_collection(self):
         fingerprint = patterns.fingerprint("http", "ERROR 42 for /item/123")
@@ -2389,10 +2495,15 @@ class RefineTests(unittest.TestCase):
     def test_explicit_session_isolates_model_inputs_from_global_trajectory_state(self):
         """Exact-session analysis must not query cross-session rows or journal history."""
         now = time.time()
-        selected_marker = "No, inspect only this selected synthetic session instead."
+        selected_marker = (
+            "No, for this synthetic exercise replace the old response format. "
+            "Reply exactly SYNTHETIC_NEW_FORMAT and do not call tools."
+        )
         other_pattern_marker = "ERROR: private-other-session-marker"
         history_marker = "private-global-history-marker"
         FakeHost.make_db([
+            ("selected", "user", "Synthetic format baseline.", "", now - 7, 1),
+            ("selected", "assistant", "SYNTHETIC_OLD_FORMAT", "", now - 6, 1),
             ("selected", "user", selected_marker, "", now - 5, 1),
             ("selected", "assistant", "Acknowledged.", "", now - 4, 1),
             ("selected", "assistant", "Ready.", "", now - 3, 1),

@@ -628,19 +628,60 @@ def _is_error_content(content: str) -> bool:
     )
 
 
-def _is_correction(content: str) -> bool:
+def _is_correction(
+    content: str, *, has_prior_assistant_response: bool = False
+) -> bool:
     """Recognize explicit agent corrections, not routine instructions."""
     if len(content.strip()) < 12:
         return False
     text = re.sub(r"\s+", " ", content.strip().lower())
-    strong = (
+    unambiguous = (
         r"\b(?:that(?:'s| is) (?:wrong|not right)|you (?:are|were) wrong|wrong answer|incorrect)\b",
         r"\b(?:неправильно|ти помилив|ви помилили)\b",
         r"\bце не так(?:\s*[:;,.]\s*|\s+)(?:перероби|виправ|зміни|використай|замість)\b",
-        r"^(?:no|ні|нет)[,;:]\s+.{0,100}\b(?:wrong|not right|не так|неправильно|instead|замість)\b",
         r"\b(?:you used|ти використав|ви використали)\b.{0,120}\b(?:use|instead|замість)\b",
     )
-    return any(re.search(pattern, text) for pattern in strong)
+    if any(re.search(pattern, text) for pattern in unambiguous):
+        return True
+    prospective_scope = re.search(
+        r"\b(?:for|on|in)\s+(?:(?:this|the|a|an|your|our)\s+)?"
+        r"(?:new|next|future|upcoming|another)\s+"
+        r"(?:tasks?|requests?|turns?|exercises?|conversations?|"
+        r"answers?|responses?|replies?|files?|documents?|templates?|projects?|configs?)\b|"
+        r"\bfor\s+(?:all\s+)?future\s+(?:answers?|responses?|replies?)\b|"
+        r"\b(?:going forward|from now on|next time)\b",
+        text,
+    )
+    classification_text = text
+    if prospective_scope:
+        prefix = text[:prospective_scope.start()].rstrip()
+        if not re.search(r"[.!?;:]$", prefix):
+            return False
+        classification_text = prefix
+    if re.search(
+        r"^(?:no|ні|нет)[,;:]\s+.{0,100}"
+        r"\b(?:wrong|not right|не так|неправильно|instead|замість)\b",
+        classification_text,
+    ):
+        return True
+    if not has_prior_assistant_response:
+        return False
+    correction_lead = re.search(
+        r"^(?:(?:no|ні|нет)[,;:]|(?:please\s+)?"
+        r"(?:replace|revise|redo|rewrite|reformat|change|fix|correct)\b)",
+        classification_text,
+    )
+    corrective_action = re.search(
+        r"\b(?:replace|revise|redo|rewrite|reformat|change|fix|correct|use)\b",
+        classification_text,
+    )
+    prior_output_reference = re.search(
+        r"\b(?:previous|prior|old|earlier|last)\b.{0,30}"
+        r"\b(?:answer|response|reply|format)\b|"
+        r"\b(?:your|that)\s+(?:answer|response|reply)\b",
+        classification_text,
+    )
+    return bool(correction_lead and corrective_action and prior_output_reference)
 
 
 def count_session_messages(
@@ -733,7 +774,8 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         return empty
     try:
         sql = (
-            "SELECT m.role, m.content, m.tool_name, m.timestamp FROM messages m "
+            "SELECT m.rowid AS message_order, m.role, m.content, m.tool_name, "
+            "m.timestamp FROM messages m "
             "LEFT JOIN sessions s ON s.id = m.session_id "
             "WHERE m.session_id = ? AND m.active = 1"
         )
@@ -743,14 +785,17 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             placeholders = ",".join("?" for _ in skipped_sources)
             sql += f" AND (s.source IS NULL OR LOWER(s.source) NOT IN ({placeholders}))"
             params.extend(skipped_sources)
-        sql += " ORDER BY m.timestamp DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY m.timestamp DESC, m.rowid DESC LIMIT ?"
+        params.append(limit + 1)
         rows = connection.execute(sql, tuple(params)).fetchall()
+        chronological_rows = list(reversed(rows))
+        has_context_row = len(chronological_rows) > limit
         messages: List[Dict[str, Any]] = []
         tool_errors: List[Dict[str, Any]] = []
         corrections: List[Dict[str, Any]] = []
         error_items: List[Dict[str, Any]] = []
-        for row in reversed(rows):
+        previous_was_assistant_response = False
+        for index, row in enumerate(chronological_rows):
             # Every string from SQLite is scrubbed at this single extraction
             # boundary so evidence, journals, and returned tool results inherit it.
             role = _one_line(scrub_text(str(row["role"] or "")))[:32].lower()
@@ -760,6 +805,11 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             tool_name = _one_line(
                 scrub_text(str(row["tool_name"] or ""))
             )[:120]
+            if has_context_row and index == 0:
+                previous_was_assistant_response = bool(
+                    role == "assistant" and content.strip()
+                )
+                continue
             shown = content[:400] + ("…" if len(content) > 400 else "")
             messages.append({"role": role, "content": shown, "tool_name": tool_name})
             if role == "tool" and _is_error_content(content):
@@ -776,8 +826,14 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                     "session_id": resolved,
                     "ts": row["timestamp"] or 0,
                 })
-            if role == "user" and _is_correction(content):
+            if role == "user" and _is_correction(
+                content,
+                has_prior_assistant_response=previous_was_assistant_response,
+            ):
                 corrections.append({"snippet": content[:300]})
+            previous_was_assistant_response = bool(
+                role == "assistant" and content.strip()
+            )
         return {
             "messages": messages[-limit:],
             "error_count": len(tool_errors),
