@@ -3053,11 +3053,25 @@ def _apply_edit(
     staged = bool(apply_result.get("success") and apply_result.get("staged"))
     pending_id = scrub_text(str(apply_result.get("pending_id", ""))) if staged else ""
     if staged and not pending_id:
-        apply_result = {
+        # The host may already have durably queued this write. Without its ID we
+        # cannot claim pending_approval, but terminalizing as error would release
+        # budget while a later approval could still mutate the target. Keep the
+        # prepared intent consumed and let conservative queue reconciliation
+        # recover it or leave it unresolved.
+        return {
             "success": False,
-            "error": "Host staged the mutation without a pending_id",
+            "outcome": "prepared",
+            "message": (
+                "Host staged the mutation without a pending_id; retained the "
+                f"prepared recovery id {entry_id} for reconciliation"
+            ),
+            "journal_id": entry_id,
+            "proposal": proposal,
+            "result": sanitize(apply_result),
+            "backup_path": backup_path,
+            "reversible": False,
+            "edits_applied": 1,
         }
-        staged = False
     if apply_result.get("success") and not staged:
         prepared_entry = journal.get_entry(entry_id) or {
             "proposal": proposal,

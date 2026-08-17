@@ -1,11 +1,13 @@
 """Durable append-only journal, mutation lock, approvals, and rollback."""
 
 import hashlib
+import importlib
 import json
 import logging
 import math
 import os
 import re
+import socket
 import tempfile
 import threading
 import time
@@ -30,7 +32,13 @@ _JOURNAL_FILE_NAME = "refine_journal.jsonl"
 _PROMPT_NOTES_FILE_NAME = "prompt_notes.json"
 _MODEL_OVERRIDE_FILE_NAME = "model_override.json"
 _LOCK_FILE_NAME = ".mutation.lock"
-_LOCK_STALE_SECONDS = 300
+_ATOMIC_TEMP_PREFIX = ".refine-atomic-"
+_ATOMIC_TEMP_SUFFIX = ".tmp"
+_RECOVERY_BACKUP_PREFIX = "refine-"
+_RECOVERY_BACKUP_RE = re.compile(
+    rf"^{re.escape(_RECOVERY_BACKUP_PREFIX)}(?P<pid>[0-9]+)-"
+    rf"[0-9a-f]{{32}}_skill_.+\.bak$"
+)
 _THREAD_LOCK = threading.RLock()
 _LOCK_STATE = threading.local()
 # If Windows refuses an owned unlink after the retry budget, remember the exact
@@ -441,48 +449,132 @@ def _mutation_lock_path(directory: Path) -> Path:
     return directory.parent / f".{directory.name}{_LOCK_FILE_NAME}"
 
 
+def _new_lock_lease() -> socket.socket:
+    """Bind one non-inheritable loopback lease released automatically on death."""
+    lease = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            lease.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        lease.set_inheritable(False)
+        lease.bind(("127.0.0.1", 0))
+        lease.listen(1)
+        return lease
+    except Exception:
+        lease.close()
+        raise
+
+
+def _lock_payload(token: str, lease: socket.socket) -> str:
+    return json.dumps({
+        "pid": os.getpid(),
+        "created": time.time(),
+        "token": token,
+        "lease_port": int(lease.getsockname()[1]),
+    })
+
+
+def _publish_lock(path: Path, payload: str) -> None:
+    """Atomically claim ``path`` with a complete, already-fsynced record."""
+    claim = path.parent / (
+        f"{path.name}.refine-claim-{os.getpid()}-{uuid.uuid4().hex}.tmp"
+    )
+    descriptor = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        # A hard link is create-if-absent on every supported platform: unlike
+        # rename it never replaces another owner's canonical lock on POSIX.
+        os.link(claim, path)
+    finally:
+        try:
+            _retry_on_contention(
+                claim.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            # Publication may already have succeeded. A claim cleanup failure
+            # must neither mask an earlier link error nor invalidate ownership
+            # of the complete canonical lock; dead-owner cleanup can retry it.
+            logger.warning(
+                "Cannot remove Refine lock claim file: %s", scrub_text(str(exc))
+            )
+
+
+def _cleanup_lock_claims(lock_path: Path) -> None:
+    """Remove only strict dead-process claim temps after canonical acquisition."""
+    prefix = f"{lock_path.name}.refine-claim-"
+    pattern = re.compile(
+        rf"^{re.escape(prefix)}(?P<pid>[0-9]+)-[0-9a-f]{{32}}\.tmp$"
+    )
+    try:
+        candidates = list(lock_path.parent.iterdir())
+    except OSError:
+        return
+    for candidate in candidates:
+        match = pattern.fullmatch(candidate.name)
+        if not match or _pid_is_alive(int(match.group("pid"))):
+            continue
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            candidate.unlink()
+        except OSError:
+            continue
+
+
 @contextmanager
 def _migration_lock(source: Path, timeout: float = 30.0) -> Iterator[None]:
     """Serialize migration with writers still using the legacy store."""
     lock_path = _mutation_lock_path(source)
     token = uuid.uuid4().hex
-    payload = json.dumps({"pid": os.getpid(), "created": time.time(), "token": token})
     deadline = time.monotonic() + timeout
+    lease: Optional[socket.socket] = None
     with _THREAD_LOCK:
-        _clear_owned_orphan(lock_path)
-        while True:
-            try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                try:
-                    os.write(fd, payload.encode("utf-8"))
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-                break
-            except FileExistsError:
-                _try_clear_stale_lock(lock_path)
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"Timed out waiting for refine migration lock: {lock_path}"
-                    )
-                time.sleep(0.05)
         try:
-            yield
-        finally:
+            _clear_owned_orphan(lock_path)
+            while True:
+                # Recover before allocating our own ephemeral port. Otherwise
+                # the OS could hand us the dead owner's port and make our own
+                # socket look like proof that the stale owner is still alive.
+                _try_clear_stale_lock(lock_path)
+                candidate = _new_lock_lease()
+                payload = _lock_payload(token, candidate)
+                try:
+                    _publish_lock(lock_path, payload)
+                except FileExistsError:
+                    candidate.close()
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Timed out waiting for refine migration lock: {lock_path}"
+                        )
+                    time.sleep(0.05)
+                    continue
+                lease = candidate
+                break
+            _cleanup_lock_claims(lock_path)
             try:
-                current = json.loads(lock_path.read_text(encoding="utf-8"))
-                if current.get("token") == token:
-                    _retry_on_contention(
-                        lock_path.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError
+                yield
+            finally:
+                try:
+                    current = json.loads(lock_path.read_text(encoding="utf-8"))
+                    if current.get("token") == token:
+                        _retry_on_contention(
+                            lock_path.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError
+                        )
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    _ORPHANED_LOCK_TOKENS[str(lock_path)] = token
+                    logger.error(
+                        "Could not release refine migration lock: %s",
+                        scrub_text(str(exc)),
                     )
-            except FileNotFoundError:
-                pass
-            except Exception as exc:
-                _ORPHANED_LOCK_TOKENS[str(lock_path)] = token
-                logger.error(
-                    "Could not release refine migration lock: %s",
-                    scrub_text(str(exc)),
-                )
+        finally:
+            if lease is not None:
+                lease.close()
 
 
 def migrate_legacy_journal_dir(
@@ -1113,42 +1205,65 @@ def _pid_is_alive(pid: int) -> bool:
 
 
 def _try_clear_stale_lock(path: Path) -> None:
-    """Clear only locks old enough to be stale, including malformed locks.
+    """Clear only a dead owner proved by its released loopback lease.
 
-    A creator may have made the file but not yet written its JSON. The mtime is
-    therefore authoritative for malformed/uninitialized locks and also guards
-    against deleting a recently replaced valid lock with an old timestamp.
+    PID/mtime checks cannot authorize a pathname unlink: another contender can
+    replace the inspected file between the final check and ``unlink``. Every new
+    lock therefore keeps an exclusive loopback port bound for its whole critical
+    section. Only one contender can bind that same port after process death, and
+    it revalidates the exact file before every Windows unlink retry. Legacy,
+    partial, or malformed lock files have no authoritative lease and remain
+    fail-closed for explicit operator recovery.
     """
     try:
-        modified = path.stat().st_mtime
-    except FileNotFoundError:
+        first_stat = path.stat()
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (FileNotFoundError, OSError, ValueError, TypeError):
         return
-    data: Any = None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        pid = int(data.get("pid", 0))
-        created = float(data.get("created", 0))
-    except Exception:
-        pid, created = 0, 0
-    try:
-        modified = max(modified, path.stat().st_mtime)
-    except FileNotFoundError:
+    lease_port = data.get("lease_port") if isinstance(data, dict) else None
+    token = data.get("token") if isinstance(data, dict) else None
+    if (
+        isinstance(lease_port, bool)
+        or not isinstance(lease_port, int)
+        or not 1 <= lease_port <= 65535
+        or not isinstance(token, str)
+        or not token
+    ):
         return
-    freshness = max(modified, created) if created > 0 else modified
-    # A complete lock with a known dead owner cannot become valid again, so
-    # reclaim it immediately.  Malformed/partial lock files may be observed
-    # while another process is still writing them; keep those until their mtime
-    # is stale.  Live owners always win, regardless of timestamp skew.
-    valid_pid = isinstance(data, dict) and isinstance(data.get("pid"), int) and not isinstance(data.get("pid"), bool) and pid > 0
-    if valid_pid:
-        if _pid_is_alive(pid):
+
+    recovery = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            recovery.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        recovery.set_inheritable(False)
+        try:
+            recovery.bind(("127.0.0.1", lease_port))
+            recovery.listen(1)
+        except OSError:
             return
-    elif time.time() - freshness < _LOCK_STALE_SECONDS:
-        return
-    try:
-        _retry_on_contention(path.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError)
+
+        def unlink_if_unchanged() -> None:
+            try:
+                current_stat = path.stat()
+                current_raw = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return
+            if (
+                current_raw != raw
+                or current_stat.st_mtime_ns != first_stat.st_mtime_ns
+                or current_stat.st_size != first_stat.st_size
+            ):
+                return
+            path.unlink()
+
+        _retry_on_contention(
+            unlink_if_unchanged, _UNLINK_RETRY_BUDGET_SECONDS, OSError
+        )
     except FileNotFoundError:
         pass
+    finally:
+        recovery.close()
 
 
 @contextmanager
@@ -1171,6 +1286,7 @@ def _acquire_mutation_lock(*, wait: bool, timeout: float = 0.0) -> Iterator[bool
     if not acquired_thread:
         yield False
         return
+    lease: Optional[socket.socket] = None
     try:
         depth = getattr(_LOCK_STATE, "depth", 0)
         if depth:
@@ -1182,7 +1298,6 @@ def _acquire_mutation_lock(*, wait: bool, timeout: float = 0.0) -> Iterator[bool
             return
 
         token = uuid.uuid4().hex
-        payload = json.dumps({"pid": os.getpid(), "created": time.time(), "token": token})
 
         def _release_owned_lock(path: Path) -> None:
             try:
@@ -1208,51 +1323,45 @@ def _acquire_mutation_lock(*, wait: bool, timeout: float = 0.0) -> Iterator[bool
             lock_path = _mutation_lock_path(locked_directory)
             _clear_owned_orphan(lock_path)
             while True:
+                # Never allocate a candidate lease before stale recovery: an
+                # ephemeral-port reuse could otherwise make this process block
+                # its own proof that the previous owner died.
+                _try_clear_stale_lock(lock_path)
+                candidate = _new_lock_lease()
+                payload = _lock_payload(token, candidate)
                 try:
-                    fd = os.open(
-                        str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                    )
-                    try:
-                        os.write(fd, payload.encode("utf-8"))
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
-                    break
+                    _publish_lock(lock_path, payload)
                 except FileExistsError:
-                    _try_clear_stale_lock(lock_path)
+                    candidate.close()
                     if not wait:
-                        try:
-                            fd = os.open(
-                                str(lock_path),
-                                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                                0o600,
-                            )
-                        except FileExistsError:
-                            yield False
-                            return
-                        try:
-                            os.write(fd, payload.encode("utf-8"))
-                            os.fsync(fd)
-                        finally:
-                            os.close(fd)
-                        break
+                        yield False
+                        return
                     if time.monotonic() >= deadline:
                         raise TimeoutError(
                             f"Timed out waiting for refine mutation lock: {lock_path}"
                         )
                     time.sleep(0.05)
+                    continue
+                lease = candidate
+                break
 
+            _cleanup_lock_claims(lock_path)
             if ensure_dirs() == locked_directory:
                 break
             _release_owned_lock(lock_path)
+            lease.close()
+            lease = None
 
         _LOCK_STATE.depth = 1
         try:
+            _cleanup_interrupted_artifacts(locked_directory)
             yield True
         finally:
             _LOCK_STATE.depth = 0
             _release_owned_lock(lock_path)
     finally:
+        if lease is not None:
+            lease.close()
         _THREAD_LOCK.release()
 
 
@@ -1314,7 +1423,7 @@ def _retry_on_contention(operation, budget: float, errors=PermissionError):
 
 
 def _clear_owned_orphan(path: Path) -> None:
-    """Retry removal only for a lock token this process failed to release."""
+    """Retry only a dead lease carrying the exact token this process owned."""
     key = str(path)
     token = _ORPHANED_LOCK_TOKENS.get(key)
     if not token:
@@ -1330,8 +1439,17 @@ def _clear_owned_orphan(path: Path) -> None:
         if current.get("token") != token:
             _ORPHANED_LOCK_TOKENS.pop(key, None)
             return
-        _retry_on_contention(path.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError)
-        _ORPHANED_LOCK_TOKENS.pop(key, None)
+        # The previous context has closed its lease by now. Reuse the same
+        # lease-authorized stale path as foreign recovery rather than performing
+        # a token-check/path-unlink sequence with its own replacement race.
+        _try_clear_stale_lock(path)
+        try:
+            remaining = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            _ORPHANED_LOCK_TOKENS.pop(key, None)
+            return
+        if remaining.get("token") != token:
+            _ORPHANED_LOCK_TOKENS.pop(key, None)
     except FileNotFoundError:
         _ORPHANED_LOCK_TOKENS.pop(key, None)
     except Exception as exc:
@@ -1352,10 +1470,101 @@ def _replace_with_retry(temp_name: str, path: Path) -> None:
     )
 
 
+def _cleanup_interrupted_artifacts(directory: Path) -> None:
+    """Remove only unowned remnants of interrupted plugin writes.
+
+    The caller has just acquired the cross-process mutation lock, so no live
+    Refine mutation can own one of these files. Atomic staging files use an
+    explicit plugin marker and are never recovery sources. Recovery backups are
+    removed only when the readable journal has no entry referencing their exact
+    basename; an unreadable journal retains every backup fail-closed.
+    """
+    roots = (directory, directory / _BACKUPS_DIR_NAME)
+    for root in roots:
+        try:
+            candidates = list(root.iterdir())
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning(
+                "Cannot inspect Refine atomic staging files: %s",
+                scrub_text(str(exc)),
+            )
+            continue
+        for candidate in candidates:
+            if not (
+                candidate.name.startswith(_ATOMIC_TEMP_PREFIX)
+                and candidate.name.endswith(_ATOMIC_TEMP_SUFFIX)
+            ):
+                continue
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                _retry_on_contention(
+                    candidate.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(
+                    "Cannot remove interrupted Refine atomic staging file: %s",
+                    scrub_text(str(exc)),
+                )
+
+    entries_value, state = _load_entries_state()
+    if state == "unreadable":
+        return
+    referenced = {
+        Path(str(entry.get("backup_path", ""))).name
+        for entry in entries_value
+        if Path(str(entry.get("backup_path", ""))).name
+    }
+    backup_root = directory / _BACKUPS_DIR_NAME
+    try:
+        candidates = list(backup_root.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning(
+            "Cannot inspect Refine recovery backups: %s", scrub_text(str(exc))
+        )
+        return
+    for candidate in candidates:
+        match = _RECOVERY_BACKUP_RE.fullmatch(candidate.name)
+        if not match or candidate.name in referenced:
+            continue
+        try:
+            owner_pid = int(match.group("pid"))
+        except (TypeError, ValueError):
+            continue
+        # A public caller may intentionally capture recovery and journal it in a
+        # following call without one outer lock. Keep that narrow live-owner
+        # window; a hard-killed owner is the only unreferenced copy reclaimed.
+        if _pid_is_alive(owner_pid):
+            continue
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            _retry_on_contention(
+                candidate.unlink, _UNLINK_RETRY_BUDGET_SECONDS, OSError
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning(
+                "Cannot remove unreferenced Refine recovery backup: %s",
+                scrub_text(str(exc)),
+            )
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Atomically replace backup/stat files; journals use append-only writes."""
+    """Atomically replace plugin-owned backup/stat files."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    fd, temp_name = tempfile.mkstemp(
+        prefix=_ATOMIC_TEMP_PREFIX,
+        suffix=_ATOMIC_TEMP_SUFFIX,
+        dir=str(path.parent),
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
@@ -1635,7 +1844,7 @@ def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
 
 
 def is_reversible(entry: Optional[Dict[str, Any]]) -> bool:
-    if not entry or entry.get("outcome") not in ("applied", "prepared", "rollback_prepared"):
+    if not entry or entry.get("outcome") != "applied":
         return False
     proposal = entry.get("proposal", {})
     kind = proposal.get("kind")
@@ -1925,42 +2134,38 @@ def prune_expired_backups() -> List[Path]:
 
 
 def prepare_skill_recovery(name: str) -> Optional[Dict[str, Any]]:
-    """Capture a skill's pre-edit state as a journal snapshot and a backup file.
-
-    One host read serves both, so the two records cannot disagree. The snapshot
-    makes rollback independent of a file surviving on disk; the ``.bak`` file
-    stays because it is human-readable and because entries journaled before
-    snapshots existed still restore from it.
-
-    ``before_sha256`` is taken from the real content. The journal scrubs
-    credentials out of everything it writes, so a snapshot of a skill that
-    contained a secret would come back altered — the digest makes that
-    detectable instead of restoring redacted text over the user's skill.
-    """
-    known, before = _read_skill_state(name)
-    if not known or before is None:
-        return None
-    backup = backups_dir() / f"{int(time.time() * 1000)}_skill_{name}.bak"
-    try:
-        _atomic_write_text(backup, before)
-    except Exception as exc:
-        logger.warning("Cannot back up skill '%s': %s", name, scrub_text(str(exc)))
-        return None
-    # Retention is opportunistic: a cleanup failure must not invalidate the
-    # newly created durable recovery copy that this edit still needs.
-    try:
-        prune_expired_backups()
-    except Exception as exc:
-        logger.warning("Cannot prune expired refine backups: %s", scrub_text(str(exc)))
-    return {
-        "backup_path": str(backup),
-        "snapshot": {
-            "kind": "skill",
-            "name": name,
-            "before": before,
-            "before_sha256": _content_digest(before),
-        },
-    }
+    """Capture a skill's pre-edit state as a snapshot and owned backup."""
+    # The outer refine transaction already holds this lock. Keeping the helper
+    # safe on its own prevents startup orphan cleanup from seeing the newly
+    # written backup before its caller can journal the recovery intent.
+    with mutation_lock():
+        known, before = _read_skill_state(name)
+        if not known or before is None:
+            return None
+        backup = (
+            backups_dir()
+            / f"{_RECOVERY_BACKUP_PREFIX}{os.getpid()}-{uuid.uuid4().hex}_skill_{name}.bak"
+        )
+        try:
+            _atomic_write_text(backup, before)
+        except Exception as exc:
+            logger.warning("Cannot back up skill '%s': %s", name, scrub_text(str(exc)))
+            return None
+        # Retention is opportunistic: a cleanup failure must not invalidate the
+        # newly created durable recovery copy that this edit still needs.
+        try:
+            prune_expired_backups()
+        except Exception as exc:
+            logger.warning("Cannot prune expired refine backups: %s", scrub_text(str(exc)))
+        return {
+            "backup_path": str(backup),
+            "snapshot": {
+                "kind": "skill",
+                "name": name,
+                "before": before,
+                "before_sha256": _content_digest(before),
+            },
+        }
 
 
 def _snapshot_of(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -2208,6 +2413,102 @@ def _pending_exists(subsystem: str, pending_id: str) -> Optional[bool]:
         return None
 
 
+def _interrupted_pending_id(
+    entry: Dict[str, Any], *, rollback: bool
+) -> Optional[str]:
+    """Refuse to guess an approval ID lost after durable host staging.
+
+    ``""`` means a legacy host is proven unable to stage this mutation.
+    ``None`` means a staging-capable host cannot provide causal identity, so
+    reconciliation must retain the nonterminal intent and budget reservation.
+    The current Hermes queue has no caller correlation field; payload and time
+    similarity are deliberately insufficient because another actor can submit
+    the same write.
+    """
+    proposal = entry.get("proposal", {})
+    if not isinstance(proposal, dict):
+        return None
+    kind = proposal.get("kind")
+    if kind not in {"skill", "memory"}:
+        return ""
+    subsystem = "skills" if kind == "skill" else "memory"
+
+    try:
+        approval = importlib.import_module("tools.write_approval")
+    except ModuleNotFoundError as exc:
+        if exc.name in {"tools", "tools.write_approval"}:
+            # Only exact module absence proves this host predates approvals.
+            return ""
+        logger.warning(
+            "Cannot load host approval capability while recovering %s: %s",
+            scrub_text(str(entry.get("id", ""))),
+            scrub_text(str(exc)),
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Cannot load host approval capability while recovering %s: %s",
+            scrub_text(str(entry.get("id", ""))),
+            scrub_text(str(exc)),
+        )
+        return None
+    enumerate_pending = getattr(approval, "list_pending", None)
+    if not callable(enumerate_pending):
+        # Importing the approval module is itself evidence that this host can
+        # stage writes. Missing individual APIs may identify an older approval
+        # implementation, but cannot prove an earlier request never queued.
+        # Only exact module absence above authorizes legacy target inference.
+        return None
+
+    try:
+        records = enumerate_pending(subsystem)
+    except Exception as exc:
+        logger.warning(
+            "Cannot enumerate pending %s writes while recovering %s: %s",
+            subsystem,
+            scrub_text(str(entry.get("id", ""))),
+            scrub_text(str(exc)),
+        )
+        return None
+    if not isinstance(records, list):
+        logger.warning("Host returned a malformed pending %s list", subsystem)
+        return None
+    pending_count = getattr(approval, "pending_count", None)
+    if not callable(pending_count):
+        logger.warning(
+            "Cannot verify completeness of pending %s enumeration", subsystem
+        )
+        return None
+    try:
+        if pending_count(subsystem) != len(records):
+            logger.warning(
+                "Host pending %s enumeration was incomplete or changed concurrently",
+                subsystem,
+            )
+            return None
+    except Exception as exc:
+        logger.warning(
+            "Cannot verify pending %s enumeration: %s",
+            subsystem,
+            scrub_text(str(exc)),
+        )
+        return None
+
+    # Hermes does not persist a caller correlation value in these records.
+    # Payload equality, queue origin, and timestamps can narrow candidates but
+    # cannot prove that any request belongs to this journal entry: another actor
+    # may stage the same operation after our prepare. Even an empty queue is not
+    # proof of absence because our request may already have been approved or
+    # rejected. Keep the intent nonterminal and budget-consuming until the host
+    # exposes exact identity rather than attributing a foreign mutation.
+    logger.warning(
+        "Host approval queue cannot causally identify interrupted %s for journal entry %s",
+        "rollback" if rollback else "write",
+        scrub_text(str(entry.get("id", ""))),
+    )
+    return None
+
+
 def _reconcile_cleanup_prepared(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Complete one exact cleanup intent without inferring from legacy absence."""
     entry_id = str(snapshot.get("id", ""))
@@ -2276,6 +2577,19 @@ def reconcile() -> List[Dict[str, Any]]:
                     changed.append(resolved)
                 continue
             if outcome == "prepared":
+                if proposal.get("kind") in {"skill", "memory"}:
+                    interrupted_pending = _interrupted_pending_id(
+                        snapshot, rollback=False
+                    )
+                    if interrupted_pending is None:
+                        continue
+                    if interrupted_pending:
+                        changed.append(finalize(
+                            entry_id,
+                            "pending_approval",
+                            pending_id=interrupted_pending,
+                        ))
+                        continue
                 applied_state = target_matches_applied(snapshot)
                 if applied_state is True:
                     changed.append(finalize(entry_id, "applied"))
@@ -2354,6 +2668,19 @@ def reconcile() -> List[Dict[str, Any]]:
                     ))
                 continue
             if outcome == "rollback_prepared":
+                if proposal.get("kind") == "skill":
+                    interrupted_pending = _interrupted_pending_id(
+                        snapshot, rollback=True
+                    )
+                    if interrupted_pending is None:
+                        continue
+                    if interrupted_pending:
+                        changed.append(finalize(
+                            entry_id,
+                            "pending_rollback",
+                            pending_id=interrupted_pending,
+                        ))
+                        continue
                 if rollback_target_matches(snapshot) is True:
                     changed.append(finalize(entry_id, "rolled_back"))
                     continue
@@ -2473,9 +2800,16 @@ def rollback_skill(entry_id: str) -> Dict[str, Any]:
     if result.get("staged"):
         pending_id = str(result.get("pending_id", ""))
         if not pending_id:
-            error = "Rollback was staged without a pending_id"
-            _restore_applied(entry_id, error)
-            return {"success": False, "error": error}
+            return {
+                "success": False,
+                "staged": True,
+                "outcome": "rollback_prepared",
+                "journal_id": entry_id,
+                "error": (
+                    "Rollback was staged without a pending_id; retained the "
+                    "rollback intent for reconciliation"
+                ),
+            }
         try:
             finalize(entry_id, "pending_rollback", pending_id=pending_id)
         except Exception as exc:

@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import sqlite3
 import sys
@@ -21,6 +21,7 @@ import threading
 import time
 import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -184,13 +185,28 @@ class FakeHost:
         return f"pending-{name}-{cls.pending_counter}"
 
     @classmethod
+    def stage_pending(cls, subsystem, payload):
+        pending_id = cls.next_pending_id(str(payload.get("name") or payload.get("target") or "write"))
+        cls.pending[(subsystem, pending_id)] = {
+            "id": pending_id,
+            "subsystem": subsystem,
+            "action": payload.get("action", ""),
+            "summary": "synthetic pending write",
+            "origin": "background_review",
+            "created_at": time.time(),
+            "payload": dict(payload),
+        }
+        return pending_id
+
+    @classmethod
     def approve_pending(cls, subsystem, pending_id):
         record = cls.pending.pop((subsystem, pending_id))
+        payload = record["payload"]
         if subsystem == "skills":
-            action = record["action"]
-            name = record["name"]
+            action = payload["action"]
+            name = payload["name"]
             if action in ("create", "edit"):
-                cls.add_skill(name, record.get("content") or "")
+                cls.add_skill(name, payload.get("content") or "")
             elif action == "delete":
                 cls.skills.pop(name, None)
                 cls.agent_created.discard(name)
@@ -199,13 +215,13 @@ class FakeHost:
             # Mirrors the host's apply_memory_pending: the staged payload is
             # replayed by its action, so an approved removal removes rather than
             # appending. Add lands at the current end, wherever that now is.
-            target = record["target"]
+            target = payload["target"]
             entries = cls.user_entries if target == "user" else cls.memory_entries
-            action = record.get("action", "add")
+            action = payload.get("action", "add")
             if action == "add":
-                entries.append(record.get("content") or "")
+                entries.append(payload.get("content") or "")
             elif action == "remove":
-                old_text = record.get("old_text") or ""
+                old_text = payload.get("old_text") or ""
                 matches = [index for index, value in enumerate(entries) if old_text in value]
                 if matches and len({entries[index] for index in matches}) == 1:
                     entries.pop(matches[0])
@@ -257,13 +273,12 @@ def install_fake_host():
             error, FakeHost.fail_next = FakeHost.fail_next, ""
             return json.dumps({"success": False, "error": error})
         if FakeHost.stage_writes and action in ("create", "edit", "delete"):
-            pending_id = FakeHost.next_pending_id(name)
-            FakeHost.pending[("skills", pending_id)] = {
-                "action": action,
-                "name": name,
-                "content": content,
-                "category": category,
-            }
+            payload = {"action": action, "name": name}
+            if content is not None:
+                payload["content"] = content
+            if category is not None:
+                payload["category"] = category
+            pending_id = FakeHost.stage_pending("skills", payload)
             return json.dumps({
                 "success": True, "staged": True, "pending_id": pending_id
             })
@@ -386,13 +401,12 @@ def install_fake_host():
                 "success": False, "error": "Memory write denied by the user."
             })
         if FakeHost.stage_writes:
-            pending_id = FakeHost.next_pending_id(target)
-            FakeHost.pending[("memory", pending_id)] = {
+            pending_id = FakeHost.stage_pending("memory", {
                 "action": action,
                 "target": target,
                 "content": content,
                 "old_text": old_text,
-            }
+            })
             return json.dumps({
                 "success": True, "staged": True, "pending_id": pending_id
             })
@@ -411,6 +425,18 @@ def install_fake_host():
     memory.get_memory_dir = lambda: str(FakeHost.root)
     approval.get_pending = lambda subsystem, pending_id: FakeHost.pending.get(
         (subsystem, pending_id)
+    )
+    approval.list_pending = lambda subsystem: [
+        {**record, "payload": dict(record["payload"])}
+        for (pending_subsystem, _pending_id), record in FakeHost.pending.items()
+        if pending_subsystem == subsystem
+    ]
+    approval.pending_count = lambda subsystem: sum(
+        1 for pending_subsystem, _pending_id in FakeHost.pending
+        if pending_subsystem == subsystem
+    )
+    approval.discard_pending = lambda subsystem, pending_id: bool(
+        FakeHost.pending.pop((subsystem, pending_id), None)
     )
     # The host owns this setting; refine only reads it to warn.
     approval.write_approval_enabled = lambda subsystem: bool(
@@ -475,6 +501,13 @@ def skill_proposal(name, body="# Guidance\n\nNew guidance."):
     }
 
 
+def approval_module_absent():
+    """Patch recovery as a host that positively predates write approvals."""
+    missing = ModuleNotFoundError("No module named 'tools.write_approval'")
+    missing.name = "tools.write_approval"
+    return patch.object(journal.importlib, "import_module", side_effect=missing)
+
+
 def baseline_for(content):
     """Build a valid refine_baseline dict from skill content text."""
     return {"exists": True, "sha256": journal.content_digest(content)}
@@ -520,6 +553,240 @@ def prompt_proposal(content):
         "content": content, "reason": "Repeated behavioral failure",
         "evidence": ["request failed"], "pattern_fingerprint": "deadbeef1234",
     }
+
+
+def _configure_crash_fixture(root, scenario, marker):
+    """Install a file-backed synthetic host for true process-death tests."""
+    marker = Path(marker)
+    FakeHost.reset(root)
+    config._set_runtime_journal_dir(None)
+    core._LAST_SESSION_ID = "session"
+    skills_root = root / "crash-skills"
+    pending_root = root / "crash-pending"
+
+    def skill_path(name):
+        return skills_root / name / "SKILL.md"
+
+    def skill_view(name, preprocess=True):
+        path = skill_path(name)
+        if not path.is_file():
+            return json.dumps({"success": False, "error": "not found"})
+        return json.dumps({
+            "success": True, "skill_dir": str(path.parent),
+            "content": path.read_text(encoding="utf-8"),
+        })
+
+    def skills_list():
+        values = []
+        if skills_root.is_dir():
+            values = [{"name": item.name} for item in skills_root.iterdir() if item.is_dir()]
+        return json.dumps({"skills": values})
+
+    def checkpoint(label):
+        marker.write_text(label, encoding="utf-8")
+        while True:
+            time.sleep(0.05)
+
+    def persist_pending(subsystem, payload):
+        pending_id = uuid.uuid4().hex[:8]
+        directory = pending_root / subsystem
+        directory.mkdir(parents=True, exist_ok=True)
+        record = {
+            "id": pending_id, "subsystem": subsystem,
+            "action": payload.get("action", ""),
+            "summary": "synthetic crash request", "origin": "background_review",
+            "created_at": time.time(), "payload": payload,
+        }
+        path = directory / f"{pending_id}.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+        return pending_id
+
+    def skill_manage(action, name, content=None, category=None, **kwargs):
+        payload = {"action": action, "name": name}
+        if content is not None:
+            payload["content"] = content
+        if category is not None:
+            payload["category"] = category
+        if scenario in {"prepared_before_host", "rollback_prepared"}:
+            checkpoint(scenario)
+        if scenario in {"host_stage_persisted", "rollback_stage_persisted"}:
+            persist_pending("skills", payload)
+            checkpoint(scenario)
+        path = skill_path(name)
+        if action in {"create", "edit"}:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content or "", encoding="utf-8")
+        elif action == "delete":
+            path.unlink(missing_ok=True)
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+        else:
+            return json.dumps({"success": False, "error": f"unsupported {action}"})
+        if scenario in {"host_write_landed", "rollback_host_landed"}:
+            checkpoint(scenario)
+        return json.dumps({"success": True, "message": "synthetic host write"})
+
+    def list_pending(subsystem):
+        directory = pending_root / subsystem
+        if not directory.is_dir():
+            return []
+        return sorted(
+            (json.loads(path.read_text(encoding="utf-8")) for path in directory.glob("*.json")),
+            key=lambda record: record["created_at"],
+        )
+
+    def get_pending(subsystem, pending_id):
+        path = pending_root / subsystem / f"{pending_id}.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    skills = sys.modules["tools.skills_tool"]
+    manager = sys.modules["tools.skill_manager_tool"]
+    usage = sys.modules["tools.skill_usage"]
+    approval = sys.modules["tools.write_approval"]
+    skills.skills_list = skills_list
+    skills.skill_view = skill_view
+    manager.skill_manage = skill_manage
+    usage.is_agent_created = lambda name: skill_path(name).is_file()
+    usage.get_usage_count = lambda name, since_ts=None: 0
+    approval.list_pending = list_pending
+    approval.get_pending = get_pending
+    approval.pending_count = lambda subsystem: len(list_pending(subsystem))
+    approval.discard_pending = lambda subsystem, pending_id: bool(
+        (pending_root / subsystem / f"{pending_id}.json").unlink(missing_ok=True) is None
+    )
+    approval.write_approval_enabled = lambda subsystem: scenario in {
+        "host_stage_persisted", "rollback_stage_persisted"
+    }
+    return skill_path, pending_root
+
+
+def _crash_proposal(name="crash-skill"):
+    return skill_proposal(name, "# Guidance\n\nCrash-safe replacement.")
+
+
+def _run_crash_child(root, scenario, marker):
+    marker = Path(marker)
+    skill_path, _pending_root = _configure_crash_fixture(root, scenario, marker)
+    proposal = _crash_proposal()
+    if scenario == "seed_applied":
+        result = core.refine_run(MockLlm(proposal), session_id="session")
+        (root / "applied-id.txt").write_text(result["journal_id"], encoding="utf-8")
+        print(json.dumps(result))
+        return
+    if scenario == "backup_before_prepare":
+        old = skill_content("crash-skill", "# Guidance\n\nOriginal bytes.")
+        new = skill_content("crash-skill", "# Guidance\n\nReplacement bytes.")
+        path = skill_path("crash-skill")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(old, encoding="utf-8")
+        proposal = patch_proposal("crash-skill", new, current_content=old)
+        original = journal.prepare_skill_recovery
+
+        def stop_after_backup(name):
+            captured = original(name)
+            marker.write_text("backup_before_prepare", encoding="utf-8")
+            while True:
+                time.sleep(0.05)
+
+        with patch.object(journal, "prepare_skill_recovery", side_effect=stop_after_backup):
+            core.refine_run(MockLlm(proposal), session_id="session")
+        return
+    if scenario == "lock_claim_before_publish":
+        def checkpoint_link(source, destination, *args, **kwargs):
+            marker.write_text(scenario, encoding="utf-8")
+            while True:
+                time.sleep(0.05)
+
+        with patch.object(journal.os, "link", side_effect=checkpoint_link):
+            with journal.mutation_lock(timeout=5):
+                pass
+        return
+    if scenario in {"atomic_before_replace", "atomic_after_replace"}:
+        target = root / "journal" / "model_override.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("old-complete", encoding="utf-8")
+        original = journal._replace_with_retry
+
+        def checkpoint_replace(source, destination):
+            if scenario == "atomic_after_replace":
+                original(source, destination)
+            marker.write_text(scenario, encoding="utf-8")
+            while True:
+                time.sleep(0.05)
+
+        with patch.object(journal, "_replace_with_retry", side_effect=checkpoint_replace):
+            journal._atomic_write_text(target, "new-complete")
+        return
+    if scenario.startswith("rollback_"):
+        core.refine_rollback((root / "applied-id.txt").read_text(encoding="utf-8"))
+        return
+    core.refine_run(MockLlm(proposal), session_id="session")
+
+
+def _inspect_crash_restart(root, scenario, aged=False):
+    aged = aged is True or str(aged).lower() == "true"
+    skill_path, pending_root = _configure_crash_fixture(root, "inspect", root / "unused")
+    with journal.mutation_lock(timeout=5):
+        context = (
+            patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0)
+            if aged else nullcontext()
+        )
+        with context:
+            core._reconcile_pending()
+    entries = journal.entries()
+    entry = entries[-1] if entries else {}
+    path = skill_path("crash-skill")
+    pending_files = sorted(pending_root.glob("*/*.json")) if pending_root.is_dir() else []
+    stats = ledger.load_stats()
+    print(json.dumps({
+        "outcome": entry.get("outcome", ""),
+        "pending_id": entry.get("pending_id", ""),
+        "entries": len(entries),
+        "budget": journal.count_today_applied(),
+        "skill_content": path.read_text(encoding="utf-8") if path.is_file() else None,
+        "queue_ids": [path.stem for path in pending_files],
+        "backups": len(list((root / "journal" / "backups").glob("*.bak")))
+            if (root / "journal" / "backups").is_dir() else 0,
+        "atomic_temps": len(list((root / "journal").glob(".refine-atomic-*.tmp")))
+            if (root / "journal").is_dir() else 0,
+        "atomic_target": (root / "journal" / "model_override.json").read_text(encoding="utf-8")
+            if (root / "journal" / "model_override.json").is_file() else "",
+        "lock_exists": (root / ".journal.mutation.lock").exists(),
+        "lock_claims": len(list(root.glob(
+            ".journal.mutation.lock.refine-claim-*.tmp"
+        ))),
+        "ledger_outcome": next(iter(stats.values())).get("outcome", "") if stats else "",
+    }))
+
+
+def _resolve_crash_pending(root, decision):
+    skill_path, pending_root = _configure_crash_fixture(root, "inspect", root / "unused")
+    entry = journal.entries()[-1]
+    [pending_path] = list(pending_root.glob("*/*.json"))
+    record = json.loads(pending_path.read_text(encoding="utf-8"))
+    payload = record["payload"]
+    if decision == "approve":
+        path = skill_path(payload["name"])
+        if payload["action"] in {"create", "edit"}:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload.get("content", ""), encoding="utf-8")
+        elif payload["action"] == "delete":
+            path.unlink(missing_ok=True)
+    pending_path.unlink()
+    with journal.mutation_lock(timeout=5):
+        core._reconcile_pending()
+    latest = journal.entries()[-1]
+    stats = ledger.load_stats()
+    path = skill_path("crash-skill")
+    print(json.dumps({
+        "outcome": latest["outcome"],
+        "skill_exists": path.is_file(),
+        "ledger_outcome": next(iter(stats.values())).get("outcome", "") if stats else "",
+    }))
 
 
 class RefineTests(unittest.TestCase):
@@ -874,22 +1141,136 @@ class RefineTests(unittest.TestCase):
             patterns.fingerprint("git", "commit fadedad failed"),
         )
 
-    def test_fresh_dead_lock_is_reclaimed_but_live_lock_is_preserved(self):
+    def test_dead_lock_lease_is_reclaimed_but_live_lease_is_preserved(self):
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())
-        now = time.time()
-        lock_path.write_text(
-            json.dumps({"pid": os.getpid() + 10_000_000, "created": now, "token": "dead"}),
-            encoding="utf-8",
-        )
+        dead_lease = journal._new_lock_lease()
+        dead_payload = journal._lock_payload("dead", dead_lease)
+        dead_lease.close()
+        lock_path.write_text(dead_payload, encoding="utf-8")
         journal._try_clear_stale_lock(lock_path)
         self.assertFalse(lock_path.exists())
 
-        lock_path.write_text(
-            json.dumps({"pid": os.getpid(), "created": now - 600, "token": "live"}),
-            encoding="utf-8",
-        )
+        with journal._new_lock_lease() as live_lease:
+            live_payload = journal._lock_payload("live", live_lease)
+            lock_path.write_text(live_payload, encoding="utf-8")
+            journal._try_clear_stale_lock(lock_path)
+            self.assertTrue(lock_path.exists())
+        lock_path.unlink()
+
+    def test_legacy_lock_without_lease_fails_closed(self):
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        raw = json.dumps({
+            "pid": os.getpid() + 10_000_000,
+            "created": time.time() - 600,
+            "token": "legacy-dead",
+        })
+        lock_path.write_text(raw, encoding="utf-8")
         journal._try_clear_stale_lock(lock_path)
-        self.assertTrue(lock_path.exists())
+        self.assertEqual(lock_path.read_text(encoding="utf-8"), raw)
+
+    def test_dead_lease_allows_only_one_stale_cleaner(self):
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        dead_lease = journal._new_lock_lease()
+        dead_payload = journal._lock_payload("dead-race", dead_lease)
+        dead_lease.close()
+        lock_path.write_text(dead_payload, encoding="utf-8")
+        cleaner_paused = threading.Event()
+        release_cleaner = threading.Event()
+        original_unlink = Path.unlink
+
+        def pause_first_cleaner(path, *args, **kwargs):
+            if path == lock_path and threading.current_thread().name == "cleaner-a":
+                cleaner_paused.set()
+                self.assertTrue(release_cleaner.wait(5))
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", pause_first_cleaner):
+            first = threading.Thread(
+                target=journal._try_clear_stale_lock,
+                args=(lock_path,),
+                name="cleaner-a",
+            )
+            first.start()
+            self.assertTrue(cleaner_paused.wait(5))
+            # The first cleaner owns the dead process's lease while paused, so a
+            # second cleaner cannot authorize an unlink or create a replacement.
+            journal._try_clear_stale_lock(lock_path)
+            self.assertEqual(lock_path.read_text(encoding="utf-8"), dead_payload)
+            with self.assertRaises(FileExistsError):
+                descriptor = os.open(
+                    str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
+                os.close(descriptor)
+            release_cleaner.set()
+            first.join(5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(lock_path.exists())
+        with journal.mutation_lock(timeout=1):
+            pass
+
+    def test_lock_publication_never_exposes_a_partial_canonical_file(self):
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        with journal._new_lock_lease() as lease:
+            payload = journal._lock_payload("publish-failure", lease)
+            with patch.object(journal.os, "link", side_effect=OSError("no link")):
+                with self.assertRaises(OSError):
+                    journal._publish_lock(lock_path, payload)
+        self.assertFalse(lock_path.exists())
+        self.assertEqual(
+            list(lock_path.parent.glob(
+                f"{lock_path.name}.refine-claim-*.tmp"
+            )),
+            [],
+        )
+
+    def test_lock_publication_retries_claim_cleanup_after_link_succeeds(self):
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        original_unlink = Path.unlink
+        attempts = 0
+
+        def deny_claim_unlink_once(path, *args, **kwargs):
+            nonlocal attempts
+            if ".refine-claim-" in path.name:
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("claim temporarily busy")
+            return original_unlink(path, *args, **kwargs)
+
+        with journal._new_lock_lease() as lease:
+            payload = journal._lock_payload("claim-cleanup-retry", lease)
+            with patch.object(Path, "unlink", deny_claim_unlink_once), patch.object(
+                journal.time, "sleep", return_value=None
+            ):
+                journal._publish_lock(lock_path, payload)
+        self.assertTrue(lock_path.is_file())
+        self.assertEqual(attempts, 2)
+        self.assertEqual(
+            list(lock_path.parent.glob(
+                f"{lock_path.name}.refine-claim-*.tmp"
+            )),
+            [],
+        )
+        lock_path.unlink()
+
+    def test_stale_recovery_runs_before_candidate_lease_allocation(self):
+        lock_path = journal._mutation_lock_path(journal.ensure_dirs())
+        dead_lease = journal._new_lock_lease()
+        dead_payload = journal._lock_payload("reused-port", dead_lease)
+        dead_lease.close()
+        lock_path.write_text(dead_payload, encoding="utf-8")
+        original_new_lease = journal._new_lock_lease
+        allocations = 0
+
+        def allocate_after_recovery():
+            nonlocal allocations
+            allocations += 1
+            self.assertFalse(lock_path.exists())
+            return original_new_lease()
+
+        with patch.object(journal, "_new_lock_lease", side_effect=allocate_after_recovery):
+            with journal.mutation_lock(timeout=1):
+                pass
+        self.assertEqual(allocations, 1)
 
     def test_content_retry_keeps_create_identity_and_empty_summary_is_absent(self):
         original = {
@@ -2751,7 +3132,8 @@ class RefineTests(unittest.TestCase):
             result = core.refine_run(MockLlm())
             self.assertFalse(result["success"])
             self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "prepared")
-            rollback = core.refine_rollback(result["journal_id"])
+            with approval_module_absent():
+                rollback = core.refine_rollback(result["journal_id"])
         self.assertTrue(rollback["success"])
         self.assertNotIn("finalize-fail", FakeHost.skills)
 
@@ -3159,26 +3541,14 @@ class RefineTests(unittest.TestCase):
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())
         self.assertFalse(lock_path.exists())
 
-    def test_stale_lock_cleanup_unblocks_concurrent_run(self):
-        """A stale file lock left by a dead PID must be cleared, allowing a real run.
-
-        Plants a lock file with a non-existent PID and an old timestamp, then
-        runs refine_run. The stale lock cleaner must remove it and the run must
-        succeed without timeout.
-        """
+    def test_dead_lock_lease_cleanup_unblocks_concurrent_run(self):
+        """A lock whose process lease died is reclaimed before a real run."""
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())
-        # Use a PID that cannot currently exist on this host. PID 2 is the
-        # systemd/kthreadd process on Linux, so treating it as dead makes this
-        # stale-lock fixture fail for the wrong reason.
-        impossible_pid = os.getpid() + 10_000_000
-        stale_payload = json.dumps({
-            "pid": impossible_pid, "created": time.time() - 600, "token": "***"
-        })
+        dead_lease = journal._new_lock_lease()
+        stale_payload = journal._lock_payload("dead-before-run", dead_lease)
+        dead_lease.close()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(stale_payload, encoding="utf-8")
-        # Back-date the file mtime so the staleness check passes.
-        stale_mtime = time.time() - 600
-        os.utime(lock_path, (stale_mtime, stale_mtime))
 
         self.assertTrue(lock_path.exists())
         result = core.refine_run(MockLlm(skill_proposal("after-stale-lock")))
@@ -3673,6 +4043,154 @@ class RefineTests(unittest.TestCase):
         self.assertNotIn("memory-secret-123", FakeHost.memory_entries[-1])
         self.assertTrue(core.refine_rollback(memory_result["journal_id"])["success"])
 
+    def test_true_process_death_restart_matrix_is_safe_and_deterministic(self):
+        if not Path(sys.executable).is_file():
+            self.skipTest("No spawnable Python interpreter is available")
+
+        def command(function_name, *arguments):
+            code = (
+                "import sys; from pathlib import Path; "
+                f"from tests.run_tests import {function_name}; "
+                f"{function_name}(Path(sys.argv[1]), *sys.argv[2:])"
+            )
+            return [sys.executable, "-c", code, *map(str, arguments)]
+
+        def kill_at_checkpoint(root, scenario):
+            marker = root / "checkpoint"
+            process = subprocess.Popen(
+                command("_run_crash_child", root, scenario, marker),
+                cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            deadline = time.monotonic() + 15
+            while not marker.is_file():
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    self.fail(f"Crash child exited before {scenario}: {stdout} {stderr}")
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    process.communicate()
+                    self.fail(f"Crash child timed out before {scenario}")
+                time.sleep(0.01)
+            process.kill()
+            process.communicate(timeout=5)
+            self.assertNotEqual(process.returncode, 0)
+
+        def run_json(function_name, root, *arguments):
+            process = subprocess.run(
+                command(function_name, root, *arguments), cwd=str(ROOT),
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            return json.loads(process.stdout)
+
+        cases = [
+            ("lock_claim_before_publish", None),
+            ("backup_before_prepare", None),
+            ("atomic_before_replace", None),
+            ("atomic_after_replace", None),
+            ("prepared_before_host", None),
+            ("host_write_landed", None),
+            ("host_stage_persisted", "approve"),
+            ("host_stage_persisted", "reject"),
+            ("rollback_prepared", None),
+            ("rollback_host_landed", None),
+            ("rollback_stage_persisted", "approve"),
+            ("rollback_stage_persisted", "reject"),
+        ]
+        for scenario, decision in cases:
+            with self.subTest(scenario=scenario, decision=decision), tempfile.TemporaryDirectory(
+                prefix="refine-process-death-"
+            ) as temporary:
+                root = Path(temporary)
+                if scenario.startswith("rollback_"):
+                    seeded = run_json("_run_crash_child", root, "seed_applied", root / "seed")
+                    self.assertTrue(seeded["success"])
+                kill_at_checkpoint(root, scenario)
+
+                lock_path = root / ".journal.mutation.lock"
+                if not scenario.startswith("atomic_") and scenario != "lock_claim_before_publish":
+                    self.assertTrue(lock_path.is_file())
+                if scenario == "lock_claim_before_publish":
+                    self.assertFalse(lock_path.exists())
+                    self.assertEqual(
+                        len(list(root.glob(
+                            ".journal.mutation.lock.refine-claim-*.tmp"
+                        ))),
+                        1,
+                    )
+                if scenario == "backup_before_prepare":
+                    backups = list((root / "journal" / "backups").glob("*.bak"))
+                    self.assertEqual(len(backups), 1)
+                    self.assertTrue(backups[0].name.startswith("refine-"))
+                    self.assertIn("Original bytes", backups[0].read_text(encoding="utf-8"))
+                if scenario.startswith("atomic_"):
+                    target = root / "journal" / "model_override.json"
+                    temps = list((root / "journal").glob(".refine-atomic-*.tmp"))
+                    if scenario == "atomic_before_replace":
+                        self.assertEqual(target.read_text(encoding="utf-8"), "old-complete")
+                        self.assertEqual(len(temps), 1)
+                        self.assertEqual(temps[0].read_text(encoding="utf-8"), "new-complete")
+                    else:
+                        self.assertEqual(target.read_text(encoding="utf-8"), "new-complete")
+                        self.assertEqual(temps, [])
+
+                observed = run_json("_inspect_crash_restart", root, scenario, "False")
+                self.assertFalse(observed["lock_exists"])
+                self.assertEqual(observed["lock_claims"], 0)
+                self.assertEqual(observed["backups"], 0)
+                self.assertEqual(observed["atomic_temps"], 0)
+
+                if scenario == "lock_claim_before_publish":
+                    self.assertEqual((observed["entries"], observed["outcome"]), (0, ""))
+                elif scenario == "backup_before_prepare":
+                    self.assertEqual((observed["entries"], observed["outcome"]), (0, ""))
+                    self.assertIn("Original bytes", observed["skill_content"])
+                elif scenario == "atomic_before_replace":
+                    self.assertEqual(observed["atomic_target"], "old-complete")
+                elif scenario == "atomic_after_replace":
+                    self.assertEqual(observed["atomic_target"], "new-complete")
+                elif scenario == "prepared_before_host":
+                    self.assertEqual((observed["outcome"], observed["budget"]), ("prepared", 1))
+                    aged = run_json("_inspect_crash_restart", root, scenario, "True")
+                    self.assertEqual((aged["outcome"], aged["budget"]), ("prepared", 1))
+                elif scenario == "host_write_landed":
+                    self.assertEqual((observed["outcome"], observed["budget"]), ("prepared", 1))
+                    self.assertEqual(observed["skill_content"], _crash_proposal()["content"])
+                elif scenario == "rollback_prepared":
+                    self.assertEqual(observed["outcome"], "rollback_prepared")
+                    self.assertEqual(observed["skill_content"], _crash_proposal()["content"])
+                    aged = run_json("_inspect_crash_restart", root, scenario, "True")
+                    self.assertEqual(aged["outcome"], "rollback_prepared")
+                elif scenario == "rollback_host_landed":
+                    self.assertEqual(
+                        (observed["outcome"], observed["budget"]),
+                        ("rollback_prepared", 1),
+                    )
+                    self.assertIsNone(observed["skill_content"])
+                else:
+                    expected_unresolved = (
+                        "rollback_prepared"
+                        if scenario.startswith("rollback_")
+                        else "prepared"
+                    )
+                    self.assertEqual(observed["outcome"], expected_unresolved)
+                    self.assertEqual(observed["pending_id"], "")
+                    self.assertEqual(len(observed["queue_ids"]), 1)
+                    self.assertEqual(
+                        observed["skill_content"],
+                        _crash_proposal()["content"]
+                        if scenario.startswith("rollback_")
+                        else None,
+                    )
+                    resolved = run_json("_resolve_crash_pending", root, decision)
+                    self.assertEqual(resolved["outcome"], expected_unresolved)
+                    exists = (
+                        decision == "reject"
+                        if scenario.startswith("rollback_")
+                        else decision == "approve"
+                    )
+                    self.assertEqual(resolved["skill_exists"], exists)
+
     def test_atomic_write_cleans_up_its_staging_file_on_failure(self):
         """R9 §10: reproduce-checked, did not reproduce as a bug. If the final
         atomic replace fails, the .tmp staging file it wrote to must not be
@@ -3709,7 +4227,7 @@ class RefineTests(unittest.TestCase):
         with journal.mutation_lock(timeout=1.0):
             pass
 
-    def test_new_malformed_lock_is_not_deleted_until_mtime_is_stale(self):
+    def test_malformed_lock_is_never_deleted_by_age(self):
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())
         lock_path.write_bytes(b"")
         modified = 1000.0
@@ -3720,7 +4238,7 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(lock_path.exists())
         with patch.object(journal.time, "time", return_value=modified + 301):
             journal._try_clear_stale_lock(lock_path)
-        self.assertFalse(lock_path.exists())
+        self.assertTrue(lock_path.exists())
 
     def test_windows_pid_probe_never_uses_os_kill(self):
         if config.os.name != "nt":
@@ -3759,6 +4277,426 @@ class RefineTests(unittest.TestCase):
         core.refine_audit()
         self.assertEqual(journal.get_entry(memory_result["journal_id"])["outcome"], "applied")
         self.assertEqual(FakeHost.memory_entries, ["exact pending memory"])
+
+    def test_interrupted_forward_staging_without_correlation_stays_prepared(self):
+        """Payload/time similarity never claims another actor's queue request."""
+        FakeHost.stage_writes = True
+        original_finalize = journal.finalize
+        before = skill_content("recover-forward-patch", "# Guidance\n\nBefore.")
+        after = skill_content("recover-forward-patch", "# Guidance\n\nAfter.")
+        FakeHost.add_skill("recover-forward-patch", before)
+        cases = (
+            ("create", skill_proposal("recover-forward-create"), "skills", "approve"),
+            (
+                "patch",
+                patch_proposal("recover-forward-patch", after, current_content=before),
+                "skills",
+                "reject",
+            ),
+            (
+                "memory",
+                {
+                    "action": "create", "kind": "memory", "name": "recover-memory",
+                    "content": "recover this staged lesson", "reason": "why", "evidence": [],
+                },
+                "memory",
+                "approve",
+            ),
+        )
+        for label, proposal, subsystem, decision in cases:
+            with self.subTest(case=label):
+                def fail_pending(entry_id, outcome, **kwargs):
+                    if outcome == "pending_approval":
+                        raise OSError("synthetic pending finalization failure")
+                    return original_finalize(entry_id, outcome, **kwargs)
+
+                with patch.object(journal, "finalize", side_effect=fail_pending):
+                    result = self.run_proposal(proposal)
+                pending_id = result["result"]["pending_id"]
+                entry_id = result["journal_id"]
+                core._reconcile_pending()
+                unresolved = journal.get_entry(entry_id)
+                self.assertEqual(unresolved["outcome"], "prepared")
+                self.assertNotIn("pending_id", unresolved)
+                ledger_key = (
+                    proposal["name"]
+                    if subsystem == "skills"
+                    else f"memory:{proposal['name']}"
+                )
+                self.assertNotIn(ledger_key, ledger.load_stats())
+
+                if decision == "approve":
+                    FakeHost.approve_pending(subsystem, pending_id)
+                else:
+                    FakeHost.reject_pending(subsystem, pending_id)
+                core._reconcile_pending()
+                self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+                self.assertNotIn(ledger_key, ledger.load_stats())
+
+    def test_interrupted_rollback_staging_without_correlation_stays_prepared(self):
+        original_finalize = journal.finalize
+        cases = []
+        created = self.run_proposal(skill_proposal("recover-rollback-create"))
+        cases.append(("create", created, None))
+        name = "recover-rollback-patch"
+        before = skill_content(name, "# Guidance\n\nBefore rollback.")
+        after = skill_content(name, "# Guidance\n\nApplied patch.")
+        FakeHost.add_skill(name, before)
+        patched = self.run_proposal(patch_proposal(name, after, current_content=before))
+        Path(patched["backup_path"]).unlink()
+        cases.append(("patch", patched, before))
+        FakeHost.stage_writes = True
+
+        for action, applied, restored_content in cases:
+            with self.subTest(action=action):
+                def fail_pending(entry_id, outcome, **kwargs):
+                    if outcome == "pending_rollback":
+                        raise OSError("synthetic rollback pending finalization failure")
+                    return original_finalize(entry_id, outcome, **kwargs)
+
+                with patch.object(journal, "finalize", side_effect=fail_pending):
+                    result = core.refine_rollback(applied["journal_id"])
+                self.assertFalse(result["success"])
+                pending_id = result["pending_id"]
+                queued = FakeHost.pending[("skills", pending_id)]
+                self.assertEqual(
+                    queued["payload"]["action"], "delete" if action == "create" else "edit"
+                )
+                if restored_content is not None:
+                    self.assertEqual(queued["payload"]["content"], restored_content)
+                self.assertEqual(
+                    journal.get_entry(applied["journal_id"])["outcome"],
+                    "rollback_prepared",
+                )
+
+                core._reconcile_pending()
+                unresolved = journal.get_entry(applied["journal_id"])
+                self.assertEqual(unresolved["outcome"], "rollback_prepared")
+                self.assertNotEqual(unresolved.get("pending_id"), pending_id)
+                FakeHost.approve_pending("skills", pending_id)
+                core._reconcile_pending()
+                self.assertEqual(
+                    journal.get_entry(applied["journal_id"])["outcome"],
+                    "rollback_prepared",
+                )
+                if action == "create":
+                    self.assertNotIn("recover-rollback-create", FakeHost.skills)
+                else:
+                    self.assertEqual(FakeHost.skills[name], before)
+
+    def test_interrupted_staging_queue_lookup_fails_closed(self):
+        entry_id = journal.prepare(
+            trigger="manual",
+            reason="synthetic interrupted stage",
+            session_id="session",
+            proposal=skill_proposal("queue-unavailable"),
+            recovery={"type": "skill_create", "name": "queue-unavailable"},
+        )
+        approval = sys.modules["tools.write_approval"]
+        with patch.object(
+            approval, "list_pending", side_effect=OSError("queue unavailable")
+        ), patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            journal.reconcile()
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        self.assertEqual(journal.count_today_applied(), 1)
+
+        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            journal.reconcile()
+        # Even an empty modern queue cannot distinguish rejection from an
+        # already-approved request; no terminal state is inferred.
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+
+    def test_interrupted_staging_similarity_never_becomes_identity(self):
+        FakeHost.stage_writes = True
+        original_finalize = journal.finalize
+
+        def fail_pending(entry_id, outcome, **kwargs):
+            if outcome == "pending_approval":
+                raise OSError("synthetic pending finalization failure")
+            return original_finalize(entry_id, outcome, **kwargs)
+
+        with patch.object(journal, "finalize", side_effect=fail_pending):
+            result = self.run_proposal(skill_proposal("ambiguous-queue"))
+        first_id = result["result"]["pending_id"]
+        duplicate_id = "pending-ambiguous-duplicate"
+        duplicate = {
+            **FakeHost.pending[("skills", first_id)],
+            "id": duplicate_id,
+            "payload": dict(FakeHost.pending[("skills", first_id)]["payload"]),
+        }
+        FakeHost.pending[("skills", duplicate_id)] = duplicate
+        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            journal.reconcile()
+        unresolved = journal.get_entry(result["journal_id"])
+        self.assertEqual(unresolved["outcome"], "prepared")
+        self.assertNotIn("pending_id", unresolved)
+        self.assertEqual(journal.count_today_applied(), 1)
+        FakeHost.pending.pop(("skills", duplicate_id))
+        journal.reconcile()
+        still_unresolved = journal.get_entry(result["journal_id"])
+        self.assertEqual(still_unresolved["outcome"], "prepared")
+        self.assertNotIn("pending_id", still_unresolved)
+
+    def test_interrupted_staging_queue_capability_fails_closed(self):
+        proposal = skill_proposal("causal-queue")
+        entry_id = journal.prepare(
+            trigger="manual", reason="causal queue", session_id="session",
+            proposal=proposal,
+            recovery={"type": "skill_create", "name": proposal["name"]},
+        )
+        entry = journal.get_entry(entry_id)
+        payload = {
+            "action": "create", "name": proposal["name"],
+            "content": proposal["content"],
+        }
+        old_id = FakeHost.stage_pending("skills", payload)
+        FakeHost.pending[("skills", old_id)]["created_at"] = entry["ts"] - 1
+        self.assertIsNone(journal._interrupted_pending_id(entry, rollback=False))
+
+        new_id = FakeHost.stage_pending("skills", payload)
+        FakeHost.pending[("skills", new_id)]["origin"] = "another-actor"
+        self.assertIsNone(journal._interrupted_pending_id(entry, rollback=False))
+        approval = sys.modules["tools.write_approval"]
+        with patch.object(approval, "list_pending", return_value={}):
+            self.assertIsNone(journal._interrupted_pending_id(entry, rollback=False))
+        with patch.object(approval, "pending_count", return_value=99):
+            self.assertIsNone(journal._interrupted_pending_id(entry, rollback=False))
+        with patch.object(approval, "pending_count", None):
+            self.assertIsNone(journal._interrupted_pending_id(entry, rollback=False))
+        with patch.object(
+            journal.importlib,
+            "import_module",
+            side_effect=RuntimeError("approval module initialization failed"),
+        ):
+            self.assertIsNone(journal._interrupted_pending_id(entry, rollback=False))
+        missing = ModuleNotFoundError("No module named 'tools.write_approval'")
+        missing.name = "tools.write_approval"
+        with patch.object(journal.importlib, "import_module", side_effect=missing):
+            self.assertEqual(journal._interrupted_pending_id(entry, rollback=False), "")
+
+    def test_interrupted_staging_legacy_capability_and_pending_lookup_are_conservative(self):
+        approval = sys.modules["tools.write_approval"]
+        entry_id = journal.prepare(
+            trigger="manual", reason="legacy host", session_id="session",
+            proposal=skill_proposal("legacy-no-queue"),
+            recovery={"type": "skill_create", "name": "legacy-no-queue"},
+        )
+        with approval_module_absent(), patch.object(
+            journal, "_ABANDONED_PREPARED_SECONDS", 0.0
+        ):
+            journal.reconcile()
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "error")
+
+        guarded_name = "gate-disabled-after-stage"
+        guarded_id = journal.prepare(
+            trigger="manual", reason="unknown historical gate", session_id="session",
+            proposal=skill_proposal(guarded_name),
+            recovery={"type": "skill_create", "name": guarded_name},
+        )
+        FakeHost.stage_pending("skills", {
+            "action": "create", "name": guarded_name,
+            "content": skill_content(guarded_name),
+        })
+        # A gate that was enabled for staging may be disabled before restart.
+        # Current False therefore cannot authorize target-based terminalization.
+        with patch.object(approval, "list_pending", None), patch.object(
+            approval, "write_approval_enabled", return_value=False
+        ), patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            journal.reconcile()
+        self.assertEqual(journal.get_entry(guarded_id)["outcome"], "prepared")
+        self.assertEqual(journal.count_today_applied(), 1)
+
+        FakeHost.stage_writes = True
+        pending = self.run_proposal(skill_proposal("pending-lookup-outage"))
+        with patch.object(approval, "get_pending", side_effect=OSError("offline")):
+            journal.reconcile()
+        self.assertEqual(
+            journal.get_entry(pending["journal_id"])["outcome"], "pending_approval"
+        )
+
+    def test_get_pending_only_host_keeps_interrupted_forward_and_rollback_nonterminal(self):
+        approval = sys.modules["tools.write_approval"]
+        self.assertTrue(callable(approval.get_pending))
+
+        forward_name = "get-pending-only-forward"
+        forward_id = journal.prepare(
+            trigger="manual", reason="forward lost id", session_id="session",
+            proposal=skill_proposal(forward_name),
+            recovery={"type": "skill_create", "name": forward_name},
+        )
+        FakeHost.stage_pending("skills", {
+            "action": "create", "name": forward_name,
+            "content": skill_content(forward_name),
+        })
+
+        rollback_name = "get-pending-only-rollback"
+        rollback_content = skill_content(rollback_name)
+        FakeHost.add_skill(rollback_name, rollback_content)
+        rollback_id = journal.prepare(
+            trigger="manual", reason="rollback lost id", session_id="session",
+            proposal={**skill_proposal(rollback_name), "content": rollback_content},
+            recovery={"type": "skill_create", "name": rollback_name},
+        )
+        journal.finalize(rollback_id, "applied")
+        with patch.object(journal.time, "time", return_value=time.time() - 1000):
+            journal.finalize(rollback_id, "rollback_prepared")
+        FakeHost.stage_pending("skills", {
+            "action": "delete", "name": rollback_name,
+        })
+
+        with patch.object(approval, "list_pending", None), patch.object(
+            approval, "write_approval_enabled", None
+        ), patch.object(approval, "pending_count", None), patch.object(
+            journal, "_ABANDONED_PREPARED_SECONDS", 0.0
+        ):
+            journal.reconcile()
+            self.assertEqual(journal.get_entry(forward_id)["outcome"], "prepared")
+            self.assertEqual(
+                journal.get_entry(rollback_id)["outcome"], "rollback_prepared"
+            )
+            pending_before = len(FakeHost.pending)
+            retry = core.refine_rollback(rollback_id)
+
+        self.assertFalse(retry["success"])
+        self.assertEqual(len(FakeHost.pending), pending_before)
+        self.assertEqual(journal.count_today_applied(), 2)
+
+    def test_staged_response_without_pending_id_stays_prepared_until_reconciled(self):
+        FakeHost.stage_writes = True
+        original_apply = core._apply_skill
+
+        def omit_only_pending_id(proposal):
+            result = original_apply(proposal)
+            self.assertTrue(result["success"])
+            self.assertTrue(result["staged"])
+            result.pop("pending_id")
+            return result
+
+        with patch.object(core, "_apply_skill", side_effect=omit_only_pending_id):
+            result = self.run_proposal(skill_proposal("stage-without-id"))
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "prepared")
+        self.assertIn("journal_id", result)
+        self.assertNotIn("record_id", result)
+        self.assertEqual(result["edits_applied"], 1)
+        entry_id = result["journal_id"]
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        self.assertEqual(journal.count_today_applied(), 1)
+        self.assertNotIn("stage-without-id", ledger.load_stats())
+        [(subsystem, pending_id)] = FakeHost.pending
+
+        core._reconcile_pending()
+        unresolved = journal.get_entry(entry_id)
+        self.assertEqual(unresolved["outcome"], "prepared")
+        self.assertNotIn("pending_id", unresolved)
+        self.assertNotIn("stage-without-id", ledger.load_stats())
+        FakeHost.approve_pending(subsystem, pending_id)
+        core._reconcile_pending()
+        self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
+        self.assertEqual(journal.count_today_applied(), 1)
+        self.assertNotIn("stage-without-id", ledger.load_stats())
+
+    def test_rollback_staged_without_pending_id_stays_rollback_prepared(self):
+        created = self.run_proposal(skill_proposal("rollback-stage-without-id"))
+        FakeHost.stage_writes = True
+        manager = sys.modules["tools.skill_manager_tool"]
+        original_manage = manager.skill_manage
+
+        def omit_only_pending_id(*args, **kwargs):
+            raw = original_manage(*args, **kwargs)
+            value = json.loads(raw)
+            if value.get("staged"):
+                value.pop("pending_id", None)
+            return json.dumps(value)
+
+        with patch.object(manager, "skill_manage", side_effect=omit_only_pending_id):
+            result = core.refine_rollback(created["journal_id"])
+        self.assertFalse(result["success"])
+        self.assertTrue(result["staged"])
+        self.assertEqual(result["outcome"], "rollback_prepared")
+        self.assertEqual(
+            journal.get_entry(created["journal_id"])["outcome"],
+            "rollback_prepared",
+        )
+        [(subsystem, pending_id)] = FakeHost.pending
+        core._reconcile_pending()
+        self.assertEqual(
+            journal.get_entry(created["journal_id"])["outcome"],
+            "rollback_prepared",
+        )
+        repeated = core.refine_rollback(created["journal_id"])
+        self.assertFalse(repeated["success"])
+        self.assertEqual(len(FakeHost.pending), 1)
+        self.assertEqual(next(iter(FakeHost.pending)), (subsystem, pending_id))
+        FakeHost.approve_pending(subsystem, pending_id)
+        core._reconcile_pending()
+        self.assertNotIn("rollback-stage-without-id", FakeHost.skills)
+        self.assertEqual(
+            journal.get_entry(created["journal_id"])["outcome"],
+            "rollback_prepared",
+        )
+
+    def test_interrupted_staging_survives_approval_or_rejection_during_enumeration(self):
+        approval = sys.modules["tools.write_approval"]
+        original_list = approval.list_pending
+        original_finalize = journal.finalize
+        for decision in ("approve", "reject"):
+            with self.subTest(decision=decision):
+                name = f"enumeration-race-{decision}"
+                FakeHost.stage_writes = True
+
+                def fail_pending(entry_id, outcome, **kwargs):
+                    if outcome == "pending_approval":
+                        raise OSError("lost pending transition")
+                    return original_finalize(entry_id, outcome, **kwargs)
+
+                with patch.object(journal, "finalize", side_effect=fail_pending):
+                    result = self.run_proposal(skill_proposal(name))
+                pending_id = result["result"]["pending_id"]
+
+                def resolve_after_snapshot(subsystem):
+                    records = original_list(subsystem)
+                    if decision == "approve":
+                        FakeHost.approve_pending(subsystem, pending_id)
+                    else:
+                        FakeHost.reject_pending(subsystem, pending_id)
+                    return records
+
+                with patch.object(approval, "list_pending", side_effect=resolve_after_snapshot), patch.object(
+                    approval, "pending_count", return_value=1
+                ):
+                    journal.reconcile()
+                self.assertEqual(
+                    journal.get_entry(result["journal_id"])["outcome"],
+                    "prepared",
+                )
+                journal.reconcile()
+                self.assertEqual(
+                    journal.get_entry(result["journal_id"])["outcome"],
+                    "prepared",
+                )
+
+    def test_interrupted_rollback_does_not_adopt_a_new_queue_id(self):
+        FakeHost.stage_writes = True
+        forward = self.run_proposal(skill_proposal("two-approval-phases"))
+        forward_id = journal.get_entry(forward["journal_id"])["pending_id"]
+        FakeHost.approve_pending("skills", forward_id)
+        core._reconcile_pending()
+        original_finalize = journal.finalize
+
+        def fail_pending(entry_id, outcome, **kwargs):
+            if outcome == "pending_rollback":
+                raise OSError("lost rollback transition")
+            return original_finalize(entry_id, outcome, **kwargs)
+
+        with patch.object(journal, "finalize", side_effect=fail_pending):
+            rollback = core.refine_rollback(forward["journal_id"])
+        rollback_id = rollback["pending_id"]
+        self.assertNotEqual(forward_id, rollback_id)
+        core._reconcile_pending()
+        unresolved = journal.get_entry(forward["journal_id"])
+        self.assertEqual(unresolved["outcome"], "rollback_prepared")
+        self.assertNotEqual(unresolved.get("pending_id"), rollback_id)
 
     def test_matching_target_does_not_bypass_unresolved_approval(self):
         name = "already-matching"
@@ -3852,7 +4790,8 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(
             journal.get_entry(applied["journal_id"])["outcome"], "rollback_prepared"
         )
-        retried = core.refine_rollback(applied["journal_id"])
+        with approval_module_absent():
+            retried = core.refine_rollback(applied["journal_id"])
         self.assertTrue(retried["success"])
         self.assertEqual(journal.get_entry(applied["journal_id"])["outcome"], "rolled_back")
 
@@ -11282,7 +12221,9 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         edits permanently.
         """
         entry_id = self._prepared_entry_that_never_landed()
-        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+        with patch.object(
+            journal, "_ABANDONED_PREPARED_SECONDS", 0.0
+        ), approval_module_absent():
             journal.reconcile()
         entry = journal.get_entry(entry_id)
         self.assertEqual(entry["outcome"], "error")
@@ -11337,7 +12278,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             journal.reconcile()
         entry = journal.get_entry(entry_id)
         self.assertEqual(entry["outcome"], "prepared")
-        self.assertTrue(journal.is_reversible(entry))
+        self.assertFalse(journal.is_reversible(entry))
         self.assertEqual(journal.count_today_applied(), 1)
 
     def test_prepared_is_not_abandoned_while_another_pass_holds_the_lock(self):
@@ -11361,15 +12302,19 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         thread.start()
         try:
             self.assertTrue(holding.wait(10))
-            with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+            with patch.object(
+                journal, "_ABANDONED_PREPARED_SECONDS", 0.0
+            ), approval_module_absent():
                 journal.reconcile()
             self.assertEqual(journal.get_entry(entry_id)["outcome"], "prepared")
         finally:
             release.set()
             thread.join(timeout=10)
         self.assertFalse(thread.is_alive())
-        # Once no other pass is mutating, the same call resolves the record.
-        with patch.object(journal, "_ABANDONED_PREPARED_SECONDS", 0.0):
+        # On a legacy host proven unable to stage, target proof can resolve it.
+        with patch.object(
+            journal, "_ABANDONED_PREPARED_SECONDS", 0.0
+        ), approval_module_absent():
             journal.reconcile()
         self.assertEqual(journal.get_entry(entry_id)["outcome"], "error")
 
@@ -12978,12 +13923,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(result["llm_meta"]["reported_model"], "final")
         self.assertEqual(result["llm_meta"]["output_mode"], "json_mode")
 
-    def test_stale_lock_and_prompt_note_reads_retry_transient_contention(self):
+    def test_dead_lock_lease_and_prompt_note_reads_retry_transient_contention(self):
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())
-        lock_path.write_text(
-            json.dumps({"pid": os.getpid() + 10_000_000, "created": time.time(), "token": "dead"}),
-            encoding="utf-8",
-        )
+        dead_lease = journal._new_lock_lease()
+        dead_payload = journal._lock_payload("dead-retry", dead_lease)
+        dead_lease.close()
+        lock_path.write_text(dead_payload, encoding="utf-8")
         with patch.object(journal, "_retry_on_contention", wraps=journal._retry_on_contention) as retry:
             journal._try_clear_stale_lock(lock_path)
         self.assertFalse(lock_path.exists())
@@ -13015,7 +13960,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         journal.finalize(entry_id, "applied")
         with patch.object(journal.time, "time", return_value=time.time() - 1000):
             journal.finalize(entry_id, "rollback_prepared")
-        journal.reconcile()
+        with approval_module_absent():
+            journal.reconcile()
         self.assertEqual(journal.get_entry(entry_id)["outcome"], "applied")
 
         unknown_id = journal.prepare(
@@ -13051,14 +13997,17 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 release.wait(5)
         worker = threading.Thread(target=holder)
         worker.start()
+        approval = sys.modules["tools.write_approval"]
         try:
             self.assertTrue(holding.wait(5))
-            journal.reconcile()
+            with approval_module_absent():
+                journal.reconcile()
             self.assertEqual(journal.get_entry(entry_id)["outcome"], "rollback_prepared")
         finally:
             release.set()
             worker.join(5)
-        journal.reconcile()
+        with approval_module_absent():
+            journal.reconcile()
         self.assertEqual(journal.get_entry(entry_id)["outcome"], "applied")
 
     def test_staged_ledger_records_cannot_replace_applied_artifacts(self):
