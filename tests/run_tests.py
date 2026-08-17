@@ -590,6 +590,16 @@ class RefineTests(unittest.TestCase):
         self.assertNotIn(assistant_marker, json.dumps(evidence))
 
         FakeHost.make_db([
+            ("session", "assistant", assistant_marker, "", timestamp - 2, 1),
+            ("session", "session_meta", "route metadata", "", timestamp - 1, 1),
+            ("session", "user", marker, "", timestamp, 1),
+        ])
+        for limit in (1, 2, 3):
+            with self.subTest(metadata_between_turns=True, limit=limit):
+                evidence = core.collect_evidence(session_id="session", limit=limit)
+                self.assertEqual(evidence["user_corrections"], [{"snippet": marker}])
+
+        FakeHost.make_db([
             ("session", "user", marker, "", timestamp, 1),
             ("session", "assistant", assistant_marker, "", timestamp, 1),
         ])

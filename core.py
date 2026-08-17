@@ -786,16 +786,38 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             sql += f" AND (s.source IS NULL OR LOWER(s.source) NOT IN ({placeholders}))"
             params.extend(skipped_sources)
         sql += " ORDER BY m.timestamp DESC, m.rowid DESC LIMIT ?"
-        params.append(limit + 1)
+        params.append(limit)
         rows = connection.execute(sql, tuple(params)).fetchall()
         chronological_rows = list(reversed(rows))
-        has_context_row = len(chronological_rows) > limit
+        previous_was_assistant_response = False
+        if chronological_rows:
+            oldest = chronological_rows[0]
+            predecessor = connection.execute(
+                "SELECT role, CASE WHEN TRIM(COALESCE(content, '')) <> '' "
+                "THEN 1 ELSE 0 END AS has_content FROM messages "
+                "WHERE session_id = ? AND active = 1 "
+                "AND role IN ('user', 'assistant') "
+                "AND (timestamp < ? OR (timestamp = ? AND rowid < ?)) "
+                "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                (
+                    resolved,
+                    oldest["timestamp"],
+                    oldest["timestamp"],
+                    oldest["message_order"],
+                ),
+            ).fetchone()
+            if predecessor:
+                predecessor_role = _one_line(
+                    scrub_text(str(predecessor["role"] or ""))
+                )[:32].lower()
+                previous_was_assistant_response = bool(
+                    predecessor_role == "assistant" and predecessor["has_content"]
+                )
         messages: List[Dict[str, Any]] = []
         tool_errors: List[Dict[str, Any]] = []
         corrections: List[Dict[str, Any]] = []
         error_items: List[Dict[str, Any]] = []
-        previous_was_assistant_response = False
-        for index, row in enumerate(chronological_rows):
+        for row in chronological_rows:
             # Every string from SQLite is scrubbed at this single extraction
             # boundary so evidence, journals, and returned tool results inherit it.
             role = _one_line(scrub_text(str(row["role"] or "")))[:32].lower()
@@ -805,11 +827,6 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             tool_name = _one_line(
                 scrub_text(str(row["tool_name"] or ""))
             )[:120]
-            if has_context_row and index == 0:
-                previous_was_assistant_response = bool(
-                    role == "assistant" and content.strip()
-                )
-                continue
             shown = content[:400] + ("…" if len(content) > 400 else "")
             messages.append({"role": role, "content": shown, "tool_name": tool_name})
             if role == "tool" and _is_error_content(content):
@@ -831,9 +848,10 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 has_prior_assistant_response=previous_was_assistant_response,
             ):
                 corrections.append({"snippet": content[:300]})
-            previous_was_assistant_response = bool(
-                role == "assistant" and content.strip()
-            )
+            if role == "assistant":
+                previous_was_assistant_response = bool(content.strip())
+            elif role == "user":
+                previous_was_assistant_response = False
         return {
             "messages": messages[-limit:],
             "error_count": len(tool_errors),
