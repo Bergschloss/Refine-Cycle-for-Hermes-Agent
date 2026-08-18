@@ -753,6 +753,10 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
         _reviewer_used_json_mode = False
         try:
             result = llm.complete_structured(
+                instructions=(
+                    "Assess this trajectory only for a durable lesson worth persisting. "
+                    "Return the required JSON object."
+                ),
                 system_prompt=scrub_text(REVIEWER_FALLBACK_SYSTEM_PROMPT),
                 input=[PluginLlmTextInput(text=scrub_text(instructions))],
                 json_schema=sanitize(REVIEWER_FALLBACK_SCHEMA),
@@ -790,6 +794,10 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
             call_started = time.time()
             try:
                 result = llm.complete_structured(
+                    instructions=(
+                        "Assess this trajectory only for a durable lesson worth persisting. "
+                        "Return the required JSON object."
+                    ),
                     system_prompt=scrub_text(REVIEWER_FALLBACK_SYSTEM_PROMPT)
                     + "\nReply with one JSON object only, without Markdown fences.",
                     input=[PluginLlmTextInput(text=scrub_text(instructions))],

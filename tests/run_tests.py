@@ -5838,6 +5838,8 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(result["rationale"], "A durable lesson exists.")
         self.assertEqual(result["instructions"], "Persist the retry pattern.")
         self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0]["instructions"].strip())
+        self.assertTrue(calls[1]["instructions"].strip())
         self.assertTrue(calls[1].get("json_mode"))
 
     def test_reviewer_decline_is_a_sanitized_no_op_without_application(self):
