@@ -7,7 +7,9 @@ venv/
 
 # Runtime data (may contain trajectory/session data)
 refine_journal.jsonl
+refine_journal.jsonl.pre-update-*
 skill_stats.json
+skill_stats.json.pre-update-*
 prompt_notes.json
 model_override.json
 backups/
