@@ -142,7 +142,8 @@ def normalize_error(content: str) -> str:
     # true terminal suffix; tool-controlled text before a later error detail
     # must not be able to hide that distinguishing detail.
     text = re.sub(
-        r"\s*\[Tool loop warning:\s*repeated_exact_failure_warning;\s*count=\d+\]\s*$",
+        r"\s*\[Tool loop warning:\s*repeated_exact_failure_warning;"
+        r"[^\]]*\]\s*$",
         "",
         text,
         flags=re.IGNORECASE,

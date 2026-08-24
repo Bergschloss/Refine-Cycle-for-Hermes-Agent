@@ -1473,6 +1473,35 @@ class RefineTests(unittest.TestCase):
             patterns.fingerprint("http", "permission denied [Tool loop warning: repeated_exact_failure_warning; count=2]"),
         )
 
+    def test_full_host_loop_warning_suffix_strips_from_terminal_suffix(self):
+        """The host appends prose after 'count=N' — the suffix must still strip.
+
+        Real gateway output is '... [Tool loop warning:
+        repeated_exact_failure_warning; count=2; terminal has failed 2 times
+        with identical arguments. ... instead of retrying it]'. The old regex
+        stopped at 'count=N]' so the prose survived normalization, split one
+        repeated failure into two fingerprints and the signal gate never saw
+        count=2 (live pass 2026-08-24). A marker followed by more text stays
+        distinguishing.
+        """
+        base = ("{output: path: line n: zzq-probe: command not found, "
+                "exit_code: n, error: null}")
+        full_suffix = (
+            " [Tool loop warning: repeated_exact_failure_warning; count=2; "
+            "terminal has failed 2 times with identical arguments. This looks "
+            "like a loop; inspect the error and change strategy instead of "
+            "retrying it]"
+        )
+        self.assertEqual(
+            patterns.normalize_error(base + full_suffix),
+            patterns.normalize_error(base),
+        )
+        # Mid-text markers keep hiding later details impossible.
+        self.assertNotEqual(
+            patterns.normalize_error(base + full_suffix + " tail detail"),
+            patterns.normalize_error(base),
+        )
+
     def test_windows_missing_file_patterns_classified_as_errors(self):
         """Wave 2.3: Windows missing-file messages must be classified as errors."""
         cases = [
