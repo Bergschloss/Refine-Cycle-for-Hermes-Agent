@@ -2088,7 +2088,6 @@ def _handle_no_signal(
     the gate and the primary proposal call should proceed.
     """
     _signal_path = "no_signal"
-    _signal_path = "no_signal"
     should_review = (
         config.reviewer_fallback_enabled()
         and len(evidence.get("messages", [])) >= config.reviewer_min_messages()
