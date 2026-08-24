@@ -196,6 +196,9 @@ def scrub_text(text: str) -> str:
     if not text:
         return text
 
+    # Normalize fullwidth/compatibility forms before matching (P0 02-01 fix)
+    text = unicodedata.normalize("NFKC", text)
+
     # Reject forged markers with a token suffix before preserving any canonical
     # field. The marker is not evidence that untrusted trailing text is safe.
     text = _FORGED_SECRET_MARKER_FIELD.sub(
