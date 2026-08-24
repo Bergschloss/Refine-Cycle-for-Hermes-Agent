@@ -2330,7 +2330,8 @@ def _refine_once(
     if llm is None:
         failure_message = (
             "No invocation-bound host LLM is available; refine did not send "
-            "trajectory evidence."
+            "trajectory evidence. If this host lacks the invocation-route "
+            "core patch, run install.sh from the plugin directory."
         )
         entry_id = _journal_nonmutation(
             trigger=trigger,
