@@ -1024,6 +1024,7 @@ def register(ctx) -> None:
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
+    _warn_if_core_patch_missing()
     _warn_on_register()
 
 
@@ -1070,6 +1071,36 @@ def _resolve_command_name() -> str:
 def _command_display_name() -> str:
     """The slash name to render in usage hints, e.g. '/refine' or '/refine-cycle'."""
     return "/" + _COMMAND_NAME
+
+
+
+def _core_patch_present() -> bool:
+    """True when the installed Hermes core carries the invocation-route patch.
+
+    Checked by marker symbol; import failure means "cannot know" -> False so
+    the registration warning still fires and the user can verify manually.
+    """
+    try:
+        from hermes_cli import plugins as host_plugins
+        return hasattr(host_plugins, "plugin_invocation_scope")
+    except Exception:
+        return False
+
+
+def _warn_if_core_patch_missing() -> None:
+    """One-line warning with the exact fix command when the core is unpatched.
+
+    Without the invocation-route patch refine_run cannot reach a bound LLM
+    route: every run ends llm_invocation_unavailable. Silent absence looks
+    identical to "no signal", so this is warned at registration.
+    """
+    if _core_patch_present():
+        return
+    logger.warning(
+        "Refine: Hermes core lacks the invocation-route patch; refine_run "
+        "will stop with llm_invocation_unavailable. Run install.sh from the "
+        "plugin directory (or set plugins.entries.refine.auto_apply_core_patch=true)."
+    )
 
 
 def _warn_on_register() -> None:
