@@ -17,9 +17,11 @@ from agent.plugin_llm import PluginLlm
 try:
     from . import config, journal, ledger, llm as _llm, patterns
     from .sanitization import sanitize, scrub_text
+    from . import trace as _trace
 except ImportError:
     import config, journal, ledger, llm as _llm, patterns  # noqa: F811
     from sanitization import sanitize, scrub_text  # noqa: F811
+    _trace = None
 
 logger = logging.getLogger(__name__)
 
@@ -2407,6 +2409,21 @@ def _refine_once(
         and not _run_target
         and _run_target_source in ("unknown", "host_default", "command", "config")
     )
+
+    # Trace emission at actual invocation boundary — uses only fields that host exposes
+    if _trace is not None:
+        _trace.emit_trace(
+            _trace.build_trace(
+                session_id=session_id,
+                source="tool" if not auto else "autorun",
+                operation="refine_run",
+                route_state="invocation_bound" if _invocation_bound else "llm_invocation_unavailable",
+                provider=getattr(llm, "provider", None),
+                model=getattr(llm, "model", None),
+                output_tokens=None,
+            ),
+            journal_append=None,
+        )
 
     _min_signal_required = config.min_signal_required()
     _min_pattern_count = config.min_pattern_count()
