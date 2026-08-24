@@ -1,6 +1,7 @@
 """Recursive credential redaction shared by evidence and persistence paths."""
 
 import re
+import unicodedata
 from typing import Any
 
 _REDACTED = "[REDACTED]"
