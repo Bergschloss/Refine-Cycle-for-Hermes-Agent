@@ -2070,8 +2070,6 @@ def _handle_no_signal(
     llm: Any,
     evidence: Dict[str, Any],
     evidence_text: str,
-    error_patterns: List[Dict[str, Any]],
-    corrections: List[Dict[str, Any]],
     session: str,
     trigger: str,
     safe_reason: str,
@@ -2488,7 +2486,6 @@ def _refine_once(
     ):
         _handled = _handle_no_signal(
             llm=llm, evidence=evidence, evidence_text=evidence_text,
-            error_patterns=error_patterns, corrections=corrections,
             session=session, trigger=trigger, safe_reason=safe_reason,
             min_pattern_count=_min_pattern_count, run_target=_run_target,
             run_target_source=_run_target_source,
