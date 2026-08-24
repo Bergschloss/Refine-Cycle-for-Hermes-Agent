@@ -10,7 +10,7 @@ import time
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from agent.plugin_llm import PluginLlm
 
@@ -2038,6 +2038,211 @@ def _reviewer_cooldown_elapsed() -> bool:
     return time.time() - last_review >= config.reviewer_cooldown_minutes() * 60
 
 
+def _render_evidence_text(evidence: Dict[str, Any]) -> str:
+    """Render collected messages into the prompt evidence block.
+
+    Every role is untrusted control-text-in-waiting: tool metadata, assistant
+    echoes of tool output, and user/system records all get the same
+    plugin-owned boundary plus tag escaping, so no forged <system> or closing
+    boundary can become structure during later truncation. Escaping happens
+    only here, on the prompt-rendering path — never on the fingerprinting
+    path — so pattern history is unaffected.
+    """
+    lines: List[str] = []
+    for message in evidence.get("messages", []):
+        role = _one_line(message["role"])[:32].lower()
+        if role not in {"user", "assistant", "tool", "system"}:
+            role = "unknown"
+        content = _one_line(str(message["content"])[:400])
+        if role == "tool":
+            tool_name = _one_line(message.get("tool_name", ""))[:120]
+            record = f"tool={tool_name or '?'} | {content}"
+        else:
+            record = content
+        safe_record = _escape_foreign_tags(_strip_untrusted_tags(record))
+        lines.append(
+            f"[{role}] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
+        )
+    return "\n".join(lines)
+
+
+def _handle_no_signal(
+    llm: Any,
+    evidence: Dict[str, Any],
+    evidence_text: str,
+    error_patterns: List[Dict[str, Any]],
+    corrections: List[Dict[str, Any]],
+    session: str,
+    trigger: str,
+    safe_reason: str,
+    min_pattern_count: int,
+    run_target: Dict[str, str],
+    run_target_source: str,
+    run_target_issues: Any,
+    run_target_unusable: bool,
+) -> Union[Dict[str, Any], Tuple[str, str]]:
+    """Handle a gate-closed pass: reviewer fallback or journaled no_op.
+
+    Returns either a response dict that the caller must return unchanged, or
+    ("reviewer_instructions", "reviewer_approved") when the reviewer opened
+    the gate and the primary proposal call should proceed.
+    """
+    _signal_path = "no_signal"
+    _signal_path = "no_signal"
+    should_review = (
+        config.reviewer_fallback_enabled()
+        and len(evidence.get("messages", [])) >= config.reviewer_min_messages()
+        and _reviewer_cooldown_elapsed()
+    )
+    if should_review:
+        reviewer = _llm.review_fallback(llm, evidence_text, target=run_target)
+        reviewer_call_meta = _llm.last_call_meta()
+        # Reviewer fallback is a single bounded call (schema fallback is
+        # transport fallback, not a second reviewer attempt). Keep the
+        # attempt telemetry consistent with primary proposal calls.
+        reviewer_llm_meta = {
+            "requested_provider": run_target.get("provider", ""),
+            "requested_model": run_target.get("model", ""),
+            "target_source": run_target_source,
+            "primary_attempts": 1,
+            **{k: v for k, v in reviewer_call_meta.items() if k in (
+                "reported_provider", "reported_model", "latency_ms",
+                "output_tokens", "output_mode"
+            )},
+        }
+        if run_target_issues:
+            reviewer_llm_meta["target_issues"] = run_target_issues
+        rationale = scrub_text(str(reviewer.get("rationale", "")))
+        decision = "approved" if reviewer.get("should_refine") else "declined"
+        reviewer_reason = f"Reviewer {decision}: {rationale}"
+        reviewer_failure = scrub_text(str(reviewer.get("failure", "")).strip())
+        reviewer_target_issue = bool(
+            not reviewer_failure
+            and run_target_unusable
+            and not reviewer.get("should_refine")
+        )
+        reviewer_outcome = (
+            (
+                "llm_incomplete"
+                if reviewer_failure in {"malformed", "truncated", "no_final_text"}
+                else "llm_error"
+            )
+            if reviewer_failure
+            else ("target_issue" if reviewer_target_issue else "no_op")
+        )
+        reviewer_error = (
+            (
+                "The reviewer returned an incomplete or malformed verdict."
+                if reviewer_failure in {"malformed", "truncated", "no_final_text"}
+                else (
+                    "The host trust policy denied the reviewer model call."
+                    if reviewer_failure == "llm_trust_denied"
+                    else "The reviewer model call failed."
+                )
+            )
+            if reviewer_failure
+            else (
+                "The configured refine model target is unusable."
+                if reviewer_target_issue
+                else ""
+            )
+        )
+        reviewer_entry_id = _journal_nonmutation(
+            trigger="reviewer",
+            reason=reviewer_reason,
+            session_id=session,
+            proposal={
+                "action": "no_op",
+                "reason": reviewer_reason,
+                "expected_outcome": "",
+            },
+            outcome=reviewer_outcome,
+            error=reviewer_error,
+            llm_meta=reviewer_llm_meta,
+        )
+        if not reviewer_entry_id:
+            return {
+                "success": False,
+                "message": "Reviewer decision could not be journaled.",
+                "llm_called": True,
+                "reviewer": decision,
+                "evidence": evidence,
+                "reversible": False,
+            }
+        if reviewer_failure:
+            return {
+                "success": False,
+                "outcome": reviewer_outcome,
+                "failure": reviewer_failure,
+                "message": reviewer_error,
+                "journal_id": reviewer_entry_id,
+                "llm_called": True,
+                "reviewer": "failed",
+                "evidence": evidence,
+                "llm_meta": reviewer_llm_meta,
+                "reversible": False,
+            }
+        if not reviewer.get("should_refine"):
+            proposal = {
+                "action": "no_op",
+                "reason": reviewer_reason,
+                "expected_outcome": "",
+            }
+            if reviewer_target_issue:
+                return {
+                    "success": False,
+                    "outcome": "target_issue",
+                    "failure": "target_configuration",
+                    "message": "The configured refine model target is unusable.",
+                    "journal_id": reviewer_entry_id,
+                    "proposal": proposal,
+                    "llm_called": True,
+                    "reviewer": "declined",
+                    "evidence": evidence,
+                    "llm_meta": reviewer_llm_meta,
+                    "reversible": False,
+                }
+            return {
+                "success": True,
+                "message": f"No actionable improvement found. {reviewer_reason}",
+                "journal_id": reviewer_entry_id,
+                "proposal": proposal,
+                "llm_called": True,
+                "reviewer": "declined",
+                "evidence": evidence,
+                "reversible": False,
+            }
+        reviewer_instructions = scrub_text(str(reviewer.get("instructions", "")))
+        return reviewer_instructions, "reviewer_approved"
+    else:
+        proposal = {
+            "action": "no_op",
+            "reason": f"No repeated failure (min {min_pattern_count}x) and no explicit correction.",
+            "expected_outcome": "",
+        }
+        entry_id = _journal_nonmutation(
+            trigger=trigger,
+            reason=safe_reason or proposal["reason"],
+            session_id=session,
+            proposal=proposal,
+            outcome="no_op",
+        )
+        if not entry_id:
+            return {
+                "success": False,
+                "message": "No edit was needed, but the journal write failed.",
+                "evidence": evidence,
+            }
+        return {
+            "success": True,
+            "message": f"No actionable improvement found. {proposal['reason']}",
+            "journal_id": entry_id,
+            "llm_called": False,
+            "evidence": evidence,
+            "reversible": False,
+        }
+
+
 def _refine_once(
     llm: Optional[PluginLlm],
     *,
@@ -2273,45 +2478,7 @@ def _refine_once(
     )
     evidence["error_patterns"] = error_patterns
     corrections = evidence.get("user_corrections", [])
-    lines: List[str] = []
-    for message in evidence.get("messages", []):
-        role = _one_line(message["role"])[:32].lower()
-        if role not in {"user", "assistant", "tool", "system"}:
-            role = "unknown"
-        content = _one_line(str(message["content"])[:400])
-        if role == "tool":
-            # Tool metadata is untrusted too: keep the complete physical record
-            # inside one plugin-owned boundary after removing forged variants
-            # of that boundary, then escaping every remaining tag so no other
-            # markup (<system>, <instruction>, ...) can be parsed as a tag at
-            # all. Escaping happens only here, on the prompt-rendering path —
-            # never on the fingerprinting path — so pattern history is unaffected.
-            tool_name = _one_line(message.get("tool_name", ""))[:120]
-            record = f"tool={tool_name or '?'} | {content}"
-            safe_record = _escape_foreign_tags(_strip_untrusted_tags(record))
-            lines.append(
-                f"[tool] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
-            )
-        elif role == "assistant":
-            # An assistant reply routinely echoes or summarizes tool/web output
-            # the host already read this turn. Trusting it unconditionally lets
-            # attacker text laundered through one echo read back as the agent's
-            # own trusted observation. Give it the identical boundary and
-            # escaping tool records get, so "not instructions" applies to it too.
-            safe_record = _escape_foreign_tags(_strip_untrusted_tags(content))
-            lines.append(
-                f"[assistant] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
-            )
-        else:
-            # Every historical role is evidence supplied to a second model, not
-            # trusted control text. Wrap and escape user/system/unknown records
-            # just like assistant/tool records so a forged closing boundary or
-            # <system> tag can never become structure during later truncation.
-            safe_record = _escape_foreign_tags(_strip_untrusted_tags(content))
-            lines.append(
-                f"[{role}] <untrusted_tool_result>{safe_record}</untrusted_tool_result>"
-            )
-    evidence_text = "\n".join(lines)
+    evidence_text = _render_evidence_text(evidence)
     proposal_context = safe_reason
     reviewer_context = ""
     _signal_path = "gate_disabled"
@@ -2319,160 +2486,19 @@ def _refine_once(
         error_patterns, corrections, min_count=_min_pattern_count,
         session_cap=config.cross_session_max_sessions(),
     ):
-        _signal_path = "no_signal"
-        should_review = (
-            config.reviewer_fallback_enabled()
-            and len(evidence.get("messages", [])) >= config.reviewer_min_messages()
-            and _reviewer_cooldown_elapsed()
+        _handled = _handle_no_signal(
+            llm=llm, evidence=evidence, evidence_text=evidence_text,
+            error_patterns=error_patterns, corrections=corrections,
+            session=session, trigger=trigger, safe_reason=safe_reason,
+            min_pattern_count=_min_pattern_count, run_target=_run_target,
+            run_target_source=_run_target_source,
+            run_target_issues=_run_target_issues,
+            run_target_unusable=_run_target_unusable,
         )
-        if should_review:
-            reviewer = _llm.review_fallback(llm, evidence_text, target=_run_target)
-            reviewer_call_meta = _llm.last_call_meta()
-            # Reviewer fallback is a single bounded call (schema fallback is
-            # transport fallback, not a second reviewer attempt). Keep the
-            # attempt telemetry consistent with primary proposal calls.
-            reviewer_llm_meta = {
-                "requested_provider": _run_target.get("provider", ""),
-                "requested_model": _run_target.get("model", ""),
-                "target_source": _run_target_source,
-                "primary_attempts": 1,
-                **{k: v for k, v in reviewer_call_meta.items() if k in (
-                    "reported_provider", "reported_model", "latency_ms",
-                    "output_tokens", "output_mode"
-                )},
-            }
-            if _run_target_issues:
-                reviewer_llm_meta["target_issues"] = _run_target_issues
-            rationale = scrub_text(str(reviewer.get("rationale", "")))
-            decision = "approved" if reviewer.get("should_refine") else "declined"
-            reviewer_reason = f"Reviewer {decision}: {rationale}"
-            reviewer_failure = scrub_text(str(reviewer.get("failure", "")).strip())
-            reviewer_target_issue = bool(
-                not reviewer_failure
-                and _run_target_unusable
-                and not reviewer.get("should_refine")
-            )
-            reviewer_outcome = (
-                (
-                    "llm_incomplete"
-                    if reviewer_failure in {"malformed", "truncated", "no_final_text"}
-                    else "llm_error"
-                )
-                if reviewer_failure
-                else ("target_issue" if reviewer_target_issue else "no_op")
-            )
-            reviewer_error = (
-                (
-                    "The reviewer returned an incomplete or malformed verdict."
-                    if reviewer_failure in {"malformed", "truncated", "no_final_text"}
-                    else (
-                        "The host trust policy denied the reviewer model call."
-                        if reviewer_failure == "llm_trust_denied"
-                        else "The reviewer model call failed."
-                    )
-                )
-                if reviewer_failure
-                else (
-                    "The configured refine model target is unusable."
-                    if reviewer_target_issue
-                    else ""
-                )
-            )
-            reviewer_entry_id = _journal_nonmutation(
-                trigger="reviewer",
-                reason=reviewer_reason,
-                session_id=session,
-                proposal={
-                    "action": "no_op",
-                    "reason": reviewer_reason,
-                    "expected_outcome": "",
-                },
-                outcome=reviewer_outcome,
-                error=reviewer_error,
-                llm_meta=reviewer_llm_meta,
-            )
-            if not reviewer_entry_id:
-                return {
-                    "success": False,
-                    "message": "Reviewer decision could not be journaled.",
-                    "llm_called": True,
-                    "reviewer": decision,
-                    "evidence": evidence,
-                    "reversible": False,
-                }
-            if reviewer_failure:
-                return {
-                    "success": False,
-                    "outcome": reviewer_outcome,
-                    "failure": reviewer_failure,
-                    "message": reviewer_error,
-                    "journal_id": reviewer_entry_id,
-                    "llm_called": True,
-                    "reviewer": "failed",
-                    "evidence": evidence,
-                    "llm_meta": reviewer_llm_meta,
-                    "reversible": False,
-                }
-            if not reviewer.get("should_refine"):
-                proposal = {
-                    "action": "no_op",
-                    "reason": reviewer_reason,
-                    "expected_outcome": "",
-                }
-                if reviewer_target_issue:
-                    return {
-                        "success": False,
-                        "outcome": "target_issue",
-                        "failure": "target_configuration",
-                        "message": "The configured refine model target is unusable.",
-                        "journal_id": reviewer_entry_id,
-                        "proposal": proposal,
-                        "llm_called": True,
-                        "reviewer": "declined",
-                        "evidence": evidence,
-                        "llm_meta": reviewer_llm_meta,
-                        "reversible": False,
-                    }
-                return {
-                    "success": True,
-                    "message": f"No actionable improvement found. {reviewer_reason}",
-                    "journal_id": reviewer_entry_id,
-                    "proposal": proposal,
-                    "llm_called": True,
-                    "reviewer": "declined",
-                    "evidence": evidence,
-                    "reversible": False,
-                }
-            reviewer_instructions = scrub_text(str(reviewer.get("instructions", "")))
-            reviewer_context = reviewer_instructions
-            _signal_path = "reviewer_approved"
-        else:
-            proposal = {
-                "action": "no_op",
-                "reason": f"No repeated failure (min {_min_pattern_count}x) and no explicit correction.",
-                "expected_outcome": "",
-            }
-            entry_id = _journal_nonmutation(
-                trigger=trigger,
-                reason=safe_reason or proposal["reason"],
-                session_id=session,
-                proposal=proposal,
-                outcome="no_op",
-            )
-            if not entry_id:
-                return {
-                    "success": False,
-                    "message": "No edit was needed, but the journal write failed.",
-                    "evidence": evidence,
-                }
-            return {
-                "success": True,
-                "message": f"No actionable improvement found. {proposal['reason']}",
-                "journal_id": entry_id,
-                "llm_called": False,
-                "evidence": evidence,
-                "reversible": False,
-            }
+        if isinstance(_handled, dict):
+            return _handled
+        reviewer_context, _signal_path = _handled
+
 
     if _signal_path == "gate_disabled" and _min_signal_required:
         _signal_path = "gate_opened"
