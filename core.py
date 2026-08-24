@@ -322,7 +322,14 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
         | (?:always\s+)?include\s+both\s+path\s+and\s+content\s+fields?
         | (?:always\s+)?include\s+both\s+required\s+fields?\s*:\s*path\s+and\s+content
         | ask\s+before\s+retrying(?:\s+(?:a|the)\s+third\s+time)?
-        | stop\s+retrying\s+and\s+ask\s+for\s+(?:the\s+)?(?:correct\s+)?(?:command|clarification|input|help)
+        | stop\s+(?:retrying\s+)?and\s+ask\s+(?:
+            for\s+(?:the\s+)?(?:correct\s+|right\s+|intended\s+)?(?:command|clarification|input|help)
+          | what\s+(?:the\s+)?(?:correct|right|intended)\s+
+            (?:command|input|path|value)(?:\s+(?:is|was))?
+          )
+          (?:\s+instead\s+of\s+(?:retrying|guessing|assuming|proceeding|continuing)
+            (?:\s+(?:the\s+|this\s+|that\s+|a\s+)?(?:same\s+|exact\s+|correct\s+|right\s+)?
+              (?:command|request|call|step|proposal|action)|\s+it)?)?
         | check\s+timing\s+assumptions\s+before\s+rerunning
         | mention\s+which\s+sections\s+were\s+skipped
     )\.?
