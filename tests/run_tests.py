@@ -9422,6 +9422,25 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             plugin_init._warn_on_register()
         self.assertTrue(any("journal_dir" in msg for msg in cm.output))
 
+    def test_command_name_falls_back_when_core_ships_builtin_refine(self):
+        """Newer cores own /refine; the plugin must register under a free name."""
+        original = plugin_init._COMMAND_NAME
+        try:
+            fake = types.SimpleNamespace(resolve_command=lambda name: object())
+            with patch.dict(sys.modules, {"hermes_cli.commands": fake}):
+                self.assertEqual(plugin_init._resolve_command_name(), "refine-cycle")
+                self.assertEqual(plugin_init._command_display_name(), "/refine-cycle")
+            # Usage hints render the name that actually answers on this host.
+            self.assertIn(plugin_init._command_display_name(),
+                          plugin_init._handle_refine_command("session"))
+            # A host without the built-in keeps the plain name.
+            fake_free = types.SimpleNamespace(resolve_command=lambda name: None)
+            with patch.dict(sys.modules, {"hermes_cli.commands": fake_free}):
+                self.assertEqual(plugin_init._resolve_command_name(), "refine")
+                self.assertEqual(plugin_init._command_display_name(), "/refine")
+        finally:
+            plugin_init._COMMAND_NAME = original
+
     def test_auto_enabled_defaults_to_true(self):
         self.assertTrue(config.auto_enabled())
 

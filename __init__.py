@@ -410,8 +410,8 @@ def _handle_model_subcommand(remainder: str) -> str:
         if not remainder:
             return "model: active host invocation (bound route; stored overrides are ignored)"
         return (
-            "❌ Refine uses the active host invocation model; /refine model cannot "
-            "change a bound route."
+            "❌ Refine uses the active host invocation model; "
+            f"{_command_display_name()} model cannot change a bound route."
         )
     trust_model = config.llm_allow_model_override()
     trust_prov = config.llm_allow_provider_override()
@@ -572,7 +572,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         dry_session = ""
         if dry_reason == _SESSION_SUBCOMMAND:
             return (
-                "Usage: /refine dry-run session <session_id>\n"
+                f"Usage: {_command_display_name()} dry-run session <session_id>\n"
                 "Previews that exact session without applying an edit.\n"
                 f"Find ids in the sessions table of {config.state_db_path()}"
             )
@@ -585,7 +585,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 if lookup_status == "invalid":
                     return (
                         "❌ That is not a usable session id.\n"
-                        "Usage: /refine dry-run session <session_id>\n"
+                        f"Usage: {_command_display_name()} dry-run session <session_id>\n"
                         f"Find ids in the sessions table of {config.state_db_path()}"
                     )
                 if lookup_status == "error":
@@ -596,7 +596,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 if lookup_status != "ok":
                     return (
                         f"❌ No session '{core.scrub_text(dry_session)}' exists.\n"
-                        "Usage: /refine dry-run session <session_id>\n"
+                        f"Usage: {_command_display_name()} dry-run session <session_id>\n"
                         f"Find ids in the sessions table of {config.state_db_path()}"
                     )
                 dry_reason = ""
@@ -664,7 +664,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         if remainder and ("/" in remainder or " " not in remainder):
             return (
                 "❌ Invalid model target.\n"
-                "Usage: /refine model [auto | <model> | <provider>/<model>]"
+                f"Usage: {_command_display_name()} model [auto | <model> | <provider>/<model>]"
             )
         # Prose such as "model of gmail failures" remains a refine reason.
 
@@ -672,7 +672,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         remainder = args[len(_SESSION_SUBCOMMAND):].strip()
         if not remainder:
             return (
-                "Usage: /refine session <session_id>\n"
+                f"Usage: {_command_display_name()} session <session_id>\n"
                 "Analyses that exact session instead of the current one.\n"
                 f"Find ids in the sessions table of {config.state_db_path()}"
             )
@@ -687,7 +687,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 # a reason: falling through would analyse the *current* session.
                 return (
                     "❌ That is not a usable session id.\n"
-                    "Usage: /refine session <session_id>\n"
+                    f"Usage: {_command_display_name()} session <session_id>\n"
                     f"Find ids in the sessions table of {config.state_db_path()}"
                 )
             if lookup_status == "error":
@@ -698,7 +698,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             if lookup_status != "ok":
                 return (
                     f"❌ No session '{core.scrub_text(explicit_session)}' exists.\n"
-                    "Usage: /refine session <session_id>\n"
+                    f"Usage: {_command_display_name()} session <session_id>\n"
                     f"Find ids in the sessions table of {config.state_db_path()}"
                 )
             try:
@@ -717,7 +717,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
 
     if args == "rollback":
         return (
-            "Usage: /refine rollback <12-character journal_id>\n"
+            f"Usage: {_command_display_name()} rollback <12-character journal_id>\n"
             f"Find ids in {journal.journal_read_path()}"
         )
     rollback_match = _ROLLBACK_COMMAND.fullmatch(args)
@@ -734,7 +734,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
     if args.startswith("rollback "):
         return (
             "❌ Invalid rollback format. Expected a 12-character hex journal ID.\n"
-            "Usage: /refine rollback <12-character journal_id>\n"
+            f"Usage: {_command_display_name()} rollback <12-character journal_id>\n"
             f"Find ids in {journal.journal_read_path()}"
         )
 
@@ -792,7 +792,7 @@ def _format_run_result(result: Dict[str, Any]) -> str:
         if journal_id:
             summary += f"\n🔖 {journal_id}"
             if result.get("reversible"):
-                summary += f" (rollback: /refine rollback {journal_id})"
+                summary += f" (rollback: {_command_display_name()} rollback {journal_id})"
     return summary
 
 
@@ -977,12 +977,19 @@ def register(ctx) -> None:
         journal.migrate_legacy_journal_dir()
     except Exception:
         logger.debug("refine journal migration failed", exc_info=True)
+    # The command name is decided at registration time: newer Hermes cores ship
+    # their own built-in /refine (a background review fork), and register_command
+    # silently drops plugin commands that collide with it. When the built-in
+    # exists, the plugin registers as /refine-cycle instead so its subcommands
+    # (audit/status/dry-run/session/model/rollback) stay reachable, and every
+    # usage hint renders the name that actually answers.
+    command_name = _resolve_command_name()
     ctx.register_command(
-        "refine",
+        command_name,
         _handle_refine_command,
         description=(
             "Self-improve skills/memory. "
-            "Usage: /refine [reason|audit|status|dry-run [session <session_id>|reason]|"
+            f"Usage: /{command_name} [reason|audit|status|dry-run [session <session_id>|reason]|"
             "model [target|auto]|session <session_id>|rollback <id>]"
         ),
         args_hint=(
@@ -1021,6 +1028,48 @@ def register(ctx) -> None:
 
 
 _REGISTER_WARNED = False
+
+# Set by register(): the slash-command name that actually answers in this host
+# ("refine" normally, "refine-cycle" when the core's own built-in /refine won).
+_COMMAND_NAME = "refine"
+_FALLBACK_COMMAND_NAME = "refine-cycle"
+
+
+def _built_in_command_exists(name: str) -> bool:
+    """True when this Hermes core already owns a built-in command with that name."""
+    try:
+        from hermes_cli.commands import resolve_command
+    except Exception:
+        return False
+    try:
+        return resolve_command(name) is not None
+    except Exception:
+        return False
+
+
+def _resolve_command_name() -> str:
+    """Pick the plugin's slash-command name for this host.
+
+    Prefers ``refine``; falls back to ``refine-cycle`` only when the core
+    already ships a built-in command with that exact name (register_command
+    would otherwise drop the registration silently).
+    """
+    global _COMMAND_NAME
+    if _built_in_command_exists("refine"):
+        _COMMAND_NAME = _FALLBACK_COMMAND_NAME
+        logger.warning(
+            "Refine plugin: built-in /%s detected; registering as /%s instead.",
+            "refine",
+            _FALLBACK_COMMAND_NAME,
+        )
+    else:
+        _COMMAND_NAME = "refine"
+    return _COMMAND_NAME
+
+
+def _command_display_name() -> str:
+    """The slash name to render in usage hints, e.g. '/refine' or '/refine-cycle'."""
+    return "/" + _COMMAND_NAME
 
 
 def _warn_on_register() -> None:
