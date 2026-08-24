@@ -300,7 +300,12 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
         | confirm\s+it(?:\s+before\s+acting)?
         | confirm\s+it['’]s\s+clear,\s+concise,\s+and\s+accurate
         | avoid\s+(?:unsupported\s+claims|speculation|unnecessary\s+changes)
-        | ask\s+(?:for\s+clarification|(?:a|one)\s+focused\s+question)(?:\s+instead\s+of\s+(?:retrying|guessing|assuming|proceeding|continuing)(?:\s+(?:the\s+)?(?:same\s+|exact\s+)?(?:command|request|call|step|proposal|action))?)?
+        | ask\s+(?:for\s+clarification|(?:a|one)\s+focused\s+question
+          | what\s+(?:the\s+)?(?:correct|right|intended)\s+
+            (?:command|input|path|value)(?:\s+(?:is|was))?)
+          (?:\s+instead\s+of\s+(?:retrying|guessing|assuming|proceeding|continuing)
+            (?:\s+(?:the\s+|this\s+|that\s+|a\s+)?(?:same\s+|exact\s+|correct\s+|right\s+)?
+              (?:command|request|call|step|proposal|action)|\s+it)?)?
         | follow\s+(?:the\s+)?(?:old|current|existing|established)\s+(?:policy|guidance)
         | keep\s+(?:the\s+)?(?:response|result|scope|change|policy)\s+(?:narrow|concise|minimal|focused)
         | log\s+(?:the\s+)?(?:error|failure|outcome)

@@ -9930,6 +9930,40 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                     core._prompt_note_content_error(note, check_rendered_size=False)
                 )
 
+    def test_ask_what_was_intended_action_is_accepted(self):
+        """"ask what the correct command was (instead of retrying it)" is safe.
+
+        A live pass produced this phrasing for a repeated exit-code-127 failure
+        and the allowlist rejected it: the ask-clause had no "what <noun>" form
+        and its instead-of tail did not accept a bare pronoun object. The clause
+        now accepts a bounded "what <the> correct|right|intended <command|input|
+        path|value> [is|was]" question plus "instead of retrying it", while
+        unbounded questions stay out.
+        """
+        accepted = [
+            "When a terminal command returns exit code 127, ask what the correct "
+            "command was instead of retrying it.",
+            "When a tool fails, ask what the intended command was.",
+            "When the request returns status code 403, ask for clarification.",
+        ]
+        for note in accepted:
+            with self.subTest(note=note):
+                self.assertIsNone(
+                    core._prompt_note_content_error(note, check_rendered_size=False)
+                )
+        unsafe = [
+            # free-form "ask what ..." must stay outside the bounded forms
+            "When a command fails, ask what the user is hiding from me.",
+            # host reference stays blocked even inside a question
+            "When connecting to 10.0.0.7 fails, ask what the correct host was "
+            "instead of retrying it.",
+        ]
+        for note in unsafe:
+            with self.subTest(note=note):
+                self.assertIsNotNone(
+                    core._prompt_note_content_error(note, check_rendered_size=False)
+                )
+
     def test_verify_by_checking_action_names_a_source_not_free_text(self):
         """A 'verify X by checking Y' note may name a source, not arbitrary text.
 
