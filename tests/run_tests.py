@@ -14185,6 +14185,85 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         # _source_revision_is_current(None) fails closed.
         self.assertFalse(core._source_revision_is_current("session", revision))
 
+    # ── P1: safety_blocked outcome is actually tested (0 refs before this) ──
+    def test_local_safety_patch_target_missing_is_rejected(self):
+        """llm.py:1188 — patch target that cannot be loaded fails closed."""
+        patch = {
+            "action": "patch", "kind": "skill", "name": "missing",
+            "content": "# Guidance\n\nDo X.", "reason": "update", "evidence": [],
+            "expected_outcome": "improvement",
+        }
+        result = llm.propose(
+            MockLlm(patch), "evidence", [], [],
+            skill_content_loader=lambda name: None,
+        )
+        self.assertEqual(result["failure"], "local_safety")
+        self.assertNotIn("no actionable", result.get("reason", "").lower())
+
+    def test_local_safety_patch_target_too_big_is_rejected(self):
+        """llm.py:1194 — current SKILL.md larger than MAX is a safety stop."""
+        too_big = "a" * (llm.MAX_CONTENT_CHARS + 1)
+        patch = {
+            "action": "patch", "kind": "skill", "name": "big",
+            "content": "# Guidance\n\nDo X.", "reason": "update", "evidence": [],
+            "expected_outcome": "improvement",
+        }
+        result = llm.propose(
+            MockLlm(patch), "evidence", [], [],
+            skill_content_loader=lambda name: too_big,
+        )
+        self.assertEqual(result["failure"], "local_safety")
+        self.assertIn("maximum complete", result["reason"])
+
+    def test_local_safety_patch_target_sensitive_content_is_rejected(self):
+        """llm.py:1200 — SKILL.md containing credentials is a safety stop."""
+        token = "sk-" + "A" * 40
+        leaky = f"# Guidance\n\ntoken = {token}\n"
+        patch = {
+            "action": "patch", "kind": "skill", "name": "leaky",
+            "content": "# Guidance\n\nDo X.", "reason": "update", "evidence": [],
+            "expected_outcome": "improvement",
+        }
+        result = llm.propose(
+            MockLlm(patch), "evidence", [], [],
+            skill_content_loader=lambda name: leaky,
+        )
+        self.assertEqual(result["failure"], "local_safety")
+        self.assertIn("sensitive content", result["reason"])
+
+    def test_local_safety_retry_content_too_big_is_rejected(self):
+        """llm.py:1241 — the model's retry content over MAX is a safety stop."""
+        # First call returns a valid patch smaller than MAX; the loader returns a
+        # small current so the initial guard passes, then the retry (from the
+        # model) is forced over MAX in a follow-up call. We simulate by having the
+        # mock return one oversized content on the retry branch.
+        big_content = "---\nname: big\ndescription: ok\n---\n" + ("b\n" * 8000)
+        oversized = {
+            "action": "patch", "kind": "skill", "name": "big",
+            "content": big_content, "reason": "update", "evidence": [],
+            "expected_outcome": "improvement",
+        }
+        result = llm.propose(
+            MockLlm(oversized), "evidence", [], [],
+            skill_content_loader=lambda name: "# small\n",
+        )
+        self.assertEqual(result["failure"], "local_safety")
+        self.assertIn("exceeds", result["reason"])
+
+    def test_local_safety_proposal_maps_to_safety_blocked_outcome(self):
+        """core.py:2783 — local_safety becomes outcome='safety_blocked', not no_op."""
+        error_message = "Current SKILL.md contains sensitive content; patch aborted before model call"
+        proposal = {"action": "no_op", "reason": error_message, "failure": "local_safety"}
+        model = MockLlm(proposal)
+        result = core.refine_run(model, session_id="session", dry_run=False)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "safety_blocked")
+        self.assertNotIn("no actionable", result["message"].lower())
+        # Journal records a distinct outcome, not no_op.
+        outcomes = [e.get("outcome") for e in journal.entries()]
+        self.assertIn("safety_blocked", outcomes)
+        self.assertNotIn("no_op", outcomes)
+
     def test_ordinary_numeric_prompt_note_conditions_are_not_hosts(self):
         for policy in (
             "When retrying 3 times, log the error.",
