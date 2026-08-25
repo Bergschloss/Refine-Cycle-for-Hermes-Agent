@@ -230,11 +230,17 @@ the Hermes checkout.
 - **With the patch:** proposal runs reach the model (subject to the configured
   trust policy).
 
-The patch is pinned to a specific core base (stock v2026.8.16, commit
-`df4b65147d`); `install.sh` refuses to apply it to any other checkout rather
-than half-applying. It verifies by outcome after applying: the route symbol is
-present and the touched files still compile. If verification fails, the patch
-is reverted.
+`install.sh` pins the **result**, not the input. It first checks whether the
+route is already present — in which case it does nothing at all — then tries
+the patch with `git apply`, falling back to three-way merge with decreasing
+context (`-3`, `-3 -C1`, `-3 -C0`), and refuses **only** when it cannot produce
+a working route. After applying it verifies by outcome: route symbol present,
+no conflict markers, every touched file compiles, and the core module still
+imports. If any check fails, the pre-patch state is restored byte-for-byte. A
+refusal names the host HEAD and the patch base (the patch was built against
+stock v2026.8.16, commit `df4b65147d`) and lists the failed attempts — it
+never refuses without trying. A host whose core version has drifted slightly
+will often still get a working patch; one that genuinely cannot is told so.
 
 ```bash
 # from the plugin directory
