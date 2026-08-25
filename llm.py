@@ -1435,9 +1435,15 @@ def propose(
     ) or "  (none)"
     unused_block = ""
     if unused_skills:
+        # Encode as bounded untrusted JSON (not raw bullet interpolation)
+        # using the same mechanism as corrections/run context
+        encoded_skills = "\n".join(
+            "  " + _untrusted_json_record("unused_skill", name, escape_tags=True)
+            for name in (unused_skills or [])[:10]
+        )
         unused_block = (
             "\n=== PREVIOUS UNUSED SKILLS ===\n"
-            + "\n".join(f"  - {name}" for name in unused_skills[:10])
+            + encoded_skills
             + "\nDo not create more skills of this ineffective shape.\n"
         )
     history_lines = _render_refinement_history(
