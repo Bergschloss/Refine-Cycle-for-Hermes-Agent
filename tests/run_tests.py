@@ -14655,4 +14655,7 @@ class TraceContractTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    # [CI-floor probe] temporarily disable the suite entry point to prove the
+    # workflow floor fires when a dead entry point yields zero tests.
+    # unittest.main(verbosity=2)
+    pass
