@@ -46,6 +46,7 @@ This iteration makes **no source fix and no source commit**. It only builds the 
 | E-06 | Design: mutation lock held across the whole LLM call | PROVEN (measurement) | P1 held lock 28 s (13:17:27→13:17:55); P2 blocked until release (report §Design finding) | 0 |
 | S-01 | Green CI is real (suite runs N tests, not 0) | PROVEN | CI floor guard: `ran=666 floor=600` (b725c2d), probe went red `ran=0` (1beaeaa) | 1 |
 | S-02 | `scripts` only; stdlib only; no new dependency | PROVEN (by inspection) | pyproject/stdlib imports verified in suite | 0 |
+| S-03 | Scrubber uses positive allowlist for enum/count/identifier shapes (Task 5.5) | PROVEN (by inspection) | `_NON_SECRETS`, `_NUMERIC_METRIC_KEYS`, `_NON_SECRET_TOKEN_KEYS` are closed sets; denylist churn is bounded by decision (see S-03 note) | 0 |
 | P-13 | 13-01 journal replay is material? | UNPROVEN (measured, TBD) | server journal 90 entries / 131,655 bytes — replay latency NOT yet timed | 0 |
 
 ## Legend
@@ -75,3 +76,26 @@ locking. Then the rest. A wrong `no_op` costs a run; a wrong mutation costs the 
 
 - 13-01 replay-latency measurement (needs a real `_load_entries_state()` timing run) — do not
   cache until the numbers are material.
+- Task 5.5 (scrubber decision) is **resolved by decision, not by code change** (see S-03).
+
+## S-03 — scrubber allowlist decision (Task 5.5, resolved)
+
+`sanitization.py` was touched in 15 of the last 15 commits that reached it, alternating tighten /
+loosen. The plan's directive is explicit: do **not** treat "one more pattern" as progress.
+
+The scrubber already inverted the one layer where the value shape is closed — an enum, count, or
+identifier — into a positive allowlist:
+
+- enum: `_NON_SECRETS = {true,false,null,none,enabled,disabled}` — a preserved value must be one
+  of a closed set;
+- count: `_NUMERIC_METRIC_KEYS` — a numeric value is preserved only for these exact telemetry
+  field names;
+- identifier: `_NON_SECRET_TOKEN_KEYS = {tokenizer, token_count}` — exact key names, not a broad
+  substring exception.
+
+Everything else (`_FIXED_PATTERNS` provider prefixes, `_ENV_SECRET`, `_AUTH_TOKEN`, quoted/unquoted
+secret fields) is genuinely open-ended text where a positive allowlist of every safe value is
+impossible. **Decision:** accept current coverage as a known limit rather than adding more
+denylist patterns. A future pattern is added only if a concrete leaked secret is reproduced, never
+by extending a word list on suspicion. This bounds the grind and removes the single-choke-point
+denylist as a churn surface.
