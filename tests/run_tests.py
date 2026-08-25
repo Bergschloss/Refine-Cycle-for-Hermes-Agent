@@ -14185,6 +14185,43 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         # _source_revision_is_current(None) fails closed.
         self.assertFalse(core._source_revision_is_current("session", revision))
 
+    def test_source_revision_with_real_primary_key_id_schema(self):
+        """Real Hermes `messages` uses `id INTEGER PRIMARY KEY`, which aliases
+        `rowid`. A bare `SELECT rowid` returns that column keyed as `id` in a
+        `sqlite3.Row`, so `row['rowid']` raises IndexError and the capture
+        returned None on a live host even though the rows were active — silently
+        failing every pass as evidence_invalidated. The capture/verify queries
+        must alias rowid so the key is present regardless of the schema.
+
+        This reproduces the real Hermes schema (id INTEGER PRIMARY KEY) that the
+        FakeHost fixture does not, so the regression is provable here too.
+        """
+        # Build a throwaway DB with the real Hermes messages schema.
+        path = self.root / "state-realpk.db"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL, source TEXT)")
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+            "content TEXT, tool_name TEXT, timestamp REAL, active INTEGER)"
+        )
+        now = time.time()
+        conn.execute("INSERT INTO sessions VALUES ('s', ?, 'cli')", (now - 5,))
+        for i in range(4):
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_name, timestamp, active) "
+                "VALUES ('s', 'tool', ?, 'http', ?, 1)",
+                (f"ERROR: failed {i}", now - i),
+            )
+        conn.commit()
+        conn.close()
+        with patch.object(config, "state_db_path", return_value=path):
+            self.assertEqual(config.state_db_path(), path)
+            revision = core._capture_source_revision("s")
+        self.assertIsNotNone(revision, "capture must work on an id-PK schema")
+        self.assertEqual(len(revision), 4)
+        with patch.object(config, "state_db_path", return_value=path):
+            self.assertTrue(core._source_revision_is_current("s", revision))
+
     # ── P1: safety_blocked outcome is actually tested (0 refs before this) ──
     def test_local_safety_patch_target_missing_is_rejected(self):
         """llm.py:1188 — patch target that cannot be loaded fails closed."""

@@ -597,7 +597,7 @@ def _capture_source_revision(session_id: str) -> Optional[frozenset]:
         return None
     try:
         rows = connection.execute(
-            "SELECT rowid FROM messages WHERE session_id = ? AND active = 1",
+            "SELECT rowid AS rowid FROM messages WHERE session_id = ? AND active = 1",
             (session_id,),
         ).fetchall()
         return frozenset(int(row["rowid"]) for row in rows)
@@ -638,7 +638,7 @@ def _source_revision_is_current(
     try:
         placeholders = ",".join("?" for _ in revision)
         rows = connection.execute(
-            f"SELECT rowid FROM messages "
+            f"SELECT rowid AS rowid FROM messages "
             f"WHERE rowid IN ({placeholders}) AND session_id = ? AND active = 1",
             tuple(revision) + (session_id,),
         ).fetchall()
