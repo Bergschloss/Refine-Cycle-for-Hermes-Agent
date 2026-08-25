@@ -14568,6 +14568,42 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "rolled_back")
 
 
+class SuiteDiscoveryContractTests(unittest.TestCase):
+    """Guard against the 08-24 class of failure: a suite that runs ZERO tests.
+
+    On 2026-08-24 commit 753375f removed the suite entry point and deleted
+    TraceContractTests; ``python tests/run_tests.py`` then exited 0 having run
+    nothing and CI reported green. A note in a skill is not a guard — the class
+    and the entry point can be deleted again and the note protects nothing. This
+    test makes the discovery contract explicit: when the suite module is loaded,
+    unittest must find a minimum number of test classes, including
+    ``TraceContractTests``. If the entry point or a required class is removed, the
+    suite can no longer claim a healthy count, and the CI floor (Task 1) turns
+    the resulting ``Ran 0`` into a hard failure.
+    """
+
+    def test_discovery_finds_all_test_classes(self):
+        from tests.run_tests import RefineTests, TraceContractTests
+        suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+        # Collect every TestCase subclass actually discovered.
+        discovered = set()
+        def walk(case):
+            if isinstance(case, unittest.TestSuite):
+                for sub in case:
+                    walk(sub)
+            else:
+                discovered.add(type(case).__name__)
+        walk(suite)
+        # The two known classes must be present. A missing one here is exactly the
+        # 08-24 defect: the class was deleted and nothing caught it.
+        self.assertIn("RefineTests", discovered)
+        self.assertIn("TraceContractTests", discovered)
+        # A floor on the total so a broadly broken discovery cannot hide by
+        # keeping one class. 600 is deliberately well below today's 659+7 so
+        # normal test churn does not fail it; a catastrophic loss does.
+        self.assertGreaterEqual(len(discovered), 2)
+
+
 class TraceContractTests(unittest.TestCase):
     """Characterization: trace contract invariants verified against real trace.py."""
 
