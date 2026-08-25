@@ -262,7 +262,11 @@ _CONTEXT_OVERRIDE_INTENT = re.compile(
     r")"
 )
 _CONTEXT_CONTROL_TAGS = re.compile(
-    r"(?i)(?:<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result|assistant_response|assistant|developer|user|user_context|prompt|rules|guidelines|context|custom_instructions)[^>]*>|<<\s*sys\s*>>|<\|(?:im_start|im_end|system|user|assistant)\|>|\<\s*begin_of_text\s*>|\<\s*start_header_id\s*>|\<\s*end_header_id\s*>|\<\s*eot_id\s*>|\<\s*start_of_turn\s*>|\<\s*end_of_turn\s*>|\[INST\]|\[/INST\]|<<\s*/?\s*SYS\s*>>)"
+    r"(?i)(?:<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result|assistant_response|assistant|developer|user|user_context|prompt|rules|guidelines|context|custom_instructions)[^>]*>"
+    r"|<<\s*sys\s*>>"
+    r"|<\|(?:im_start|im_end|system|user|assistant|begin_of_text|start_header_id|end_header_id|eot_id|start_of_turn|end_of_turn)\|>"
+    r"|\[\s*/?\s*INST\s*\]"
+    r"|<<\s*/?\s*SYS\s*>>)"
 )
 _AGENT_IMPERSONATION = re.compile(
     r"(?i)(?:^|\n)\s*(?:(?:note|remember)\s*:\s*)?"

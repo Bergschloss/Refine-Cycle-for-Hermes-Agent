@@ -13961,6 +13961,65 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("override", error)
         self.assertEqual(memory["content"], override_payload)
 
+    def test_model_control_delimiters_are_rejected_in_persistent_edits(self):
+        """P0 10-01: Llama/Mistral-style delimiters must not persist."""
+        forms = (
+            "<|begin_of_text|>", "<|start_header_id|>", "<|end_header_id|>",
+            "<|eot_id|>", "<|start_of_turn|>", "<|end_of_turn|>",
+            "[INST]", "[/INST]", "<<SYS>>", "<</SYS>>",
+            # case and internal whitespace variants of the closed list
+            "<|EOT_ID|>", "[ inst ]", "<</sys>>", "<< sys >>",
+            # opening AND closing spellings where applicable
+            "<|begin_of_text|>text<|end_of_turn|>",
+            "[INST] role text [/INST]",
+        )
+        for payload in forms:
+            with self.subTest(payload=payload):
+                memory = {
+                    "action": "create", "kind": "memory", "name": "delim-guard",
+                    "content": f"note {payload} note", "reason": "test", "evidence": [],
+                }
+                error = core._validate_proposal(memory)
+                self.assertIsNotNone(error, payload)
+                self.assertIn("context-control", error)
+
+    def test_model_delimiter_rejection_covers_skill_and_multi_paths(self):
+        """Same gate on the skill path and inside a multi-edit transaction."""
+        skill = skill_proposal(
+            "delim-skill",
+            body="Use the endpoint.\n\n```\nmodel <<SYS>> x\n```\n",
+        )
+        error = core._validate_proposal(skill)
+        self.assertIsNotNone(error)
+        self.assertIn("context-control", error)
+
+        bad = memory_edit("lesson <|eot_id|> tail", name="delim-multi")
+        error = core._validate_proposal(bad)
+        self.assertIsNotNone(error)
+        self.assertIn("context-control", error)
+
+    def test_benign_near_misses_stay_accepted(self):
+        """Ordinary technical documentation must not be caught by the gate.
+
+        These probe the model delimiter/context-control detector specifically,
+        so they go through the skill path: a skill body legitimately contains
+        pipes, angle brackets, and code fences, whereas a memory additionally
+        goes through a separate resource gate that rejects shell metacharacters.
+        Testing memory here would conflate the two unrelated gates.
+        """
+        benign = [
+            "The array index is a[1]. Use pipes | in shell commands.",
+            "Markdown tables use | col | like this.",
+            "Config: model='user' turns=2 (plain prose about settings).",
+            "Compare a < b and b > c in the docs; angle brackets in prose.",
+            "The token count im_start is discussed as a string literal.",
+            "Run `sort | uniq` after the EOT marker discussion.",
+        ]
+        for content in benign:
+            with self.subTest(content=content):
+                skill = skill_proposal("benign-tech", body=content)
+                self.assertIsNone(core._validate_proposal(skill))
+
     def test_ordinary_numeric_prompt_note_conditions_are_not_hosts(self):
         for policy in (
             "When retrying 3 times, log the error.",
