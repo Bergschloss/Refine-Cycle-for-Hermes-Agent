@@ -58,3 +58,17 @@ secrets/
 .idea/
 .vscode/
 *.swp
+
+# Tooling / agent scratch — never committed. A permanently dirty tree hides
+# real accidental modifications among noise, and this loop's crash-recovery
+# story depends on reading `git status` and trusting it.
+.coverage
+.pytest-cache/
+.kiro/
+scratch/
+semantic-review/
+*.bundle
+
+# Throwaway planning artifacts from the refine loop. Deliberate, durable plans
+# belong under docs/ instead of cluttering the tree root.
+plan-*.md
