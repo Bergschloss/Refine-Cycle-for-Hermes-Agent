@@ -1031,6 +1031,58 @@ class RefineTests(unittest.TestCase):
         sanitization.scrub_text(adversarial)
         self.assertLess(time.perf_counter() - started, 0.5)
 
+    def test_fullwidth_labels_and_values_are_scrubbed(self):
+        """P0 02-01: compatibility forms must not bypass credential scrubbing."""
+        cases = (
+            "ａｐｉ＿ｋｅｙ=secret12345678",
+            'ａｐｉ＿ｋｅｙ="secret12345678"',
+            "ｐａｓｓｗｏｒｄ=anothersecret42",
+            "password＝anothersecret42",
+        )
+        for raw in cases:
+            with self.subTest(raw=raw):
+                scrubbed = sanitization.scrub_text(raw)
+                self.assertIn("[REDACTED]", scrubbed)
+                self.assertNotIn("secret12345678", scrubbed)
+                self.assertNotIn("anothersecret42", scrubbed)
+
+    def test_fullwidth_bearer_and_mixed_ascii_fullwidth_labels(self):
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef01"
+        auth = "ｂｅａｒｅｒ " + secret
+        scrubbed = sanitization.scrub_text(auth)
+        self.assertIn("[REDACTED]", scrubbed)
+        self.assertNotIn(secret, scrubbed)
+        mixed = "api_ｋｅｙ=secret12345678"
+        self.assertIn("[REDACTED]", sanitization.scrub_text(mixed))
+
+    def test_unicode_scrubbing_is_idempotent(self):
+        raw = "ａｐｉ＿ｋｅｙ=secret12345678 ｐａｓｓｗｏｒｄ=anothersecret42"
+        once = sanitization.scrub_text(raw)
+        self.assertEqual(once, sanitization.scrub_text(once))
+
+    def test_ordinary_non_compatibility_unicode_passes_through(self):
+        benign = (
+            "Привіт — звичайний текст без секретів; ellipsis … and em-dash —, "
+            "CJK 中文テスト, arrows → ←, math ∑ ≈ ≠."
+        )
+        self.assertEqual(sanitization.scrub_text(benign), benign)
+
+    def test_db_extraction_boundary_scrubs_fullwidth_credentials(self):
+        """The fix must hold at the real extraction path, not only the helper."""
+        secret = "ghp_" + "W" * 36
+        FakeHost.make_db(messages=[
+            ("session", "user", "run with ａｐｉ＿ｋｅｙ=" + secret, "", time.time() - 4, 1),
+            ("session", "tool", "ERROR: request failed for /item/1", "http", time.time() - 3, 1),
+            ("session", "assistant", "ok", "", time.time() - 2, 1),
+        ])
+        try:
+            evidence = core.collect_evidence()
+            dumped = json.dumps(evidence, ensure_ascii=False)
+            self.assertNotIn(secret, dumped)
+            self.assertIn("[REDACTED]", dumped)
+        finally:
+            FakeHost.make_db()
+
     def test_reasoning_block_cannot_supply_the_salvaged_proposal(self):
         """Only final answer text, never a completed reasoning draft, is authoritative."""
         for tag in ("think", "thought", "reasoning", "reflection"):
