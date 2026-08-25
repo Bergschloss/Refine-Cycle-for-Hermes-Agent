@@ -14992,6 +14992,38 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("restored", done.stdout + done.stderr)
         self.assertEqual(self._snapshot(), before, "host must be restored byte-for-byte")
 
+    def test_verify_tolerates_decorative_equals_banner(self):
+        """A decorative `=====` banner must not be mistaken for a conflict marker.
+
+        Real core files (agent/plugin_llm.py, hermes_cli/plugins.py) open with a
+        banner of `====` characters. A loose `^(<<<<<<<|=======|>>>>>>>)` conflict
+        check matched that banner on a clean apply and wrongly triggered a
+        restore. The marker check must match the git conflict lines
+        (`<<<<<<< HEAD` / `>>>>>>> branch`), which always carry a trailing space.
+        """
+        banner = '"""\nPlugin docs\n==============\ndecorative banner\n"""\nPLUGIN_MARKER = 1\n'
+        self._write_patch_and_generate(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
+            plugins=banner + "plugin_invocation_scope = True\n",
+        )
+        done = self._run_install()
+        self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
+        self.assertIn("applied + verified", done.stdout)
+        self.assertNotIn("restored", done.stdout + done.stderr)
+
+    def test_verify_still_catches_a_real_conflict_marker(self):
+        """A genuine `<<<<<<< HEAD` conflict marker must still fail and restore."""
+        self._write_patch_and_generate(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",
+            plugins="PLUGIN_MARKER = 1\n<<<<<<< HEAD\nplugin_invocation_scope = True\n=======\nSTALE = 1\n>>>>>>> base\n",
+        )
+        before = self._snapshot()
+        done = self._run_install()
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("conflict markers", done.stdout + done.stderr)
+        self.assertIn("restored", done.stdout + done.stderr)
+        self.assertEqual(self._snapshot(), before, "host must be restored byte-for-byte")
+
     def test_cannot_apply_refuses_honestly(self):
         # A patch with no index lines and a guard line that does not match
         # anything: every attempt fails and the refusal names the facts.

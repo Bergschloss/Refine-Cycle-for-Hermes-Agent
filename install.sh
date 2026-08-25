@@ -165,8 +165,14 @@ done
 grep -q "$ROUTE_SYMBOL" "$HERMES_SRC/hermes_cli/plugins.py" \
     || verify_fail "route symbol '$ROUTE_SYMBOL' missing from hermes_cli/plugins.py after apply"
 
-# Conflict markers mean a half-merged apply; that is a failed outcome.
-if grep -qE '^(<<<<<<<|=======|>>>>>>>)' "${TOUCHED_FILES[@]/#/$HERMES_SRC/}" 2>/dev/null; then
+# Conflict markers mean a half-merged apply; that is a failed outcome. Use the
+# line START of a real git conflict marker — `<<<<<<< HEAD` / `>>>>>>> branch`
+# (both always carry a trailing space + ref label). Do not match a bare
+# `=======` line: several core files open with a decorative banner of `====`
+# characters (agent/plugin_llm.py, hermes_cli/plugins.py), which a loose regex
+# would falsely flag as a conflict and wrongly trigger a restore after a clean
+# apply.
+if grep -qE '^(<<<<<<< |>>>>>>> )' "${TOUCHED_FILES[@]/#/$HERMES_SRC/}" 2>/dev/null; then
     verify_fail "conflict markers found in touched files after apply"
 fi
 
