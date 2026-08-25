@@ -16,8 +16,14 @@ graded on whether the failure it targeted actually stopped.
 
 This is a port of the `/refine` concept from
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
-(Continual Harness) built on the Hermes plugin system — no core changes, and the
-plugin only loads when it is explicitly enabled.
+(Continual Harness) built on the Hermes plugin system. The plugin only loads
+when it is explicitly enabled; it does not modify Hermes itself.
+
+> **One thing to know before you install.** Status, audit, rollback, and
+> journaling work on a stock Hermes host. **New proposals** additionally need
+> the host route patch that `install.sh` applies to the Hermes checkout (see
+> "Host route patch" under Installation). Without it, a proposal run fails
+> loudly with `llm_invocation_unavailable` — it never pretends to work.
 
 ---
 
@@ -125,7 +131,7 @@ fallback to `json_mode` and then raw-text JSON salvage for providers that reject
 
 ## Installation
 
-> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It requires a working Hermes installation (≥ 0.17.0) and does not run standalone.
+> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (674 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; only **new proposals** additionally require the host route patch (see below).
 
 The plugin lives in `<HERMES_HOME>/plugins/refine/` — `~/.hermes/plugins/refine/`
 on Linux and macOS, and `%LOCALAPPDATA%\hermes\plugins\refine\` on Windows.
@@ -141,7 +147,20 @@ through `hermes_constants.get_hermes_home()`.
 > store for that process and `/refine status` reports the fallback. An explicitly
 > configured non-empty `journal_dir` is never migrated automatically.
 
-1. Add to Hermes `config.yaml`:
+Install and enable it from the public repository:
+
+```bash
+hermes plugins install Bergschloss/Refine-Cycle-for-Hermes-Agent
+hermes plugins enable refine
+hermes gateway restart
+```
+
+`plugins install` clones the repository into `<HERMES_HOME>/plugins/refine/`,
+`plugins enable` registers it with Hermes, and the restart activates it in the
+running gateway. This exact sequence is verified end to end on Hermes 0.20.1;
+see VERIFICATION.md.
+
+Then, optionally, configure it in `config.yaml`:
 
 ```yaml
 plugins:
@@ -155,13 +174,17 @@ plugins:
         allow_provider_override: false
 ```
 
-2. Restart Hermes:
+`plugins enable` manages the `enabled` list itself; the `entries` block holds
+the plugin's own settings, and `journal_dir` keeps runtime data separate from
+plugin source (see "Runtime data location" above).
+
+Restart Hermes after any config change:
 
 ```bash
 hermes gateway restart
 ```
 
-3. Verify:
+Verify:
 
 ```
 hermes plugins list
@@ -191,9 +214,56 @@ reports on — writes no journal record, spends no budget, and calls no model. I
 does not reconcile pending approvals, so an unresolved staged edit still counts
 toward the budget it reports.
 
+### Host route patch — required for new proposals
+
+The plugin asks the LLM through Hermes's *active invocation route*: the same
+model binding that the user's live session uses, so that a proposal costs the
+host's own provider creds and never a hardcoded key. Stock Hermes does not
+expose that binding to plugins. `install.sh` ships one patch that adds it,
+`assets/invocation-route-v2026.8.16.patch`, touching `agent/plugin_llm.py`,
+`agent/auxiliary_client.py`, `gateway/run.py`, and `hermes_cli/plugins.py` in
+the Hermes checkout.
+
+- **Without the patch:** `/refine status`, `/refine audit`, `/refine rollback`,
+  journaling, and the test suite all work. A proposal run stops honestly with
+  `llm_invocation_unavailable` and journals the record.
+- **With the patch:** proposal runs reach the model (subject to the configured
+  trust policy).
+
+The patch is pinned to a specific core base (stock v2026.8.16, commit
+`df4b65147d`); `install.sh` refuses to apply it to any other checkout rather
+than half-applying. It verifies by outcome after applying: the route symbol is
+present and the touched files still compile. If verification fails, the patch
+is reverted.
+
+```bash
+# from the plugin directory
+./install.sh            # apply core patch (with backup)
+./install.sh --patch-only
+```
+
+On hosts that already carry the route (patched earlier, or upstream), the
+script detects it and does nothing. See the script's header for the exact
+behaviour and the one-command undo (`git apply -R`).
+
 ---
 
 ## Usage
+
+### What to expect
+
+A pass on quiet data is a `no_op` — that is the normal, correct result, not a
+failure. The outcome families are `no_op`, `applied`, `rejected`,
+`pending_approval`, `conflict`, `llm_incomplete`, `llm_invocation_unavailable`,
+and `failed`, plus the rollback and grading terms in `/refine audit`.
+
+A real 90-day history (the long-running install this README was tested
+against) shows eight refine-created entries whose effectiveness verdicts
+distribute between `too early`, `rolled back`, `rejected`, and
+`unreliable` — with `unreliable` meaning *someone else modified the artifact
+after refine touched it*, so no verdict is possible. Expect exactly that mix:
+most passes doing nothing, some edits reverting, and very few edits surviving
+to a `working` verdict.
 
 ### Manual
 
@@ -665,6 +735,16 @@ llm:
   own path; what it gained is journal snapshots, so it no longer depends on a
   file surviving on disk.
 
+- **`hermes plugins remove` fails on Windows for git-managed plugins (host
+  defect, not this repo's code):** the CLI removes the directory with a bare
+  `shutil.rmtree` that does not handle read-only files, and git marks
+  `.git/objects/*` read-only. Removal aborts midway with `WinError 5`, leaving a
+  half-deleted directory; runtime data and `config.yaml` are untouched.
+  Workaround: delete the directory from PowerShell
+  (`Remove-Item -Recurse -Force`) or clear the read-only attribute first. An
+  upstream `onerror` handler that clears the bit and retries would fix it
+  properly.
+
 ---
 
 ## Rollback
@@ -843,8 +923,10 @@ initiated.
   writes; plugin-owned prompt notes do not pretend to have a host approval.
 - **Read-only trajectory** — `state.db` is opened with `mode=ro`.
 - **No system prompt access** — the base prompt stays immutable.
-- Requires Hermes ≥ 0.17.0 (`register_tool`, `register_command`, `register_hook`,
-  and `ctx.llm`).
+- Requires the Hermes plugin API (≥ 0.17.0; `register_tool`, `register_command`,
+  `register_hook`, and `ctx.llm`). New proposals additionally need the host
+  route patch (see Installation); without it they fail loudly with
+  `llm_invocation_unavailable`, which is the intended honest gate.
 
 ---
 
