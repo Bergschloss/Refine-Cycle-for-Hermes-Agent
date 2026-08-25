@@ -1355,18 +1355,31 @@ def refine_status() -> Dict[str, Any]:
     edits_today = 0
     last_ts: Optional[float] = None
     cooldown_remaining = 0.0
+    last_model_substituted = False
     try:
         journal_path = journal.journal_read_path()
         journal_present = journal_path.is_file()
         if journal_present:
-            _, state = journal._load_entries_safe()
+            entries, state = journal._load_entries_safe()
             if state != "ok":
                 raise IOError(f"journal state is {state}")
             edits_today = journal.count_today_applied()
             last_ts = journal.last_attempt_ts()
             cooldown_remaining = auto_cooldown_remaining_minutes()
+            # Surface whether the most recent refine pass ran on a substituted
+            # model, so status does not imply a clean no_op when the reviewer
+            # verdict was produced by a model other than the configured target.
+            last_model_substituted = False
+            for entry in reversed(entries or []):
+                meta = entry.get("llm_meta") if isinstance(entry, dict) else None
+                if isinstance(meta, dict) and meta.get("model_substituted"):
+                    last_model_substituted = True
+                    break
+                if isinstance(meta, dict) and meta.get("reported_model"):
+                    break
     except Exception as exc:
         journal_readable = False
+        last_model_substituted = False
         logger.warning("Cannot read refine journal for status: %s", scrub_text(str(exc)))
 
     blockers: List[Dict[str, str]] = []
@@ -1585,6 +1598,7 @@ def refine_status() -> Dict[str, Any]:
         "llm_target_issues": target_issues,
         "llm_model_allowed": model_allowed,
         "llm_provider_allowed": provider_allowed,
+        "last_model_substituted": last_model_substituted,
         "blockers": blockers,
         "blocker_codes": [b["code"] for b in blockers],
         "warnings": warnings,
@@ -2244,6 +2258,26 @@ def _render_evidence_text(evidence: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _model_substituted(
+    requested_provider: str, requested_model: str,
+    reported_provider: str, reported_model: str,
+) -> bool:
+    """Return True when the model that actually served differs from the model
+    the plugin intended to use.
+
+    A bound (invocation_bound) facade cannot transmit a provider/model, so the
+    host may resolve the call onto the active conversation route or onto the
+    fallback model. That is a *substitution* with respect to what the refine
+    config pinned, and any verdict produced by a substituted model must not be
+    trusted as if it came from the configured target.
+    """
+    if requested_model and reported_model and requested_model != reported_model:
+        return True
+    if requested_provider and reported_provider and requested_provider != reported_provider:
+        return True
+    return False
+
+
 def _handle_no_signal(
     llm: Any,
     evidence: Dict[str, Any],
@@ -2256,6 +2290,7 @@ def _handle_no_signal(
     run_target_source: str,
     run_target_issues: Any,
     run_target_unusable: bool,
+    intended_target: Dict[str, str],
 ) -> Union[Dict[str, Any], Tuple[str, str]]:
     """Handle a gate-closed pass: reviewer fallback or journaled no_op.
 
@@ -2276,8 +2311,8 @@ def _handle_no_signal(
         # transport fallback, not a second reviewer attempt). Keep the
         # attempt telemetry consistent with primary proposal calls.
         reviewer_llm_meta = {
-            "requested_provider": run_target.get("provider", ""),
-            "requested_model": run_target.get("model", ""),
+            "requested_provider": intended_target.get("provider", ""),
+            "requested_model": intended_target.get("model", ""),
             "target_source": run_target_source,
             "primary_attempts": 1,
             **{k: v for k, v in reviewer_call_meta.items() if k in (
@@ -2285,6 +2320,12 @@ def _handle_no_signal(
                 "output_tokens", "output_mode"
             )},
         }
+        reviewer_substituted = _model_substituted(
+            intended_target.get("provider", ""), intended_target.get("model", ""),
+            str(reviewer_call_meta.get("reported_provider", "")),
+            str(reviewer_call_meta.get("reported_model", "")),
+        )
+        reviewer_llm_meta["model_substituted"] = reviewer_substituted
         if run_target_issues:
             reviewer_llm_meta["target_issues"] = run_target_issues
         rationale = scrub_text(str(reviewer.get("rationale", "")))
@@ -2303,7 +2344,11 @@ def _handle_no_signal(
                 else "llm_error"
             )
             if reviewer_failure
-            else ("target_issue" if reviewer_target_issue else "no_op")
+            else (
+                "target_issue"
+                if reviewer_target_issue
+                else ("model_substituted" if reviewer_substituted else "no_op")
+            )
         )
         reviewer_error = (
             (
@@ -2319,7 +2364,12 @@ def _handle_no_signal(
             else (
                 "The configured refine model target is unusable."
                 if reviewer_target_issue
-                else ""
+                else (
+                    "The reviewer ran on a model different from the configured "
+                    "target; its 'no change' verdict is not trustworthy."
+                    if reviewer_substituted
+                    else ""
+                )
             )
         )
         reviewer_entry_id = _journal_nonmutation(
@@ -2369,6 +2419,24 @@ def _handle_no_signal(
                     "outcome": "target_issue",
                     "failure": "target_configuration",
                     "message": "The configured refine model target is unusable.",
+                    "journal_id": reviewer_entry_id,
+                    "proposal": proposal,
+                    "llm_called": True,
+                    "reviewer": "declined",
+                    "evidence": evidence,
+                    "llm_meta": reviewer_llm_meta,
+                    "reversible": False,
+                }
+            if reviewer_substituted:
+                return {
+                    "success": False,
+                    "outcome": "model_substituted",
+                    "failure": "model_substituted",
+                    "message": (
+                        "The reviewer ran on a model different from the configured "
+                        "target; its 'no change' verdict is not trustworthy and is "
+                        "not recorded as a clean no_op."
+                    ),
                     "journal_id": reviewer_entry_id,
                     "proposal": proposal,
                     "llm_called": True,
@@ -2554,6 +2622,11 @@ def _refine_once(
     # carries the gateway's exact route, so persisted refine overrides must not
     # be expanded into provider/model kwargs.
     _invocation_bound = bool(getattr(llm, "invocation_bound", False))
+    # The model the plugin *intended* to use, recorded even when a bound facade
+    # or a "live" source means it cannot (or should not) transmit an explicit
+    # provider/model. Keeping requested_* populated lets a host resolution onto
+    # the conversation route or the fallback model be flagged as a substitution.
+    _intended_target: Dict[str, str] = {"provider": "", "model": ""}
     try:
         _effective = config.effective_llm_target()
         _run_target: Dict[str, str] = {}
@@ -2574,10 +2647,14 @@ def _refine_once(
             _run_target_issues.extend(
                 config.llm_target_trust_denials(_effective).values()
             )
+        if isinstance(_effective, dict):
+            _intended_target["provider"] = str(_effective.get("provider", "") or "")
+            _intended_target["model"] = str(_effective.get("model", "") or "")
     except Exception:
         _run_target = {}
         _run_target_source = "invocation_bound" if _invocation_bound else "unknown"
         _run_target_issues = [] if _invocation_bound else ["the effective model could not be resolved"]
+        _intended_target = {"provider": "", "model": ""}
     _run_target_unusable = bool(
         _run_target_issues
         and not _run_target
@@ -2721,6 +2798,7 @@ def _refine_once(
             run_target_source=_run_target_source,
             run_target_issues=_run_target_issues,
             run_target_unusable=_run_target_unusable,
+            intended_target=_intended_target,
         )
         if isinstance(_handled, dict):
             return _handled
@@ -2786,8 +2864,8 @@ def _refine_once(
     # were reset by propose().
     llm_meta = _primary_llm_meta
     _run_llm_meta = {
-        "requested_provider": _run_target.get("provider", ""),
-        "requested_model": _run_target.get("model", ""),
+        "requested_provider": _intended_target.get("provider", ""),
+        "requested_model": _intended_target.get("model", ""),
         "target_source": _run_target_source,
         "signal_path": _signal_path,
         **{k: v for k, v in llm_meta.items() if k in (
@@ -2796,6 +2874,11 @@ def _refine_once(
         )},
         "primary_attempts": _primary_attempts,
     }
+    _run_llm_meta["model_substituted"] = _model_substituted(
+        _intended_target.get("provider", ""), _intended_target.get("model", ""),
+        str(llm_meta.get("reported_provider", "")),
+        str(llm_meta.get("reported_model", "")),
+    )
     if _run_target_issues:
         _run_llm_meta["target_issues"] = _run_target_issues
     proposal = sanitize(proposal)

@@ -6036,6 +6036,38 @@ class RefineTests(unittest.TestCase):
             "reviewer_min_messages": 20,
             "llm": {"model": "sk-" + "a" * 24},
         })
+        # The model the reviewer reports must match the intended (live) target;
+        # otherwise the decline would be flagged as model_substituted.
+        model = MockLlm(MockResult(
+            {"shouldRefine": False, "rationale": "No durable lesson.", "instructions": ""},
+            model="live-good-model",
+        ))
+        with patch.object(
+            config,
+            "live_main_target",
+            return_value={"provider": "live", "model": "live-good-model"},
+        ):
+            result = core.refine_run(model)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["reviewer"], "declined")
+        self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "no_op")
+        meta = journal.get_entry(result["journal_id"]).get("llm_meta", {})
+        self.assertFalse(meta.get("model_substituted"))
+
+    def test_reviewer_decline_on_substituted_model_is_not_a_clean_noop(self):
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+            "llm": {"model": "sk-" + "a" * 24},
+        })
+        # MockResult defaults to model="test-model", which differs from the
+        # intended model, so the reviewer ran on a substituted model.
         model = MockLlm({
             "shouldRefine": False,
             "rationale": "No durable lesson.",
@@ -6047,9 +6079,14 @@ class RefineTests(unittest.TestCase):
             return_value={"provider": "live", "model": "live-good-model"},
         ):
             result = core.refine_run(model)
-        self.assertTrue(result["success"])
+        # A decline from a substituted model must not be recorded as a clean no_op.
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "model_substituted")
         self.assertEqual(result["reviewer"], "declined")
-        self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "no_op")
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "model_substituted")
+        self.assertTrue(entry.get("llm_meta", {}).get("model_substituted"))
+        self.assertIn("model different", result["message"])
 
     def test_reviewer_skips_short_disabled_and_cooled_down_sessions(self):
         now = time.time()

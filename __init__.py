@@ -526,6 +526,11 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             f"model: {status['llm_model'] or '(host default)'}"
             + (f" @ {status['llm_provider']}" if status["llm_provider"] else "")
             + f" (source: {status['llm_target_source']})",
+            (
+                "last model substitution: yes (reviewer verdict not trustworthy)"
+                if status.get("last_model_substituted")
+                else "last model substitution: no"
+            ),
             f"journal: {status['journal_dir']} ({status['journal_dir_state_text']})",
             (
                 (

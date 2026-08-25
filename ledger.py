@@ -359,11 +359,16 @@ def _merge_journal_stats(
             if isinstance(llm_meta, dict) and llm_meta.get("reported_model")
             else ""
         )
+        model_substituted = bool(
+            isinstance(llm_meta, dict) and llm_meta.get("model_substituted")
+        )
         if isinstance(existing, dict) and existing.get("journal_id") == entry_id:
             existing["outcome"] = entry.get("outcome", existing.get("outcome", ""))
             existing["pending_id"] = entry.get("pending_id", existing.get("pending_id", ""))
             if reported_model and not existing.get("reported_model"):
                 existing["reported_model"] = reported_model
+            if model_substituted and not existing.get("model_substituted"):
+                existing["model_substituted"] = True
             continue
         if isinstance(existing, dict):
             try:
@@ -399,6 +404,10 @@ def _merge_journal_stats(
             meta["reported_model"] = reported_model
         elif isinstance(existing, dict) and existing.get("reported_model"):
             meta["reported_model"] = existing["reported_model"]
+        if model_substituted:
+            meta["model_substituted"] = True
+        elif isinstance(existing, dict) and existing.get("model_substituted"):
+            meta["model_substituted"] = True
         merged[key] = meta
     return merged
 
@@ -648,6 +657,12 @@ def format_audit(rows: List[Dict[str, Any]]) -> str:
         reported_model = str(row.get("reported_model", "") or "")
         if reported_model:
             lines.append(f"      model: {reported_model[:40]}")
+        if row.get("model_substituted"):
+            lines.append(
+                "      ⚠ model substituted: this entry was produced by a model "
+                "different from the configured target; its verdict is not "
+                "trustworthy"
+            )
         if row.get("externally_modified"):
             lines.append(
                 "      ⚠ modified or removed since refine's edit by something else "
