@@ -14848,5 +14848,180 @@ class TraceContractTests(unittest.TestCase):
                 self.fail(f"Potential credential in trace field {k}: {v[:30]}")
 
 
+class InstallScriptTests(unittest.TestCase):
+    """Hermetic tests for install.sh (task C of the clean-install fix).
+
+    install.sh patches a Hermes checkout. These tests rebuild a tiny fake
+    checkout (git repo + stub Python files), generate a matching patch, and
+    assert the four behaviours the rework was built for:
+      1. already applied  -> no-op, touches nothing;
+      2. applies -> symbol present, touched files compile;
+      3. applies but fails verification -> byte-for-byte restore;
+      4. cannot apply -> honest refusal naming host HEAD + patch base.
+    No real Hermes state is touched; everything lives in a TemporaryDirectory.
+    """
+
+    BASH = shutil.which("bash")
+    GIT = shutil.which("git")
+
+    @unittest.skipUnless(BASH and GIT, "bash and git required for install.sh tests")
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="installsh-")
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.hermes_src = self._make_fake_checkout(self.base / "hermes-src")
+        self.repo_dir = self.base / "plugin-repo"
+        self.repo_dir.mkdir()
+        shutil.copy2(
+            Path(__file__).resolve().parent.parent / "install.sh",
+            self.repo_dir / "install.sh",
+        )
+
+    # -- helpers ------------------------------------------------------------
+
+    def _make_fake_checkout(self, path: Path, with_route: bool = False) -> Path:
+        path.mkdir()
+        for sub in ("agent", "gateway", "hermes_cli", "run_agent_dir"):
+            (path / sub).mkdir()
+        (path / "agent" / "plugin_llm.py").write_text("MODEL_LLM = True\n", encoding="utf-8")
+        (path / "agent" / "auxiliary_client.py").write_text("AUX = True\n", encoding="utf-8")
+        (path / "gateway" / "run.py").write_text("GATEWAY = True\n", encoding="utf-8")
+        plugins = "PLUGIN_MARKER = 1\n"
+        if with_route:
+            plugins += "# plugin_invocation_scope = True  (route already present)\n"
+        (path / "hermes_cli" / "plugins.py").write_text(plugins, encoding="utf-8")
+        (path / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
+        (path / "agent" / "__init__.py").write_text("", encoding="utf-8")
+        (path / "gateway" / "__init__.py").write_text("", encoding="utf-8")
+        subprocess.run(
+            [self.GIT or "git", "init", "-q", "-b", "main"], cwd=path, check=True
+        )
+        subprocess.run([self.GIT or "git", "config", "user.email", "t@t.t"], cwd=path, check=True)
+        subprocess.run([self.GIT or "git", "config", "user.name", "t"], cwd=path, check=True)
+        subprocess.run([self.GIT or "git", "add", "-A"], cwd=path, check=True)
+        subprocess.run([self.GIT or "git", "commit", "-qm", "base"], cwd=path, check=True)
+        return path
+
+    def _write_patch_and_generate(self, plugin_llm: str, plugins: str) -> Path:
+        """Modify the two files, git-diff them into a patch, restore the tree."""
+        src = self.hermes_src
+        (src / "agent" / "plugin_llm.py").write_text(plugin_llm, encoding="utf-8")
+        (src / "hermes_cli" / "plugins.py").write_text(plugins, encoding="utf-8")
+        diff = subprocess.run(
+            [self.GIT or "git", "diff"], cwd=src, capture_output=True, check=True
+        ).stdout
+        subprocess.run([self.GIT or "git", "checkout", "-q", "--", "."], cwd=src, check=True)
+        patch = self.repo_dir / "assets"
+        patch.mkdir()
+        file_name = "invocation-route-v2026.8.16.patch"
+        (patch / file_name).write_bytes(diff)
+        return patch / file_name
+
+    def _run_install(self) -> subprocess.CompletedProcess:
+        env = {
+            "HERMES_SRC": str(self.hermes_src),
+            "PYTHON": sys.executable,
+            "TMPDIR": str(self.base),
+            "PATH": os.environ.get("PATH", ""),
+        }
+        return subprocess.run(
+            [self.BASH or "bash", str(self.repo_dir / "install.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(self.repo_dir),
+        )
+
+    def _snapshot(self) -> dict:
+        out = {}
+        for f in ("agent/plugin_llm.py", "hermes_cli/plugins.py", "agent/auxiliary_client.py"):
+            out[f] = (self.hermes_src / f).read_bytes()
+        return out
+
+    # -- cases --------------------------------------------------------------
+
+    def test_already_applied_is_a_noop(self):
+        # Route already present: exit 0, and nothing changed on disk.
+        src = self._make_fake_checkout(self.base / "hermes-src-route", with_route=True)
+        self.hermes_src = src
+        env = {
+            "HERMES_SRC": str(src),
+            "PYTHON": sys.executable,
+            "TMPDIR": str(self.base),
+            "PATH": os.environ.get("PATH", ""),
+        }
+        before = self._snapshot()
+        done = subprocess.run(
+            [self.BASH or "bash", str(self.repo_dir / "install.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(self.repo_dir),
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("already applied", done.stdout)
+        self.assertEqual(self._snapshot(), before, "no-op must not modify files")
+
+    def test_apply_verifies_symbol_and_compiles(self):
+        self._write_patch_and_generate(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
+            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
+        )
+        done = self._run_install()
+        self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
+        self.assertIn("applied + verified", done.stdout)
+        self.assertIn(
+            "plugin_invocation_scope",
+            (self.hermes_src / "hermes_cli" / "plugins.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "ROUTE_BINDING",
+            (self.hermes_src / "agent" / "plugin_llm.py").read_text(encoding="utf-8"),
+        )
+
+    def test_verification_failure_restores_byte_for_byte(self):
+        # Applies cleanly, but the inserted line is not valid Python: the
+        # compile check must fail and the host must be restored exactly.
+        self._write_patch_and_generate(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",   # syntax error
+            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
+        )
+        before = self._snapshot()
+        done = self._run_install()
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("restored", done.stdout + done.stderr)
+        self.assertEqual(self._snapshot(), before, "host must be restored byte-for-byte")
+
+    def test_cannot_apply_refuses_honestly(self):
+        # A patch with no index lines and a guard line that does not match
+        # anything: every attempt fails and the refusal names the facts.
+        patch = self.repo_dir / "assets"
+        patch.mkdir()
+        (patch / "invocation-route-v2026.8.16.patch").write_text(
+            "diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/hermes_cli/plugins.py\n"
+            "+++ b/hermes_cli/plugins.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            "+# this guard text does not exist anywhere in the file\n"
+            "+plugin_invocation_scope = True\n",
+            encoding="utf-8",
+        )
+        head = subprocess.run(
+            [self.GIT or "git", "rev-parse", "--short=10", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(self.hermes_src),
+        ).stdout.strip()
+        before = self._snapshot()
+        done = self._run_install()
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("does not apply", done.stderr)
+        self.assertIn(head, done.stderr, "refusal must name the host HEAD")
+        self.assertIn("df4b65147d", done.stderr, "refusal must name the patch base")
+        self.assertEqual(self._snapshot(), before, "refusal must not modify files")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
