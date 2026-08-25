@@ -929,10 +929,13 @@ initiated.
   writes; plugin-owned prompt notes do not pretend to have a host approval.
 - **Read-only trajectory** — `state.db` is opened with `mode=ro`.
 - **No system prompt access** — the base prompt stays immutable.
-- Requires the Hermes plugin API (≥ 0.17.0; `register_tool`, `register_command`,
-  `register_hook`, and `ctx.llm`). New proposals additionally need the host
-  route patch (see Installation); without it they fail loudly with
-  `llm_invocation_unavailable`, which is the intended honest gate.
+- **Host support.** Uses the plugin API available since Hermes 0.17.0
+  (`register_tool`, `register_command`, `register_hook`, `ctx.llm`). Verified on
+  **0.19.0** (server, patched core) and **0.20.1** (desktop, stock core). New
+  proposals additionally need the host route patch (see Installation); without it
+  they fail loudly with `llm_invocation_unavailable`, which is the intended honest
+  gate. The manifest format cannot express a host requirement, so this is enforced
+  at runtime rather than at install time.
 
 ---
 
