@@ -2622,10 +2622,13 @@ def _refine_once(
     # carries the gateway's exact route, so persisted refine overrides must not
     # be expanded into provider/model kwargs.
     _invocation_bound = bool(getattr(llm, "invocation_bound", False))
-    # The model the plugin *intended* to use, recorded even when a bound facade
-    # or a "live" source means it cannot (or should not) transmit an explicit
-    # provider/model. Keeping requested_* populated lets a host resolution onto
-    # the conversation route or the fallback model be flagged as a substitution.
+    # The model the plugin *intended* to use. The plugin must ALWAYS run on the
+    # CURRENT host route — the model actually active in the session — never a
+    # stale config/live default. The facade exposes the current provider/model, so
+    # it is the source of truth for attribution; config.effective_llm_target() is
+    # only a fallback when the facade carries none. Keeping requested_* populated
+    # lets a host resolution onto another route or the fallback model be flagged
+    # as a substitution.
     _intended_target: Dict[str, str] = {"provider": "", "model": ""}
     try:
         _effective = config.effective_llm_target()
@@ -2647,7 +2650,13 @@ def _refine_once(
             _run_target_issues.extend(
                 config.llm_target_trust_denials(_effective).values()
             )
-        if isinstance(_effective, dict):
+        # Current model is authoritative: prefer the live facade route.
+        _facade_provider = str(getattr(llm, "provider", "") or "")
+        _facade_model = str(getattr(llm, "model", "") or "")
+        if _facade_provider or _facade_model:
+            _intended_target["provider"] = _facade_provider
+            _intended_target["model"] = _facade_model
+        elif isinstance(_effective, dict):
             _intended_target["provider"] = str(_effective.get("provider", "") or "")
             _intended_target["model"] = str(_effective.get("model", "") or "")
     except Exception:
