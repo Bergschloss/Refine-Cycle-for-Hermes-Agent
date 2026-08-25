@@ -100,6 +100,28 @@ _NUMERIC_METRIC_KEYS = {
 # rather than weakening the credential grammar with a broad substring exception.
 _NON_SECRET_TOKEN_KEYS = {"tokenizer", "token_count"}
 
+# Fullwidth/compatibility forms of printable ASCII live in this block; each
+# maps to exactly one ASCII character under NFKC (e.g. 'ａ'->'a', '＝'->'=',
+# U+3000 -> ' '). Normalizing ONLY these characters keeps every other Unicode
+# form — typographic punctuation like '…', Cyrillic, CJK prose — byte-identical,
+# while letting the ASCII-oriented credential grammar match obfuscated labels.
+_COMPAT_ASCII_BLOCK = (
+    "\uff01"   # !
+    "\u3000"   # ideographic space
+)
+
+
+def _normalize_compatibility_forms(text: str) -> str:
+    """Canonicalize fullwidth/compatibility ASCII forms, nothing else."""
+    if not any(0xFF01 <= ord(ch) <= 0xFF5E or ch == "\u3000" for ch in text):
+        return text
+    return "".join(
+        unicodedata.normalize("NFKC", ch)
+        if 0xFF01 <= ord(ch) <= 0xFF5E or ch == "\u3000"
+        else ch
+        for ch in text
+    )
+
 
 def _key_from_prefix(prefix: str) -> str:
     """Extract one normalized key from a matched ``key[:=]`` prefix."""
@@ -197,8 +219,10 @@ def scrub_text(text: str) -> str:
     if not text:
         return text
 
-    # Normalize fullwidth/compatibility forms before matching (P0 02-01 fix)
-    text = unicodedata.normalize("NFKC", text)
+    # Normalize fullwidth/compatibility ASCII forms before matching (P0 02-01).
+    # Scoped to the compatibility block so ordinary Unicode (typographic
+    # punctuation, Cyrillic, CJK prose) passes through byte-identical.
+    text = _normalize_compatibility_forms(text)
 
     # Reject forged markers with a token suffix before preserving any canonical
     # field. The marker is not evidence that untrusted trailing text is safe.
