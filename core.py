@@ -2096,6 +2096,82 @@ def _journal_nonmutation(**kwargs: Any) -> Optional[str]:
         return None
 
 
+def _terminal_result(
+    *,
+    outcome: str,
+    success: bool,
+    message: str,
+    trigger: str = "",
+    safe_reason: str = "",
+    session: str = "",
+    proposal: Optional[Dict[str, Any]] = None,
+    group: Optional[Dict[str, Any]] = None,
+    llm_meta: Optional[Dict[str, Any]] = None,
+    evidence: Optional[Dict[str, Any]] = None,
+    error: str = "",
+    failure: str = "",
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build a terminal refine result and enforce the no-silent-no_op invariant.
+
+    The base invariant is *no failure may be indistinguishable from ``no_op``*.
+    Hand-carrying that on every exit is what let a ``no_op`` carry raw evidence
+    back to the model once; a new exit is a fresh chance to forget it. This
+    constructor centralizes the shape so the invariant is structural, not
+    discipline:
+
+    * ``outcome`` is required — an exit with no outcome is a bug here, not a
+      silent ``no_op``.
+    * If a ``failure`` code is present it refuses to build ``outcome='no_op'``;
+      a recognised failure maps to its distinct outcome instead.
+    * When a journal entry is wanted (``trigger`` given) it is written through
+      ``_journal_nonmutation`` and the id is attached, so the durable record and
+      the returned result always agree.
+
+    Returns the terminal dict; also attaches ``record_id``/``journal_id`` when a
+    journal id was produced.
+    """
+    if not outcome:
+        raise ValueError("_terminal_result requires an outcome")
+    normal_or_failure = not failure
+    if not normal_or_failure and outcome == "no_op":
+        raise ValueError(
+            f"refuse to build outcome='no_op' with failure='{failure}'"
+        )
+    entry_id: Optional[str] = None
+    if trigger:
+        entry_id = _journal_nonmutation(
+            trigger=trigger,
+            reason=safe_reason or message,
+            session_id=session,
+            proposal=proposal or {"action": "no_op", "reason": message, "expected_outcome": ""},
+            outcome=outcome,
+            error=error or message,
+            group=group,
+            llm_meta=llm_meta,
+        )
+    base: Dict[str, Any] = {
+        "success": success,
+        "outcome": outcome,
+        "message": message,
+        "reversible": bool(success and outcome not in ("no_op",)),
+    }
+    if entry_id:
+        base["journal_id"] = entry_id
+        base["record_id"] = entry_id
+    if proposal is not None:
+        base["proposal"] = proposal
+    if evidence is not None:
+        base["evidence"] = evidence
+    if llm_meta is not None:
+        base["llm_meta"] = llm_meta
+    if failure:
+        base["failure"] = failure
+    if extra:
+        base.update(extra)
+    return base
+
+
 def record_evidence_failure(
     session_id: str,
     collection_status: str,
@@ -2360,12 +2436,11 @@ def _refine_once(
     # and context guards are all bypassed. Must be distinguishable from no_op.
     _, journal_state = journal._load_entries_safe()
     if journal_state == "unreadable":
-        return {
-            "success": False,
-            "outcome": "journal_unreadable",
-            "message": "Journal could not be read; refine did not run to avoid bypassing budget limits.",
-            "reversible": False,
-        }
+        return _terminal_result(
+            outcome="journal_unreadable",
+            success=False,
+            message="Journal could not be read; refine did not run to avoid bypassing budget limits.",
+        )
 
     resolved_session, resolved_source = resolve_session_id(session_id or "")
     if not resolved_session:
@@ -2378,13 +2453,12 @@ def _refine_once(
             "session_id": "",
             "session_id_source": resolved_source,
         }
-        return {
-            "success": False,
-            "outcome": "session_unknown",
-            "message": "Cannot identify the current session; refine did not run.",
-            "evidence": evidence,
-            "reversible": False,
-        }
+        return _terminal_result(
+            outcome="session_unknown",
+            success=False,
+            message="Cannot identify the current session; refine did not run.",
+            evidence=evidence,
+        )
 
     # Resolve machine-generated sources before reading any private trajectory.
     session_db_source, source_lookup_status = _get_session_source_status(
@@ -2905,32 +2979,31 @@ def _refine_once(
             llm_meta=_run_llm_meta,
         )
         if not dry_run_entry_id:
-            return {
-                "success": False,
-                "outcome": "journal_error",
-                "message": "Dry-run proposal was generated, but its journal write failed.",
-                "proposal": dry_proposal,
-                "evidence": evidence_summary,
-                "llm_called": True,
-                "llm_meta": _run_llm_meta,
-                "reversible": False,
-                "edits_applied": 0,
-            }
+            return _terminal_result(
+                outcome="journal_error",
+                success=False,
+                message="Dry-run proposal was generated, but its journal write failed.",
+                proposal=dry_proposal,
+                evidence=evidence_summary,
+                llm_meta=_run_llm_meta,
+                extra={"llm_called": True, "edits_applied": 0},
+            )
 
-        return {
-            "success": True,
-            "outcome": "dry_run",
-            "message": "Dry run: proposal shown, nothing applied.",
-            "journal_id": dry_run_entry_id,
-            "proposal": dry_proposal,
-            "diff": diff_text,
-            "diff_truncated": truncated,
-            "evidence": evidence_summary,
-            "llm_called": True,
-            "llm_meta": _run_llm_meta,
-            "reversible": False,
-            "edits_applied": 0,
-        }
+        return _terminal_result(
+            outcome="dry_run",
+            success=True,
+            message="Dry run: proposal shown, nothing applied.",
+            proposal=dry_proposal,
+            llm_meta=_run_llm_meta,
+            evidence=evidence_summary,
+            extra={
+                "journal_id": dry_run_entry_id,
+                "diff": diff_text,
+                "diff_truncated": truncated,
+                "llm_called": True,
+                "edits_applied": 0,
+            },
+        )
 
     if proposal.get("action") == "multi":
         # Acquire the mutation lock only around the apply (mutation), which has
@@ -2985,14 +3058,13 @@ def _refine_once(
     # Single-edit apply: serialize the mutation, not the proposal call above.
     with journal.mutation_lock():
         if journal.daily_limit_reached():
-            return {
-                "success": False,
-                "outcome": "rejected",
-                "message": f"Daily edit limit reached ({config.max_edits_per_day()}).",
-                "proposal": proposal,
-                "reversible": False,
-                "edits_applied": 0,
-            }
+            return _terminal_result(
+                outcome="rejected",
+                success=False,
+                message=f"Daily edit limit reached ({config.max_edits_per_day()}).",
+                proposal=proposal,
+                extra={"edits_applied": 0},
+            )
         response = _apply_edit(
             proposal,
             trigger=trigger,

@@ -14264,6 +14264,34 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("safety_blocked", outcomes)
         self.assertNotIn("no_op", outcomes)
 
+    def test_terminal_result_refuses_no_op_with_failure(self):
+        """The terminal-result constructor enforces the invariant structurally.
+
+        The base invariant is 'no failure may be indistinguishable from no_op'.
+        Hand-carrying that on every exit is what let a no_op carry raw evidence
+        back to the model once. The constructor must refuse to build outcome=
+        'no_op' when a failure code is present, so a new exit cannot silently
+        forget to map its failure to a distinct outcome.
+        """
+        with self.assertRaises(ValueError):
+            core._terminal_result(
+                outcome="no_op", success=False,
+                message="boom", failure="local_safety",
+            )
+        # A genuine no_op (no failure) is fine and stays reversible=False.
+        result = core._terminal_result(
+            outcome="no_op", success=True, message="nothing to do",
+        )
+        self.assertEqual(result["outcome"], "no_op")
+        self.assertFalse(result["reversible"])
+        # A failure maps to its distinct outcome, carrying the failure code.
+        r2 = core._terminal_result(
+            outcome="safety_blocked", success=False,
+            message="blocked", failure="local_safety",
+        )
+        self.assertEqual(r2["failure"], "local_safety")
+        self.assertEqual(r2["outcome"], "safety_blocked")
+
     def test_ordinary_numeric_prompt_note_conditions_are_not_hosts(self):
         for policy in (
             "When retrying 3 times, log the error.",
