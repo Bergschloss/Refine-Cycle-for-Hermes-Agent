@@ -612,33 +612,51 @@ def _is_error_content(content: str) -> bool:
     """Classify structured status first, then bounded head/tail error text."""
     if not content:
         return False
+    
     structured = _structured_error_status(content)
     if structured is not None:
         return structured
+    
+    # Only sample for heuristic if the content is large
     sample = (
         content
         if len(content) <= 4000
         else content[:1000] + "\n…\n" + content[-3000:]
     )
-    sample = re.sub(r'(?i)["\']?error["\']?\s*:\s*(?:null|""|\'\')', "", sample)
-    # These are complete runner summaries, not prose that happens to include
-    # "failed". Keep the forms deliberately narrow so a real failure elsewhere
-    # in arbitrary output cannot be hidden by an optimistic status line.
-    if re.search(
-        r"(?i)^\s*\d+\s+passed,\s*0\s+failed(?:\s+in\s+\S+)?\s*$",
-        sample,
-    ) or re.search(
-        r"(?is)^\s*ran\s+\d+\s+tests?\s+in\s+[^\n]+\n\s*ok\s*$",
-        sample,
+    
+    # Strip out quoted error: null / "" / '' patterns to avoid false positives
+    sample = re.sub(r"(?i)[\"\']?error[\"\']?\s*:\s*(?:null|\"\"|\'\')", "", sample)
+    
+    # Narrow, known success forms that must NOT be classified as errors
+    # These are complete runner summaries, not prose that happens to include "failed"
+    if (
+        re.search(
+            r"(?i)^\s*\d+\s+passed,\s*0\s+failed(?:\s+in\s+\S+)?\s*$",
+            sample,
+        )
+        or re.search(
+            r"(?is)^\s*ran\s+\d+\s+tests?\s+in\s+[^\n]+\n\s*ok\s*$",
+            sample,
+        )
+        or (  # Canonical Cargo success: "test result: ok ... 0 failed ..."
+            re.search(
+                r"(?is)^\s*test\s+result:\s*ok.*?0\s+failed.*$",
+                sample,
+            )
+        )
     ):
         return False
+    
+    # For Jest/Vitest, only include if we have a canonical form (e.g., "0 tests  passed")
+    # We could add more Jest-specific patterns if we have examples
+    
+    # The rest of the function remains unchanged to catch real errors
     return bool(
         re.search(
-            r"(?i)(?:^|[\s\[{(,:;])(?:traceback|error\b|failed\b|failure\b|file\s+not\s+found\b|no\s+such\s+file\b|cannot\s+find\s+the\s+(?:file|path)\b|ENOENT\b|timed?\s*out\b|timeout\b)",
+            r"(?i)(?:^|[\s\[\{(,:;])(?:traceback|error\b|failed\b|failure\b|file\s+not\s+found\b|no\s+such\s+file\b|cannot\s+find\s+the\s+(?:file|path)\b|ENOENT\b|timed?\s*out\b|timeout\b)",
             sample,
         )
     )
-
 
 def _is_correction(
     content: str, *, has_prior_assistant_response: bool = False
