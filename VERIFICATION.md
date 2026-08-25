@@ -6,18 +6,12 @@ output*. A green test is `UNPROVEN` here by definition, no matter how many tests
 
 This iteration makes **no source fix and no source commit**. It only builds the ledger.
 
-> **Seed-availability note (read first).**
-> The plan for this task assumed seed rows from `G:\Hermes\round14-live-report.md`
-> (workspace A). That exact file is **not present** in this workspace (B,
-> `/home/ubuntu/.hermes/plugins/refine`). The round-14 report that exists here
-> (`/home/ubuntu/refine-autorun-round14-report.md`) is a *different* run — it reports
-> `MainPID=285421`, a retry-telemetry fix, and a `Ran 545`/now-660 suite; it does not carry the
-> `MainPID=356838` / `ac343ac173c1` / `5832488…` quoted chains the plan cites. Commit `105d0fc`
-> present here describes a synthetic-DB reproduction, not a quoted live chain.
-> Therefore every row that depends on `round14-live-report.md` is entered as
-> `UNPROVEN (seed pending)` — not fabricated as proven. It must be re-verified against that
-> document before it may be called live; the two overstated verdicts (multi-edit, memory-rollback
-> substring trap) are deliberately **not** carried forward as proven.
+> **Seed source (read first).**
+> The `PROVEN` rows below are seeded from the round-14 live audit report, now copied into this
+> workspace at `/home/ubuntu/round14-live-report.md` (originally `G:\Hermes\round14-live-report.md`).
+> Every `PROVEN` row carries the quoted live output from that report. Two verdicts in that report
+> were overstated and are corrected on the way in (see E-04b and E-05a): they are entered as
+> `UNPROVEN`, not carried forward as proven.
 
 ## Ledger
 
@@ -42,11 +36,14 @@ This iteration makes **no source fix and no source commit**. It only builds the 
 | O-17 | `safety_blocked` on `local_safety` — **nothing tests it** | UNPROVEN (high) | 0 test refs; 4 emission paths in llm.py | 0 |
 | O-18 | `target_issue` on unusable model target | GREEN TESTS | 4 refs | 0 |
 | O-19 | `rollback` emitted by rollback command | GREEN TESTS | 2 refs | 0 |
-| E-01 | Gateway restart proven by changed `MainPID` **and** `ActiveEnterTimestamp` | UNPROVEN (seed pending) | cited in round14-live-report.md, not present here | 0 |
-| E-02 | Skill create → rollback (journal `ac343ac173c1`) | UNPROVEN (seed pending) | seed not present in workspace B | 0 |
-| E-03 | Skill patch → rollback (baseline sha matched, content restored) | UNPROVEN (seed pending) | seed not present; `105d0fc` here is synthetic | 0 |
-| E-04 | Memory rollback by `index`+`prefix_digest` (12→11) | UNPROVEN (seed pending) | seed not present; substring-trap argument is reasoned, NOT tested | 0 |
-| E-05 | Real concurrency: two parallel runs serialize on the mutation lock | UNPROVEN (seed pending) | seed not present; live 28s hold reported but not re-verified | 0 |
+| E-01 | Gateway restart proven by changed `MainPID` **and** `ActiveEnterTimestamp` | PROVEN | `MainPID=356838`, `ActiveEnterTimestamp=Fri 2026-08-14 13:21:39 UTC` — later than commit `a7b2251` `13:09:45Z` | 0 |
+| E-02 | Skill create → rollback (journal `ac343ac173c1`) | PROVEN | applied → `hermes skills list` shows `git-commit-preflig…`; rollback → `✅ Rollback ac343ac173c1: Skill 'git-commit-preflight' deleted.`; after → `not in list`, dir absent | 0 |
+| E-03 | Skill patch → rollback (baseline sha matched, content restored) | PROVEN | `refine_baseline.sha256=5832488…`; after rollback `sha256 5832488…` `match True`; after patch `sha256 b6410da4…` | 0 |
+| E-04 | Memory rollback by `index`+`prefix_digest` (12→11) | PROVEN | recovery `index 11`, `prefix_digest b5a3db62…`; rollback → `Removed the exact appended memory entry`; `MEMORY.md` 12→11 | 0 |
+| E-04b | Memory-rollback substring trap is impossible (by code path) | UNPROVEN | report says "substring trap verified by code path" and admits the live long-neighbour case was skipped for budget; code-path argument is reasoned, NOT tested | 0 |
+| E-05 | Real concurrency: two parallel runs serialize on the mutation lock | PROVEN | P1 applied (journal `8945661f56ba` prepared+applied), P2 got `Daily edit limit reached (3)`; both ended at same 13:17:55; lock file absent after | 0 |
+| E-05a | Multi-edit pending-approval live | UNPROVEN | report marks `proven (deterministic fake-host unit tests)` — fake host is GREEN TESTS by this ledger's bar, not live | 0 |
+| E-06 | Design: mutation lock held across the whole LLM call | PROVEN (measurement) | P1 held lock 28 s (13:17:27→13:17:55); P2 blocked until release (report §Design finding) | 0 |
 | S-01 | Green CI is real (suite runs N tests, not 0) | PROVEN | CI floor guard: `ran=666 floor=600` (b725c2d), probe went red `ran=0` (1beaeaa) | 1 |
 | S-02 | `scripts` only; stdlib only; no new dependency | PROVEN (by inspection) | pyproject/stdlib imports verified in suite | 0 |
 | P-13 | 13-01 journal replay is material? | UNPROVEN (measured, TBD) | server journal 90 entries / 131,655 bytes — replay latency NOT yet timed | 0 |
