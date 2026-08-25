@@ -3653,6 +3653,57 @@ class RefineTests(unittest.TestCase):
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())
         self.assertFalse(lock_path.exists())
 
+    def test_mutation_lock_is_not_held_across_llm_call(self):
+        """Confirmed defect: refine holds the mutation lock across the whole LLM call.
+
+        Round-14 live report: process 1 held the lock for 28 s (13:17:27 ->
+        13:17:55) and process 2 was blocked until release. The lock exists to
+        serialize *mutations*; the LLM call mutates nothing, so a slow or hung
+        provider blocks every other refine operation (including the auto path)
+        until its timeout.
+
+        This test asserts the corrected contract: while the proposal call is in
+        flight, the mutation lock must be acquirable. It is currently not, so a
+        slow provider stalls the whole host.
+        """
+        entered = threading.Event()
+        release = threading.Event()
+        proposal = {
+            "action": "create", "kind": "skill", "name": "slow-lock",
+            "content": "# Guidance\n\nDo X.", "reason": "test", "evidence": [],
+        }
+
+        class BlockingLlm(MockLlm):
+            def __init__(self):
+                super().__init__(proposal)
+
+            def complete_structured(self, **kwargs):
+                self.calls.append(kwargs)
+                entered.set()
+                release.wait(timeout=5)
+                return MockResult(proposal)
+
+        results = []
+
+        def worker():
+            results.append(core.refine_run(BlockingLlm()))
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self.assertTrue(entered.wait(timeout=5))  # LLM call is now in flight
+
+        # While the LLM call runs, the mutation lock must be free.
+        with journal.try_mutation_lock() as acquired:
+            self.assertTrue(
+                acquired,
+                "mutation lock held during LLM call: a slow provider blocks "
+                "every refine operation on the host",
+            )
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+
     def test_dead_lock_lease_cleanup_unblocks_concurrent_run(self):
         """A lock whose process lease died is reclaimed before a real run."""
         lock_path = journal._mutation_lock_path(journal.ensure_dirs())

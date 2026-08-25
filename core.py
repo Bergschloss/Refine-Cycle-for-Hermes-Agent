@@ -2933,17 +2933,21 @@ def _refine_once(
         }
 
     if proposal.get("action") == "multi":
-        transaction = _apply_transaction(
-            proposal,
-            trigger=trigger,
-            safe_reason=safe_reason,
-            session=session,
-            started=started,
-            llm_meta=_run_llm_meta,
-            explicit_session=explicit_session,
-            session_ending=session_ending,
-            source_revision=source_revision,
-        )
+        # Acquire the mutation lock only around the apply (mutation), which has
+        # already been produced by the proposal call above. The lock serializes
+        # mutations, not the LLM call, so a slow provider cannot block the host.
+        with journal.mutation_lock():
+            transaction = _apply_transaction(
+                proposal,
+                trigger=trigger,
+                safe_reason=safe_reason,
+                session=session,
+                started=started,
+                llm_meta=_run_llm_meta,
+                explicit_session=explicit_session,
+                session_ending=session_ending,
+                source_revision=source_revision,
+            )
         transaction["evidence"] = evidence_summary
         transaction["llm_meta"] = _run_llm_meta
         return transaction
@@ -2978,15 +2982,26 @@ def _refine_once(
             "llm_meta": _run_llm_meta,
         }
 
-    response = _apply_edit(
-        proposal,
-        trigger=trigger,
-        safe_reason=safe_reason,
-        session=session,
-        started=started,
-        llm_meta=_run_llm_meta,
-        source_revision=source_revision,
-    )
+    # Single-edit apply: serialize the mutation, not the proposal call above.
+    with journal.mutation_lock():
+        if journal.daily_limit_reached():
+            return {
+                "success": False,
+                "outcome": "rejected",
+                "message": f"Daily edit limit reached ({config.max_edits_per_day()}).",
+                "proposal": proposal,
+                "reversible": False,
+                "edits_applied": 0,
+            }
+        response = _apply_edit(
+            proposal,
+            trigger=trigger,
+            safe_reason=safe_reason,
+            session=session,
+            started=started,
+            llm_meta=_run_llm_meta,
+            source_revision=source_revision,
+        )
     response["evidence"] = evidence_summary
     response["llm_meta"] = _run_llm_meta
     return response
@@ -3897,6 +3912,13 @@ def refine_run(
     see ``_session_can_hold_a_note``.
     """
     started = time.time()
+    # The mutation lock serializes *mutations* and nothing else. Evidence
+    # collection and the LLM proposal call mutate no state, so they must run
+    # WITHOUT the lock: otherwise a slow or hung provider (live measured 28 s)
+    # blocks every other refine operation on the host. The lock is acquired in
+    # _apply_edit / _apply_transaction, immediately before the first backup or
+    # write. The budget is re-verified there, after acquiring, not before.
+    # Reordering is itself a mutation, so it keeps its own brief lock.
     with journal.mutation_lock():
         try:
             _reconcile_pending()
@@ -3908,92 +3930,93 @@ def refine_run(
                 "reversible": False,
             }
 
-        if dry_run:
-            # Dry-run: one proposal pass, no apply, no budget consumed.
-            return _refine_once(
-                llm, reason=scrub_text(reason), session_id=session_id,
-                auto=auto, dry_run=True, explicit_session=explicit_session,
-                session_ending=session_ending,
-            )
-
-        runs: List[Dict[str, Any]] = []
-        # ``max_edits_per_run`` bounds proposal passes; ``max_edits_per_proposal``
-        # bounds edits inside one transaction; the daily edit budget bounds edits
-        # overall and is re-checked before every single edit.
-        max_runs = max(1, config.max_edits_per_run())
-        run_reason = scrub_text(reason)
-        for _ in range(max_runs):
-            if journal.daily_limit_reached():
-                break
-            result = _refine_once(
-                llm, reason=run_reason, session_id=session_id, auto=auto,
-                explicit_session=explicit_session, session_ending=session_ending,
-            )
-            runs.append(result)
-            if not result.get("success") or not int(result.get("edits_applied", 0) or 0):
-                break
-            targets = _completed_targets(result)
-            if not targets:
-                break
-            note = (
-                f"Already completed or reserved {'; '.join(targets)} in this run; "
-                "propose a different edit or no_op."
-            )
-            run_reason = f"{reason}\n{note}".strip() if reason else note
-            run_reason = scrub_text(run_reason)
-
-        if not runs:
-            return {
-                "success": False,
-                "message": f"Daily edit limit reached ({config.max_edits_per_day()}).",
-                "reversible": False,
-            }
-        if len(runs) == 1:
-            return runs[0]
-
-        recoveries: List[Dict[str, Any]] = []
-        # Each pass already returns its own recoveries newest-first.  Traverse
-        # passes in reverse too, so the combined list is directly safe for
-        # positional memory rollback.
-        for item in reversed(runs):
-            inner = item.get("recoveries")
-            if isinstance(inner, list) and inner:
-                recoveries.extend(inner)
-                continue
-            if item.get("journal_id") and int(item.get("edits_applied", 0) or 0):
-                recoveries.extend(_recoveries_for([item]))
-
-        failed_after_success = bool(
-            recoveries and any(not item.get("success") for item in runs)
+    if dry_run:
+        # Dry-run: one proposal pass, no apply, no budget consumed.
+        return _refine_once(
+            llm, reason=scrub_text(reason), session_id=session_id,
+            auto=auto, dry_run=True, explicit_session=explicit_session,
+            session_ending=session_ending,
         )
-        last = runs[-1]
-        if failed_after_success:
-            message = (
-                f"PARTIAL SUCCESS: {len(recoveries)} earlier edit(s) were applied or reserved, "
-                "but a later pass failed. Use the recovery IDs listed below."
-            )
-            outcome = "partial_success"
-            success = False
-        else:
-            message = (
-                f"{len(runs)} pass(es), {len(recoveries)} edit(s) applied or reserved "
-                f"({time.time() - started:.1f}s)"
-            )
-            outcome = "completed"
-            success = all(item.get("success") for item in runs)
-        response: Dict[str, Any] = {
-            "success": success,
-            "outcome": outcome,
-            "message": message,
-            "proposal": last.get("proposal", runs[0].get("proposal", {})),
-            "results": runs,
-            "recoveries": recoveries,
-            "journal_ids": [item["journal_id"] for item in recoveries],
-            "evidence": runs[0].get("evidence", {}),
-            "reversible": any(item.get("reversible") for item in recoveries),
-            "edits_applied": len(recoveries),
+
+    runs: List[Dict[str, Any]] = []
+    # ``max_edits_per_run`` bounds proposal passes; ``max_edits_per_proposal``
+    # bounds edits inside one transaction; the daily edit budget bounds edits
+    # overall and is re-checked after acquiring the mutation lock, before every
+    # single edit.
+    max_runs = max(1, config.max_edits_per_run())
+    run_reason = scrub_text(reason)
+    for _ in range(max_runs):
+        if journal.daily_limit_reached():
+            break
+        result = _refine_once(
+            llm, reason=run_reason, session_id=session_id, auto=auto,
+            explicit_session=explicit_session, session_ending=session_ending,
+        )
+        runs.append(result)
+        if not result.get("success") or not int(result.get("edits_applied", 0) or 0):
+            break
+        targets = _completed_targets(result)
+        if not targets:
+            break
+        note = (
+            f"Already completed or reserved {'; '.join(targets)} in this run; "
+            "propose a different edit or no_op."
+        )
+        run_reason = f"{reason}\n{note}".strip() if reason else note
+        run_reason = scrub_text(run_reason)
+
+    if not runs:
+        return {
+            "success": False,
+            "message": f"Daily edit limit reached ({config.max_edits_per_day()}).",
+            "reversible": False,
         }
-        return response
+    if len(runs) == 1:
+        return runs[0]
+
+    recoveries: List[Dict[str, Any]] = []
+    # Each pass already returns its own recoveries newest-first.  Traverse
+    # passes in reverse too, so the combined list is directly safe for
+    # positional memory rollback.
+    for item in reversed(runs):
+        inner = item.get("recoveries")
+        if isinstance(inner, list) and inner:
+            recoveries.extend(inner)
+            continue
+        if item.get("journal_id") and int(item.get("edits_applied", 0) or 0):
+            recoveries.extend(_recoveries_for([item]))
+
+    failed_after_success = bool(
+        recoveries and any(not item.get("success") for item in runs)
+    )
+    last = runs[-1]
+    if failed_after_success:
+        message = (
+            f"PARTIAL SUCCESS: {len(recoveries)} earlier edit(s) were applied or reserved, "
+            "but a later pass failed. Use the recovery IDs listed below."
+        )
+        outcome = "partial_success"
+        success = False
+    else:
+        message = (
+            f"{len(runs)} pass(es), {len(recoveries)} edit(s) applied or reserved "
+            f"({time.time() - started:.1f}s)"
+        )
+        outcome = "completed"
+        success = all(item.get("success") for item in runs)
+    response: Dict[str, Any] = {
+        "success": success,
+        "outcome": outcome,
+        "message": message,
+        "proposal": last.get("proposal", runs[0].get("proposal", {})),
+        "results": runs,
+        "recoveries": recoveries,
+        "journal_ids": [item["journal_id"] for item in recoveries],
+        "evidence": runs[0].get("evidence", {}),
+        "reversible": any(item.get("reversible") for item in recoveries),
+        "edits_applied": len(recoveries),
+    }
+    return response
 
 
 def refine_rollback(entry_id: str) -> Dict[str, Any]:
