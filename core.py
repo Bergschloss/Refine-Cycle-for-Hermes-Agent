@@ -571,6 +571,86 @@ def _get_session_source(session_id: str) -> str:
     return _get_session_source_status(session_id)[0]
 
 
+def _capture_source_revision(session_id: str) -> Optional[frozenset]:
+    """Capture an internal source-evidence revision token for a session.
+
+    The token is the set of ``rowid`` values of the *active* current-session
+    rows. Hermes rewind/rewrite archives or replaces those rows, so a stale
+    row ceases to be active (either ``active`` flips off or the ``rowid`` is
+    gone) while an ordinary append leaves every captured row active. Row
+    identity is therefore a suitable revision marker for "was this evidence
+    rewound?".
+
+    The token is strictly internal: it is never sent to the LLM, journaled,
+    echoed in a tool result, or included in a public evidence summary. It is
+    consumed only by :func:`_source_revision_is_current` immediately before a
+    mutation.
+
+    Returns ``None`` on capture failure (unreadable/missing DB or query error),
+    which the caller must treat as fail-closed. An empty session yields an
+    empty frozenset (no rows to invalidate).
+    """
+    if not session_id:
+        return None
+    connection = _open_db()
+    if not connection:
+        return None
+    try:
+        rows = connection.execute(
+            "SELECT rowid FROM messages WHERE session_id = ? AND active = 1",
+            (session_id,),
+        ).fetchall()
+        return frozenset(int(row["rowid"]) for row in rows)
+    except Exception as exc:
+        logger.warning("Cannot capture source revision token: %s", scrub_text(str(exc)))
+        return None
+    finally:
+        connection.close()
+
+
+def _source_revision_is_current(
+    session_id: str, revision: Optional[frozenset]
+) -> bool:
+    """Return True only when every captured source row is still active.
+
+    Re-opens the session DB through the same read-only path used for evidence
+    collection and verifies each captured ``rowid`` still belongs to this
+    session and is still active. A missing row, a replaced row, or a row whose
+    ``active`` flag flipped means the evidence was rewound/regenerated and the
+    proposal is grounded in an abandoned branch.
+
+    Fail-closed semantics:
+    * ``revision`` is ``None`` (capture failed) -> False;
+    * a query fails -> False;
+    * any captured row is absent or inactive -> False.
+
+    An ordinary append does not touch captured rows, so it returns True and the
+    pass proceeds.
+    """
+    if revision is None:
+        return False
+    if not revision:
+        # No source rows to validate — nothing can be rewound out from under us.
+        return True
+    connection = _open_db()
+    if not connection:
+        return False
+    try:
+        placeholders = ",".join("?" for _ in revision)
+        rows = connection.execute(
+            f"SELECT rowid FROM messages "
+            f"WHERE rowid IN ({placeholders}) AND session_id = ? AND active = 1",
+            tuple(revision) + (session_id,),
+        ).fetchall()
+        # Every captured row must still be active in the same session.
+        return {int(row["rowid"]) for row in rows} == revision
+    except Exception as exc:
+        logger.warning("Cannot verify source revision token: %s", scrub_text(str(exc)))
+        return False
+    finally:
+        connection.close()
+
+
 def _structured_error_status(content: str) -> Optional[bool]:
     """Return a definitive structured status, or None when text is unstructured."""
     try:
@@ -2494,6 +2574,45 @@ def _refine_once(
             "evidence": evidence,
         }
 
+    # Capture an internal source-evidence revision token from the exact active
+    # current-session rows used for the proposal. Row identities are suitable
+    # because a rewind/rewrite archives or replaces them, while an ordinary
+    # append leaves them active. The token never leaves this function: it is
+    # not sent to the LLM, journaled, echoed in a tool result, or included in
+    # a public evidence summary. It is consumed only by the fail-closed check
+    # immediately before any host mutation in _apply_edit/_apply_transaction.
+    source_revision = _capture_source_revision(session)
+    if source_revision is None:
+        error = (
+            "Current-session source evidence could not be versioned; refine "
+            "refused to risk applying a proposal grounded in rewound evidence. "
+            "This prevents a stale commit; it cannot reclaim the already-spent "
+            "model call."
+        )
+        entry_id = _journal_nonmutation(
+            trigger=trigger,
+            reason=safe_reason or error,
+            session_id=session,
+            proposal={"action": "no_op", "reason": error, "expected_outcome": ""},
+            outcome="evidence_invalidated",
+            error=error,
+        )
+        response = {
+            "success": False,
+            "outcome": "evidence_invalidated",
+            "message": error,
+            "evidence": {
+                "session_id": session,
+                "session_id_source": session_source,
+                "session_source": session_db_source,
+                "source_lookup_status": source_lookup_status,
+            },
+            "reversible": False,
+        }
+        if entry_id:
+            response["journal_id"] = entry_id
+        return response
+
     # An explicitly selected session is a strict trajectory boundary. Do not
     # query or echo patterns derived from any other session.
     cross_session_patterns = (
@@ -2823,6 +2942,7 @@ def _refine_once(
             llm_meta=_run_llm_meta,
             explicit_session=explicit_session,
             session_ending=session_ending,
+            source_revision=source_revision,
         )
         transaction["evidence"] = evidence_summary
         transaction["llm_meta"] = _run_llm_meta
@@ -2865,6 +2985,7 @@ def _refine_once(
         session=session,
         started=started,
         llm_meta=_run_llm_meta,
+        source_revision=source_revision,
     )
     response["evidence"] = evidence_summary
     response["llm_meta"] = _run_llm_meta
@@ -2880,12 +3001,52 @@ def _apply_edit(
     started: float,
     group: Optional[Dict[str, Any]] = None,
     llm_meta: Optional[Dict[str, Any]] = None,
+    source_revision: Optional[frozenset] = None,
+    source_session: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate, back up, apply, and finalize exactly one edit.
 
     Guardrails read live host and journal state, so an edit inside a transaction
     is checked against the edits that were already applied before it.
+
+    ``source_revision`` is the internal evidence-version token captured from the
+    active current-session rows used to build the proposal. When provided (a
+    real Refine run), it is verified fail-closed before any backup,
+    ``journal.prepare``, or host mutation: if the evidence was rewound or the DB
+    is unreadable, the edit fails closed with ``evidence_invalidated``. When
+    ``None`` (no token captured, e.g. a direct unit call), the check is skipped;
+    ``_refine_once`` already fails closed on a capture failure before reaching
+    here. This prevents a stale commit from an abandoned branch; it cannot
+    reclaim the already-spent model call.
     """
+    if source_revision is not None and not _source_revision_is_current(
+        source_session or session, source_revision
+    ):
+        error = (
+            "Source evidence was rewound or is unreadable; refine did not apply "
+            "a proposal grounded in stale session rows."
+        )
+        entry_id = _journal_nonmutation(
+            trigger=trigger,
+            reason=safe_reason or error,
+            session_id=session,
+            proposal=proposal,
+            outcome="evidence_invalidated",
+            error=error,
+            group=group,
+            llm_meta=llm_meta,
+        )
+        result = {
+            "success": False,
+            "outcome": "evidence_invalidated",
+            "message": error,
+            "proposal": proposal,
+            "reversible": False,
+            "edits_applied": 0,
+        }
+        if entry_id:
+            result["record_id"] = entry_id
+        return result
     guardrail_error = _validate_proposal(proposal)
     if guardrail_error:
         entry_id = _journal_nonmutation(
@@ -3327,6 +3488,7 @@ def _apply_transaction(
     llm_meta: Optional[Dict[str, Any]] = None,
     explicit_session: bool = False,
     session_ending: bool = False,
+    source_revision: Optional[frozenset] = None,
 ) -> Dict[str, Any]:
     """Apply one multi-edit proposal as a sequence of independent durable edits.
 
@@ -3334,6 +3496,12 @@ def _apply_transaction(
     the existing single-edit rollback and approval machinery is reused unchanged.
     Edits are applied in order and the run stops at the first failure, leaving a
     journal that states exactly which edits applied and which did not.
+
+    ``source_revision`` is the internal evidence-version token captured from the
+    active current-session rows used to build the proposal. When provided (a
+    real Refine run), it is verified once, fail-closed, before the first edit is
+    applied so a proposal grounded in rewound evidence never creates a backup or
+    mutates host state. When ``None`` (a direct unit call), the check is skipped.
     """
     edits = [edit for edit in proposal.get("edits", []) if isinstance(edit, dict)]
     if not edits:
@@ -3532,6 +3700,37 @@ def _apply_transaction(
             "edits_applied": 0,
         }
 
+    # Fail-closed evidence gate: verify the source rows used to build the
+    # proposal are still active before applying the first edit. A rewind or
+    # rewrite archives/replaces those rows; a guard here prevents a proposal
+    # grounded in an abandoned branch from creating any backup or consuming any
+    # daily edit. This cannot reclaim the already-spent model call.
+    if source_revision is not None and not _source_revision_is_current(session, source_revision):
+        error = (
+            "Source evidence was rewound or is unreadable; refine did not apply "
+            "a multi-edit transaction grounded in stale session rows."
+        )
+        _journal_nonmutation(
+            trigger=trigger,
+            reason=safe_reason or error,
+            session_id=session,
+            proposal=proposal,
+            outcome="evidence_invalidated",
+            error=error,
+            llm_meta=llm_meta,
+        )
+        return {
+            "success": False,
+            "outcome": "evidence_invalidated",
+            "message": error,
+            "proposal": proposal,
+            "results": [],
+            "recoveries": [],
+            "journal_ids": [],
+            "reversible": False,
+            "edits_applied": 0,
+        }
+
     for index, edit in enumerate(edits):
         # Re-read the durable budget between edits: it counts edits, so a long
         # transaction can legitimately exhaust it part way through.
@@ -3549,6 +3748,8 @@ def _apply_transaction(
             started=started,
             group=edit_group(index),
             llm_meta=llm_meta,
+            source_revision=source_revision,
+            source_session=session,
         )
         results.append(item)
         if not item.get("success"):

@@ -14020,6 +14020,120 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 skill = skill_proposal("benign-tech", body=content)
                 self.assertIsNone(core._validate_proposal(skill))
 
+    # ── P1: invalidate a proposal when its source evidence was rewound ──────
+    def test_source_revision_capture_and_current_are_consistent(self):
+        """A real throwaway session yields a non-empty revision token."""
+        FakeHost.make_db()
+        revision = core._capture_source_revision("session")
+        self.assertEqual(len(revision), 4)  # 4 active rows seeded
+        self.assertTrue(core._source_revision_is_current("session", revision))
+
+    def test_rewound_source_row_invalidates_proposal(self):
+        """Deactivating a captured row (as a rewind/rewrite would) fails closed."""
+        FakeHost.make_db()
+        revision = core._capture_source_revision("session")
+        # Simulate rewind: archive/replace one captured row (active -> 0).
+        conn = sqlite3.connect(self.root / "state.db")
+        conn.execute(
+            "UPDATE messages SET active = 0 WHERE rowid = (SELECT MIN(rowid) FROM messages)"
+        )
+        conn.commit()
+        conn.close()
+        self.assertFalse(core._source_revision_is_current("session", revision))
+        # A single-edit apply must fail closed with evidence_invalidated.
+        proposal = {
+            "action": "create", "kind": "skill", "name": "rewound-guard",
+            "content": "# Guidance\n\nDo X.", "reason": "test", "evidence": [],
+        }
+        result = core._apply_edit(
+            proposal, trigger="manual", safe_reason="test",
+            session="session", started=time.time(),
+            source_revision=revision, source_session="session",
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "evidence_invalidated")
+        self.assertEqual(result["edits_applied"], 0)
+        # No host mutation, no backup, no budget.
+        self.assertEqual(len(FakeHost.actions), 0)
+        self.assertEqual(journal.count_today_applied(), 0)
+        # One durable distinguishable outcome, and it is not no_op.
+        outcomes = [e.get("outcome") for e in journal.entries()]
+        self.assertIn("evidence_invalidated", outcomes)
+        self.assertNotIn("no_op", outcomes)
+
+    def test_ordinary_append_does_not_invalidate_proposal(self):
+        """Appending a new row after capture must not invalidate the pass."""
+        FakeHost.make_db()
+        revision = core._capture_source_revision("session")
+        # Ordinary append: add a fresh row, leave existing rows active.
+        conn = sqlite3.connect(self.root / "state.db")
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_name, timestamp, active) "
+            "VALUES ('session', 'user', 'extra', '', ?, 1)",
+            (time.time(),),
+        )
+        conn.commit()
+        conn.close()
+        self.assertTrue(core._source_revision_is_current("session", revision))
+
+    def test_multi_edit_rewound_evidence_fails_closed(self):
+        """A rewind before the first edit of a multi-edit transaction fails closed."""
+        FakeHost.make_db()
+        revision = core._capture_source_revision("session")
+        conn = sqlite3.connect(self.root / "state.db")
+        conn.execute(
+            "UPDATE messages SET active = 0 WHERE rowid = (SELECT MIN(rowid) FROM messages)"
+        )
+        conn.commit()
+        conn.close()
+        proposal = {
+            "action": "multi", "reason": "test", "summary": "two edits",
+            "edits": [
+                {
+                    "action": "create", "kind": "memory", "name": "m1",
+                    "content": "lesson one", "reason": "test", "evidence": [],
+                },
+                {
+                    "action": "create", "kind": "memory", "name": "m2",
+                    "content": "lesson two", "reason": "test", "evidence": [],
+                },
+            ],
+        }
+        result = core._apply_transaction(
+            proposal, trigger="manual", safe_reason="test",
+            session="session", started=time.time(),
+            source_revision=revision,
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "evidence_invalidated")
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(len(FakeHost.actions), 0)
+        self.assertEqual(journal.count_today_applied(), 0)
+
+    def test_db_is_opened_read_only_for_evidence_check(self):
+        """The source-revision re-check must never mutate the session DB."""
+        FakeHost.make_db()
+        revision = core._capture_source_revision("session")
+        BEFORE = set(revision)
+        self.assertTrue(core._source_revision_is_current("session", revision))
+        # _open_db uses the mode=ro URI (existing contract).
+        with patch.object(core.sqlite3, "connect", wraps=core.sqlite3.connect) as connect:
+            self.assertTrue(core._source_revision_is_current("session", revision))
+        self.assertIn("mode=ro", connect.call_args.args[0])
+        self.assertTrue(connect.call_args.kwargs["uri"])
+        # No source row was modified: the revision set is byte-identical.
+        self.assertEqual(set(core._capture_source_revision("session")), BEFORE)
+
+    def test_capture_failure_fails_closed_in_refine_once(self):
+        """A capture failure (DB unreadable) must fail closed, not apply."""
+        FakeHost.make_db()
+        # Force _open_db to None so capture cannot build a token.
+        with patch.object(core, "_open_db", return_value=None):
+            revision = core._capture_source_revision("session")
+        self.assertIsNone(revision)
+        # _source_revision_is_current(None) fails closed.
+        self.assertFalse(core._source_revision_is_current("session", revision))
+
     def test_ordinary_numeric_prompt_note_conditions_are_not_hosts(self):
         for policy in (
             "When retrying 3 times, log the error.",
