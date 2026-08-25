@@ -47,7 +47,7 @@ This iteration makes **no source fix and no source commit**. It only builds the 
 | S-01 | Green CI is real (suite runs N tests, not 0) | PROVEN | CI floor guard: `ran=666 floor=600` (b725c2d), probe went red `ran=0` (1beaeaa) | 1 |
 | S-02 | `scripts` only; stdlib only; no new dependency | PROVEN (by inspection) | pyproject/stdlib imports verified in suite | 0 |
 | S-03 | Scrubber uses positive allowlist for enum/count/identifier shapes (Task 5.5) | PROVEN (by inspection) | `_NON_SECRETS`, `_NUMERIC_METRIC_KEYS`, `_NON_SECRET_TOKEN_KEYS` are closed sets; denylist churn is bounded by decision (see S-03 note) | 0 |
-| P-13 | 13-01 journal replay is material? | UNPROVEN (measured, TBD) | server journal 90 entries / 131,655 bytes — replay latency NOT yet timed | 0 |
+| P-13 | Journal replay is material enough to justify caching? | PROVEN — NOT material | server journal: `_load_entries_state()` loads 410 entries, avg **5.75 ms** replay (min 5.13, max 6.17, 10 runs); lock acquire+release uncontended avg 17.1 ms; **do not cache** | 4 |
 
 ## Legend
 
@@ -74,8 +74,9 @@ locking. Then the rest. A wrong `no_op` costs a run; a wrong mutation costs the 
 
 ## Not yet done (tracked elsewhere)
 
-- 13-01 replay-latency measurement (needs a real `_load_entries_state()` timing run) — do not
-  cache until the numbers are material.
+- 13-01 replication-latency measurement is **resolved** (see P-13): replay is 5.75 ms avg and
+  **not material**, so no caching — a cache would add a new failure surface to the one file whose
+  integrity everything else depends on, for zero measured benefit.
 - Task 5.5 (scrubber decision) is **resolved by decision, not by code change** (see S-03).
 
 ## S-03 — scrubber allowlist decision (Task 5.5, resolved)
