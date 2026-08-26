@@ -2030,7 +2030,10 @@ class RefineTests(unittest.TestCase):
             llm.PROPOSAL_MAX_TOKENS * llm._CHARS_PER_TOKEN,
             llm.MAX_CONTENT_CHARS,
         )
-        self.assertLess(llm.REVIEWER_MAX_TOKENS, llm.PROPOSAL_MAX_TOKENS // 4)
+        # Reviewer must stay below the full proposal budget, but still have enough
+        # room to finish on a reasoning model over a real bounded trajectory
+        # (measured 2026-08-26: up to 1586 completion tokens on the heaviest).
+        self.assertLess(llm.REVIEWER_MAX_TOKENS, llm.PROPOSAL_MAX_TOKENS // 2)
 
         # A transaction may carry one permitted body per edit, so the budget has
         # to scale with the edit cap or it truncates the largest proposals.
@@ -2081,6 +2084,23 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(journal.is_reversible(entry))
         with patch.object(plugin_init.core, "refine_run", return_value=result):
             self.assertIn("cut off", plugin_init._handle_refine_command("").lower())
+
+    def test_output_budget_exhaustion_is_a_distinct_failure(self):
+        """A model that burns its full output budget with no final answer journals
+        budget_exhausted, NOT no_final_text — so the two are diagnosable apart
+        (budget_exhausted is fixed by the token cap, no_final_text is not)."""
+        model = MockLlm(MockResult(
+            None, text="", model="deepseek-v4-flash-vision-exp",
+            output_tokens=100_000,  # ≥ any proposal budget → budget_exhausted
+        ))
+        result = core.refine_run(model, session_id="session")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["failure"], "budget_exhausted")
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "llm_incomplete")
+        self.assertEqual(entry["proposal"]["failure"], "budget_exhausted")
+        self.assertIn("output budget", entry["proposal"]["reason"].lower())
 
     def test_model_call_failure_is_not_a_successful_noop(self):
         result = core.refine_run(MockLlm(RuntimeError("model unavailable")))

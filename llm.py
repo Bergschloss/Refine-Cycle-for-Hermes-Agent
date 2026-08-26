@@ -273,8 +273,14 @@ def proposal_max_tokens(edit_count: int = 1) -> int:
 
 
 PROPOSAL_MAX_TOKENS = proposal_max_tokens(1)
-# Reviewer fallback must remain materially cheaper than a full proposal pass.
-REVIEWER_MAX_TOKENS = 300
+# Reviewer must reach a verdict even on a reasoning model over a real bounded
+# trajectory. Measured 2026-08-26 across 3 real sessions (bounded to
+# TRAJECTORY_MAX_CHARS): the heaviest needed 1586 completion tokens (the model
+# reasons before emitting the JSON). At the old 300-token cap that same call
+# always returned no_final_text (output_tokens == cap, no final answer), because
+# the model burned the whole budget thinking and never emitted the JSON. Cap =
+# measured max 1586 * 1.5 margin ≈ 2400, kept below the full proposal budget.
+REVIEWER_MAX_TOKENS = 2400
 
 REFINE_PROPOSAL_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -526,6 +532,17 @@ def _salvage_parsed(result: Any, *, requested_max_tokens: int) -> _Reply:
     if not final_text:
         if output_tokens:
             model = scrub_text(str(getattr(result, "model", "")))
+            if output_tokens >= requested_max_tokens:
+                logger.warning(
+                    "Refine model exhausted its output budget before a final answer "
+                    "(model=%s, %d/%d tokens)",
+                    model or "unknown", output_tokens, requested_max_tokens,
+                )
+                return _Reply(
+                    None,
+                    "budget_exhausted",
+                    "Model used its full output budget before a final structured answer.",
+                )
             logger.warning(
                 "Refine model returned output but no final text (model=%s)",
                 model or "unknown",

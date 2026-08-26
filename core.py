@@ -2340,7 +2340,7 @@ def _handle_no_signal(
         reviewer_outcome = (
             (
                 "llm_incomplete"
-                if reviewer_failure in {"malformed", "truncated", "no_final_text"}
+                if reviewer_failure in {"malformed", "truncated", "no_final_text", "budget_exhausted"}
                 else "llm_error"
             )
             if reviewer_failure
@@ -2353,7 +2353,7 @@ def _handle_no_signal(
         reviewer_error = (
             (
                 "The reviewer returned an incomplete or malformed verdict."
-                if reviewer_failure in {"malformed", "truncated", "no_final_text"}
+                if reviewer_failure in {"malformed", "truncated", "no_final_text", "budget_exhausted"}
                 else (
                     "The host trust policy denied the reviewer model call."
                     if reviewer_failure == "llm_trust_denied"
@@ -2926,6 +2926,9 @@ def _refine_once(
             "malformed": "The refine proposal was malformed and could not be read.",
             "no_final_text": (
                 "The model returned only reasoning and no final refine proposal."
+            ),
+            "budget_exhausted": (
+                "The model used its full output budget before a final refine proposal."
             ),
             "llm_call_error": "The refine model call failed.",
             "llm_route_error": "The active host route is unavailable for refine.",
