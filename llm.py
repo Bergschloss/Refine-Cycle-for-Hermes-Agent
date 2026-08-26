@@ -955,26 +955,51 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
     should_refine_value = parsed.get("shouldRefine", parsed.get("should_refine"))
     raw_rationale = parsed.get("rationale")
     raw_instructions = parsed.get("instructions")
-    if not isinstance(raw_rationale, str) or not isinstance(raw_instructions, str):
+    if should_refine_value:
+        # A positive verdict feeds the proposal call, so the rationale and the
+        # lesson instruction are both mandatory here. Omitting either is a real
+        # hole, not a recoverable shortcut — keep it a failed review.
+        if not isinstance(raw_rationale, str) or not isinstance(raw_instructions, str):
+            return {
+                "should_refine": False,
+                "rationale": "Reviewer returned an incomplete verdict.",
+                "instructions": "",
+                "failure": "malformed",
+            }
+        rationale = scrub_text(raw_rationale).strip()
+        instructions = scrub_text(raw_instructions).strip()
+        if not rationale or not instructions:
+            return {
+                "should_refine": False,
+                "rationale": "Reviewer returned an incomplete verdict.",
+                "instructions": "",
+                "failure": "malformed",
+            }
         return {
-            "should_refine": False,
-            "rationale": "Reviewer returned an incomplete verdict.",
-            "instructions": "",
-            "failure": "malformed",
+            "should_refine": True,
+            "rationale": rationale[:1000],
+            "instructions": instructions[:2000],
         }
-    rationale = scrub_text(raw_rationale).strip()
-    instructions = scrub_text(raw_instructions).strip()
-    if not rationale or (should_refine_value and not instructions):
-        return {
-            "should_refine": False,
-            "rationale": "Reviewer returned an incomplete verdict.",
-            "instructions": "",
-            "failure": "malformed",
-        }
+    # A decline ("no signal") does not need rationale/instructions: a bare
+    # {"shouldRefine": false} is a valid verdict (the gate found no grounded
+    # lesson), not a failed review. Requiring them there turned a working model
+    # response into a fake malformed that stopped every cycle on a reasoning
+    # model that fills only the decision field. A decline still records a
+    # meaningful rationale so the journal does not read as an empty
+    # "Reviewer declined:".
+    if isinstance(raw_rationale, str) and raw_rationale.strip():
+        rationale = scrub_text(raw_rationale).strip()[:1000]
+    else:
+        rationale = "No durable lesson grounded in this trajectory."
+    instructions = (
+        scrub_text(raw_instructions).strip()[:2000]
+        if isinstance(raw_instructions, str)
+        else ""
+    )
     return {
-        "should_refine": should_refine_value,
-        "rationale": rationale[:1000],
-        "instructions": instructions[:2000],
+        "should_refine": False,
+        "rationale": rationale,
+        "instructions": instructions,
     }
 
 

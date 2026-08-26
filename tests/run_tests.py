@@ -6010,6 +6010,31 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(calls[1]["instructions"].strip())
         self.assertTrue(calls[1].get("json_mode"))
 
+    def test_reviewer_bare_decline_is_valid_not_malformed(self):
+        """A bare {'shouldRefine': false} (no rationale/instructions) is a valid
+        decline, not a failed review. It records a meaningful rationale so the
+        journal does not read as an empty 'Reviewer declined:'."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+        })
+
+        model = MockLlm({"shouldRefine": False})
+        result = core.refine_run(model)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["reviewer"], "declined")
+        self.assertNotEqual(result.get("failure"), "malformed")
+        entry = journal.get_entry(result["journal_id"])
+        self.assertIn("Reviewer declined", entry["reason"])
+        self.assertIn("No durable lesson", entry["reason"])
+
     def test_reviewer_decline_is_a_sanitized_no_op_without_application(self):
         now = time.time()
         FakeHost.make_db([
@@ -12262,8 +12287,6 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         malformed = (
             {},
             {"shouldRefine": "yes", "rationale": "x", "instructions": "y"},
-            {"shouldRefine": False, "rationale": 7, "instructions": ""},
-            {"shouldRefine": False, "rationale": "", "instructions": ""},
             {"shouldRefine": True, "rationale": "durable", "instructions": ""},
         )
         for payload in malformed:
@@ -12271,6 +12294,20 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 result = llm.review_fallback(MockLlm(payload), "evidence")
                 self.assertFalse(result["should_refine"])
                 self.assertEqual(result["failure"], "malformed")
+        # A decline (shouldRefine=False) is a valid verdict even when the model
+        # omits or empties rationale/instructions — it must not become a failed
+        # review. It records a meaningful default rationale instead, so the
+        # journal does not read as an empty "Reviewer declined:".
+        for payload in (
+            {"shouldRefine": False, "rationale": 7, "instructions": ""},
+            {"shouldRefine": False, "rationale": "", "instructions": ""},
+            {"shouldRefine": False},
+        ):
+            with self.subTest(payload=payload):
+                result = llm.review_fallback(MockLlm(payload), "evidence")
+                self.assertFalse(result["should_refine"])
+                self.assertFalse(result.get("failure"))
+                self.assertIn("No durable lesson", result["rationale"])
 
     def test_missing_kind_is_journaled_malformed_while_fused_create_skill_is_valid(self):
         """R9-10: do not infer kind from content; keep fused action compatibility."""
