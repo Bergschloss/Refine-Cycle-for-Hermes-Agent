@@ -120,3 +120,4 @@ impossible. **Decision:** accept current coverage as a known limit rather than a
 denylist patterns. A future pattern is added only if a concrete leaked secret is reproduced, never
 by extending a word list on suspicion. This bounds the grind and removes the single-choke-point
 denylist as a churn surface.
+
