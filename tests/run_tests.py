@@ -99,6 +99,22 @@ class MockLlm:
         return MockResult(response)
 
 
+class SchemaUnsupportedError(Exception):
+    """Mirror of the real opencode-go 4xx invalid_request rejection.
+
+    ``opencode-go`` does not support ``response_format.type=json_schema``;
+    it answers HTTP 400 ``invalid_request_error`` ("This response_format type is
+    unavailable now"). The Refine fallback must retry ``json_mode`` ONLY for this
+    response_format kind of rejection, so tests that exercise the fallback raise
+    this (with ``status_code``) rather than a generic ``RuntimeError``.
+    """
+
+    status_code = 400
+
+    def __init__(self, message="Error from provider (Console Go): response_format type is unavailable now"):
+        super().__init__(message)
+
+
 plugin_module.PluginLlm = PluginLlm
 plugin_module.PluginLlmInput = PluginLlmInput
 plugin_module.PluginLlmTextInput = PluginLlmTextInput
@@ -5958,7 +5974,7 @@ class RefineTests(unittest.TestCase):
             def complete_structured(self, **kwargs):
                 calls.append(kwargs)
                 if "json_schema" in kwargs:
-                    raise RuntimeError("json_schema not supported")
+                    raise SchemaUnsupportedError()
                 return MockResult({
                     "should_refine": True,
                     "rationale": "A durable lesson exists.",
@@ -9709,6 +9725,44 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(latest["outcome"], "llm_error")
         self.assertNotIn("unsupported_api_mode", json.dumps(latest))
 
+    def test_bound_route_rejects_json_schema_and_retries_json_mode(self):
+        """A bound route that rejects ``json_schema`` (4xx invalid_request) must
+        fall back to ``json_mode`` on the SAME locked route — two calls, same
+        target, not a substitution. Only a plausible response_format rejection
+        triggers the retry; auth/rate-limit/5xx/network stay single-attempt."""
+        class BadRequest(Exception):
+            status_code = 400
+
+        model = MockLlm(
+            BadRequest("This response_format type is unavailable now"),
+            MockResult(
+                {"action": "no_op", "reason": "nothing to change"},
+                model="deepseek-v4-flash",
+                provider="opencode-go",
+            ),
+        )
+        model.invocation_bound = True
+        model.provider = "opencode-go"
+        model.model = "deepseek-v4-flash"
+
+        result = core.refine_run(model)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(model.calls), 2)
+        # Bound contract: a provider/model override is never transmitted.
+        for call in model.calls:
+            self.assertNotIn("provider", call)
+            self.assertNotIn("model", call)
+        # First attempt requested json_schema; the second is a same-route json_mode retry.
+        self.assertIsNotNone(model.calls[0].get("json_schema"))
+        self.assertTrue(model.calls[1].get("json_mode"))
+        meta = result["llm_meta"]
+        self.assertEqual(meta["target_source"], "invocation_bound")
+        self.assertEqual(meta["requested_provider"], "opencode-go")
+        self.assertEqual(meta["requested_model"], "deepseek-v4-flash")
+        self.assertEqual(meta["model_substituted"], False)
+        self.assertEqual(meta["primary_attempts"], 1)
+
     def test_missing_bound_route_is_journaled_without_a_model_call(self):
         result = core.refine_run(None)
 
@@ -10565,7 +10619,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_output_mode_records_json_mode_on_schema_failure(self):
         model = MockLlm(
-            RuntimeError("schema unsupported"),
+            SchemaUnsupportedError(),
             MockResult(
                 {"action": "no_op", "reason": "nothing", "evidence": [],
                  "kind": "", "name": "", "content": ""},
@@ -10578,7 +10632,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_output_mode_records_json_mode_salvage_after_schema_failure(self):
         model = MockLlm(
-            RuntimeError("schema unsupported"),
+            SchemaUnsupportedError(),
             MockResult(
                 None,
                 text='{"action":"no_op","reason":"from text","evidence":[],"kind":"","name":"","content":""}',
@@ -10617,7 +10671,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_output_mode_records_json_mode_salvage_for_string_parsed_result(self):
         payload = '{"action":"no_op","reason":"string parsed","evidence":[],"kind":"","name":"","content":""}'
         core.refine_run(MockLlm(
-            RuntimeError("schema unsupported"),
+            SchemaUnsupportedError(),
             MockResult(payload, model="test-model"),
         ), session_id="session")
         latest = journal.entries()[-1]
@@ -10665,7 +10719,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         initial["content"] = ""
         result = core.refine_run(MockLlm(
             initial,
-            RuntimeError("schema unsupported"),
+            SchemaUnsupportedError(),
             skill_proposal("successful-create-retry"),
         ), session_id="session")
         self.assertTrue(result["success"])
@@ -10684,7 +10738,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "reviewer_min_messages": 20,
         })
         model = MockLlm(
-            RuntimeError("schema unsupported"),
+            SchemaUnsupportedError(),
             MockResult(
                 None,
                 text='{"shouldRefine":true,"rationale":"durable","instructions":"persist retry lesson"}',
@@ -11851,7 +11905,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             def complete_structured(self, **kwargs):
                 if "json_schema" in kwargs:
                     time.sleep(0.02)
-                    raise RuntimeError("schema unsupported")
+                    raise SchemaUnsupportedError()
                 return MockResult(
                     {"action": "no_op", "kind": "", "reason": "fallback"},
                     output_tokens=7,
@@ -11869,6 +11923,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 self.calls += 1
                 if self.calls == 2:
                     time.sleep(0.02)
+                if "json_schema" in kwargs:
+                    raise SchemaUnsupportedError()
                 raise RuntimeError("call failed")
 
         failed = llm.propose(BothFail(), "evidence", [], [])

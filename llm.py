@@ -190,6 +190,35 @@ def _invocation_failure(exc: PluginLlmInvocationError) -> Dict[str, str]:
     return {"action": "no_op", "reason": "Bound LLM route is unavailable.", "failure": failure}
 
 
+def _is_response_format_rejection(exc: Exception) -> bool:
+    """True when a rejection plausibly concerns the ``response_format`` payload.
+
+    The host collapses a bound-call failure to a coarse code and drops the HTTP
+    detail, so walk the exception chain (the plugin re-raises
+    ``PluginLlmInvocationError`` ``from`` the raw provider error) to recover the
+    status/message. Only a 4xx invalid-request — i.e. the ``json_schema`` hint is
+    unsupported on this route — warrants a same-route ``json_mode`` retry;
+    auth/rate-limit/5xx/network would only double latency and spend and make the
+    ``llm_error`` telemetry ambiguous.
+    """
+    seen: set = set()
+    for node in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        status = getattr(node, "status_code", None)
+        if status is None:
+            status = getattr(getattr(node, "response", None), "status_code", None)
+        if isinstance(status, bool):
+            status = None
+        if isinstance(status, int) and status == 400:
+            return True
+        text = str(node).lower()
+        if "invalid_request_error" in text or "response_format" in text:
+            return True
+    return False
+
+
 def _pinned_target() -> Dict[str, str]:
     """Provider/model to request, when the config pins them.
 
@@ -399,6 +428,19 @@ class _Reply(NamedTuple):
     salvaged: bool = False
 
 
+class _StructuredOutputFailure(ValueError):
+    """The route answered but the structured output could not be salvaged.
+
+    Distinct from a transport/route rejection (``PluginLlmInvocationError`` or a
+    raw HTTP error): here the model returned text that did not parse into a valid
+    proposal. Retrying in ``json_mode`` on the SAME locked route is safe (it is
+    not a route change) and is the correct recovery, for bound and unbound alike.
+
+    Subclasses ``ValueError`` so the raised schema cause remains identifiable as
+    a parse failure when the json_mode retry also fails and re-raises ``from`` it.
+    """
+
+
 def _output_tokens(result: Any) -> int:
     """Read optional host usage without requiring test doubles to expose it."""
     usage = getattr(result, "usage", None)
@@ -578,10 +620,7 @@ def _propose_structured(
             _call_transport.preferred_output_mode = "json_mode"
         return reply
 
-    if (
-        not _is_invocation_bound(llm)
-        and getattr(_call_transport, "preferred_output_mode", "") == "json_mode"
-    ):
+    if getattr(_call_transport, "preferred_output_mode", "") == "json_mode":
         reply = _call_json_mode()
         return reply.parsed or _incomplete_proposal(reply)
 
@@ -597,30 +636,37 @@ def _propose_structured(
         schema_meta_recorded = True
         reply = _salvage_parsed(result, requested_max_tokens=max_tokens)
         if reply.failure:
-            if _is_invocation_bound(llm):
-                return _incomplete_proposal(reply)
-            raise ValueError(
+            raise _StructuredOutputFailure(
                 f"json_schema parse failed: {reply.failure} — {reply.detail}"
             )
         _call_meta.value["output_mode"] = (
             "json_schema_salvage" if reply.salvaged else "json_schema"
         )
         return reply.parsed
-    except PluginLlmInvocationError:
-        if not schema_meta_recorded:
-            _record_call_meta(None, call_started)
-        raise
     except PluginLlmTrustError:
         if not schema_meta_recorded:
             _record_call_meta(None, call_started)
         raise
+    except _StructuredOutputFailure as output_failure:
+        if not schema_meta_recorded:
+            _record_call_meta(None, call_started)
+        logger.info(
+            "json_schema output unsalvageable; retrying the same route in json_mode"
+        )
+        try:
+            reply = _call_json_mode()
+        except PluginLlmTrustError:
+            raise
+        except Exception as fallback_exc:
+            raise fallback_exc from output_failure
+        return reply.parsed or _incomplete_proposal(reply)
     except Exception as first_exc:
         if not schema_meta_recorded:
             _record_call_meta(None, call_started)
-        if _is_invocation_bound(llm):
+        if not _is_response_format_rejection(first_exc):
             raise
         logger.warning(
-            "json_schema proposal failed (%s); falling back to json_mode",
+            "json_schema rejected (%s); falling back to json_mode",
             scrub_text(str(first_exc)),
         )
         try:
@@ -751,45 +797,9 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
         call_started = time.time()
         schema_meta_recorded = False
         _reviewer_used_json_mode = False
-        try:
-            result = llm.complete_structured(
-                instructions=(
-                    "Assess this trajectory only for a durable lesson worth persisting. "
-                    "Return the required JSON object."
-                ),
-                system_prompt=scrub_text(REVIEWER_FALLBACK_SYSTEM_PROMPT),
-                input=[PluginLlmTextInput(text=scrub_text(instructions))],
-                json_schema=sanitize(REVIEWER_FALLBACK_SCHEMA),
-                schema_name="refine_reviewer",
-                purpose="refine",
-                temperature=0.0,
-                max_tokens=REVIEWER_MAX_TOKENS,
-                **resolved_target,
-            )
-            _record_call_meta(result, call_started)
-            schema_meta_recorded = True
-            reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
-            if reply.failure and not _is_invocation_bound(llm):
-                raise ValueError(
-                    f"Reviewer json_schema parse failed: {reply.failure} — {reply.detail}"
-                )
-        except PluginLlmInvocationError:
-            if not schema_meta_recorded:
-                _record_call_meta(None, call_started)
-            raise
-        except PluginLlmTrustError:
-            if not schema_meta_recorded:
-                _record_call_meta(None, call_started)
-            raise
-        except Exception as schema_exc:
-            if not schema_meta_recorded:
-                _record_call_meta(None, call_started)
-            if _is_invocation_bound(llm):
-                raise
-            logger.warning(
-                "Reviewer json_schema failed (%s); falling back to json_mode",
-                scrub_text(str(schema_exc)),
-            )
+
+        def _reviewer_json_mode_call() -> _Reply:
+            nonlocal call_started, _reviewer_used_json_mode
             _reviewer_used_json_mode = True
             call_started = time.time()
             try:
@@ -809,13 +819,64 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                     **resolved_target,
                 )
             except PluginLlmTrustError:
+                if not schema_meta_recorded:
+                    _record_call_meta(None, call_started)
+                raise
+            except Exception:
+                if not schema_meta_recorded:
+                    _record_call_meta(None, call_started)
+                raise
+            _record_call_meta(result, call_started)
+            return _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
+
+        try:
+            result = llm.complete_structured(
+                instructions=(
+                    "Assess this trajectory only for a durable lesson worth persisting. "
+                    "Return the required JSON object."
+                ),
+                system_prompt=scrub_text(REVIEWER_FALLBACK_SYSTEM_PROMPT),
+                input=[PluginLlmTextInput(text=scrub_text(instructions))],
+                json_schema=sanitize(REVIEWER_FALLBACK_SCHEMA),
+                schema_name="refine_reviewer",
+                purpose="refine",
+                temperature=0.0,
+                max_tokens=REVIEWER_MAX_TOKENS,
+                **resolved_target,
+            )
+            _record_call_meta(result, call_started)
+            schema_meta_recorded = True
+            reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
+            if reply.failure:
+                raise _StructuredOutputFailure(
+                    f"Reviewer json_schema parse failed: {reply.failure} — {reply.detail}"
+                )
+        except PluginLlmTrustError:
+            if not schema_meta_recorded:
                 _record_call_meta(None, call_started)
+            raise
+        except _StructuredOutputFailure:
+            if not schema_meta_recorded:
+                _record_call_meta(None, call_started)
+            logger.info(
+                "Reviewer json_schema output unsalvageable; retrying the same route in json_mode"
+            )
+            reply = _reviewer_json_mode_call()
+        except Exception as schema_exc:
+            if not schema_meta_recorded:
+                _record_call_meta(None, call_started)
+            if not _is_response_format_rejection(schema_exc):
+                raise
+            logger.warning(
+                "Reviewer json_schema rejected (%s); falling back to json_mode",
+                scrub_text(str(schema_exc)),
+            )
+            try:
+                reply = _reviewer_json_mode_call()
+            except PluginLlmTrustError:
                 raise
             except Exception as fallback_exc:
-                _record_call_meta(None, call_started)
                 raise fallback_exc from schema_exc
-            _record_call_meta(result, call_started)
-            reply = _salvage_parsed(result, requested_max_tokens=REVIEWER_MAX_TOKENS)
         if not reply.failure:
             if _reviewer_used_json_mode:
                 _call_meta.value["output_mode"] = (
