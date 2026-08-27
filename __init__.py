@@ -353,14 +353,19 @@ def _on_pre_tool_call(
     cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
     if "git push" not in cmd:
         return None
-    # Check both the command string (for cd/dir context) and the git remote.
+    # The hook call runs before the shell 'cd' inside the command, so the
+    # hook's cwd does not yet reflect the target directory. Parse the last
+    # 'cd' from the command and use that for the git-remote check instead.
+    import subprocess, re
     cwd = str(_.get("cwd") or "")
-    import subprocess
+    last_cd = re.findall(r"\bcd\s+(\S+)", cmd)
+    effective = last_cd[-1].strip(";"'") if last_cd else cwd
+    # Check both the command string and the git remote.
     remote = ""
     try:
         remote = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=3, cwd=cwd or None,
+            capture_output=True, text=True, timeout=3, cwd=effective or None,
         ).stdout.strip()
     except Exception:
         pass
@@ -375,6 +380,7 @@ def _on_pre_tool_call(
             ),
         }
     return None
+
 
 
 
