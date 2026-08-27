@@ -220,6 +220,40 @@ def _start_auto_refine(
         logger.exception("refine auto thread could not start")
 
 
+_ACTIVE_BLOCK_RULES: list = []
+
+def _update_block_rules(notes):
+    """Parse prompt-note 'When' clauses into active block rules."""
+    global _ACTIVE_BLOCK_RULES
+    rules = []
+    for note in (notes or []):
+        content = note.get("content", "")
+        parts = content.split(", ", 1)
+        if len(parts) == 2:
+            cond = parts[0]
+            if cond.lower().startswith("when "):
+                cond = cond[5:]
+            rules.append((cond.lower(), parts[1].rstrip(".")))
+    _ACTIVE_BLOCK_RULES = rules
+
+
+def _on_pre_tool_call(
+    tool_name: str = "",
+    args: Any = None,
+    **_: Any,
+) -> Optional[Dict[str, str]]:
+    """Block tool calls that match a persisted prompt-note condition."""
+    if tool_name != "terminal":
+        return None
+    cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
+    for condition, action in _ACTIVE_BLOCK_RULES:
+        if not condition:
+            continue
+        if all(word in cmd.lower() for word in condition.split()):
+            return {"action": "block", "message": action}
+    return None
+
+
 def _on_pre_llm_call(**kwargs) -> Optional[dict]:
     """Inject bounded plugin-owned notes without reading or changing the base prompt."""
     try:
@@ -240,7 +274,9 @@ def _on_pre_llm_call(**kwargs) -> Optional[dict]:
         with journal.try_mutation_lock():
             notes = journal.load_prompt_notes()
         if not notes:
+            _update_block_rules([])
             return None
+        _update_block_rules(notes)
         selected = []
         for note in notes:
             scope = note.get("scope", "global")
