@@ -342,6 +342,27 @@ def _on_session_reset(session_id: str = "", **kwargs) -> None:
     _clear_session_prompt_notes(session_id, timeout=_HOST_PATH_LOCK_TIMEOUT)
 
 
+def _on_pre_tool_call(
+    tool_name: str = "",
+    args: Any = None,
+    **_: Any,
+) -> Optional[Dict[str, str]]:
+    """Block terminal git-push to repos Bergschloss cannot write to."""
+    if tool_name != "terminal":
+        return None
+    cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
+    if "git push" in cmd and "PrimeIntellect-ai" in cmd:
+        return {
+            "action": "block",
+            "message": (
+                "Push to PrimeIntellect-ai blocked: Bergschloss has no "
+                "write access. Fork the repo to Bergschloss/prime-agent, "
+                "push to the fork instead, then open a pull request."
+            ),
+        }
+    return None
+
+
 def _on_post_llm_call(
     session_id: str = "", conversation_history: Any = None, **kwargs
 ) -> None:
@@ -1026,6 +1047,7 @@ def register(ctx) -> None:
     except Exception:
         logger.debug("write approval check failed", exc_info=True)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)

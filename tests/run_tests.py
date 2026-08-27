@@ -5881,7 +5881,7 @@ class RefineTests(unittest.TestCase):
             self.assertTrue(worker_exited.wait(1))
         self.assertEqual(
             set(context.hooks),
-            {"pre_llm_call", "post_llm_call", "on_session_end", "on_session_reset"},
+            {"pre_llm_call", "pre_tool_call", "post_llm_call", "on_session_end", "on_session_reset"},
         )
         self.assertIsNone(calls[0][0])
         # A mid-session pass is not an ending one: its session can still hold a
