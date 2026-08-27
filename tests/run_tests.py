@@ -2190,13 +2190,56 @@ class RefineTests(unittest.TestCase):
             "No, use the previous response format for this new file",
         )
         self.assertTrue(all(not core._is_correction(item) for item in routine))
-        self.assertTrue(all(core._is_correction(item) for item in explicit))
+        # B1: every branch — unambiguous phrasing included — requires a prior
+        # assistant output; without one nothing is a correction.
+        self.assertTrue(all(core._is_correction(
+            item, has_prior_assistant_response=True
+        ) for item in explicit))
+        self.assertTrue(all(not core._is_correction(
+            item, has_prior_assistant_response=False
+        ) for item in explicit))
         self.assertTrue(all(core._is_correction(
             item, has_prior_assistant_response=True
         ) for item in contextual))
         self.assertTrue(all(not core._is_correction(
             item, has_prior_assistant_response=True
         ) for item in prospective))
+
+    def test_first_message_or_file_upload_is_never_a_correction(self):
+        """B1 regression: no prior assistant output => never a correction.
+
+        Even unambiguous correction phrasing and file-upload wrappers whose
+        embedded content trips the correction patterns must not classify when
+        there was no prior assistant response.
+        """
+        file_upload = (
+            "[The user sent a text document: 'SKILL.md'. Its content has been "
+            "included below. The file is also saved at: /c/doc/SKILL.md.\n"
+            "```markdown\nYou are a senior engineer. That's wrong, use JSON "
+            "instead of YAML.\n```"
+        )
+        # The wrapper is a first message: not a correction.
+        self.assertFalse(core._is_correction(
+            file_upload, has_prior_assistant_response=False
+        ))
+        # The same embedded text IS a correction once it follows an assistant
+        # reply — the gate is the distinguishing factor, not the wording.
+        self.assertTrue(core._is_correction(
+            file_upload, has_prior_assistant_response=True
+        ))
+        # A task-opening instruction is not a correction.
+        intro = "You are a senior engineer doing a code review; find regressions."
+        self.assertFalse(core._is_correction(
+            intro, has_prior_assistant_response=False
+        ))
+        # A genuine unambiguous correction is still detected after an answer.
+        genuine = "No, that is wrong; use the other endpoint instead"
+        self.assertFalse(core._is_correction(
+            genuine, has_prior_assistant_response=False
+        ))
+        self.assertTrue(core._is_correction(
+            genuine, has_prior_assistant_response=True
+        ))
 
     def test_full_fingerprint_and_unbounded_audit_collection(self):
         fingerprint = patterns.fingerprint("http", "ERROR 42 for /item/123")
@@ -15082,8 +15125,20 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(core._is_error_content("10 passed, 1 failed"))
         self.assertTrue(core._is_error_content("Task failed with exception; exit_code: 0"))
         self.assertFalse(core._is_correction("Це не так важливо для цього завдання."))
-        self.assertTrue(core._is_correction("Це не так: перероби відповідь через інший endpoint."))
-        self.assertTrue(core._is_correction("Нет, це неправильно, використай інший API."))
+        # B1: these unambiguous correction phrasings require a prior assistant
+        # output; without one they are never classifications.
+        self.assertTrue(core._is_correction(
+            "Це не так: перероби відповідь через інший endpoint.",
+            has_prior_assistant_response=True,
+        ))
+        self.assertTrue(core._is_correction(
+            "Нет, це неправильно, використай інший API.",
+            has_prior_assistant_response=True,
+        ))
+        self.assertFalse(core._is_correction(
+            "Нет, це неправильно, використай інший API.",
+            has_prior_assistant_response=False,
+        ))
 
     def test_indented_traceback_terminal_exception_is_normalized_without_overmatching(self):
         indented = (

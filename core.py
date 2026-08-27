@@ -955,6 +955,13 @@ def _is_correction(
     """Recognize explicit agent corrections, not routine instructions."""
     if len(content.strip()) < 12:
         return False
+    # A correction, in any formulation, must respond to a prior assistant
+    # output. Without one this is an instruction, task context, or a file-upload
+    # wrapper, never a correction. Gate the whole classifier up front so no
+    # branch (unambiguous phrasing or the ^(no|no|нет) lead included) fires on
+    # the first message or on embedded file content.
+    if not has_prior_assistant_response:
+        return False
     text = re.sub(r"\s+", " ", content.strip().lower())
     unambiguous = (
         r"\b(?:that(?:'s| is) (?:wrong|not right)|you (?:are|were) wrong|wrong answer|incorrect)\b",
@@ -985,8 +992,6 @@ def _is_correction(
         classification_text,
     ):
         return True
-    if not has_prior_assistant_response:
-        return False
     correction_lead = re.search(
         r"^(?:(?:no|ні|нет)[,;:]|(?:please\s+)?"
         r"(?:replace|revise|redo|rewrite|reformat|change|fix|correct)\b)",
