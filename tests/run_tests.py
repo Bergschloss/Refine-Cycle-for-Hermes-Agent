@@ -10119,34 +10119,92 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         FakeHost.entry_config()["llm"] = {"allow_provider_override": "no"}
         self.assertFalse(config.llm_allow_provider_override())
 
-    def test_prompt_note_action_examples_pass_the_allowlist(self):
-        """Round 6+8 anti-drift: every canonical example must pass the validator.
+    def test_every_accepted_action_form_is_shown_to_the_model(self):
+        """The model must be shown exactly the set the validator accepts.
 
-        The system prompt carries a SHORT representative subset (guidance examples)
-        so the model learns the shape without memorising a phrasebook.  The full
-        PROMPT_NOTE_ACTION_EXAMPLES set drives validator coverage only.
+        Asserting that the example list passes the validator it was built from is
+        a tautology -- it proves the phrasebook matches the phrasebook. The claim
+        that can actually be false, and was, is about the *gap between the two
+        lists*: the prompt used to carry ten of these forms and describe them as
+        examples, while the validator ``fullmatch``es a closed set of all of them.
+        A model shown a subset of a closed list has to invent the rest, and every
+        invention is rejected.
+
+        So each direction is asserted separately. No accepted form may be withheld
+        from the prompt (or the model is made to guess), and no form may appear in
+        the prompt that the validator refuses (or the prompt teaches a rejection
+        that surfaces only as an unexplained failed run).
         """
         for example in core.PROMPT_NOTE_ACTION_EXAMPLES:
-            with self.subTest(example=example):
-                self.assertIsNotNone(core._PROMPT_NOTE_SAFE_ACTION.fullmatch(example))
+            with self.subTest(shown=example):
+                self.assertIn(
+                    example,
+                    llm.REFINE_SYSTEM_PROMPT,
+                    "An accepted action form is hidden from the model, which then "
+                    "has to guess it.",
+                )
+        for shown in llm._PROMPT_NOTE_ACTION_GUIDANCE.split("; "):
+            with self.subTest(accepted=shown):
                 self.assertIsNone(
                     core._prompt_note_content_error(
-                        f"When a request fails, {example}.", check_rendered_size=False
-                    )
+                        f"When a request fails, {shown}.", check_rendered_size=False
+                    ),
+                    "The prompt teaches an action form the validator rejects.",
                 )
-        # The guidance subset is in the prompt AND passes the validator. Both
-        # halves matter: the prompt must never teach a form the validator rejects,
-        # which would surface only as unexplained no_op runs.
-        for example in llm._PROMPT_NOTE_GUIDANCE_EXAMPLES:
-            with self.subTest(guidance=example):
-                self.assertIn(example, llm.REFINE_SYSTEM_PROMPT)
-                self.assertIn(example, core.PROMPT_NOTE_ACTION_EXAMPLES)
-                self.assertIsNotNone(core._PROMPT_NOTE_SAFE_ACTION.fullmatch(example))
-                self.assertIsNone(
-                    core._prompt_note_content_error(
-                        f"When a request fails, {example}.", check_rendered_size=False
-                    )
+
+    def test_the_prompt_says_the_action_list_is_closed(self):
+        """A closed list described as examples is what produced the live failures.
+
+        Both proposals the model made for the same real repeated failure were
+        plain paraphrases of the accepted "include the required fields", and both
+        were rejected. Nothing it had been shown said paraphrasing was fatal, so
+        the prompt has to say it, and has to say where the lesson goes instead --
+        a required-argument fact is what kind=memory is for.
+        """
+        prompt = llm.REFINE_SYSTEM_PROMPT.lower()
+        self.assertIn("closed list", prompt)
+        self.assertIn("paraphrase is rejected", prompt)
+        self.assertIn("kind=memory", prompt)
+
+    def test_the_allowlist_refuses_the_paraphrases_measured_live(self):
+        """The closed list stays closed: these are refused, and named as such.
+
+        Verbatim from two live server runs on session 20260705_111638_1314eda1
+        (opencode-go/deepseek-v4-flash-vision-exp, 2026-08-27). Both are in the
+        spirit of an accepted form and neither is accepted. Pinning that is the
+        point: it is the evidence for the guidance change above, and it fails
+        loudly if anyone "fixes" the yield by widening the phrasebook to fit
+        whatever a model happened to emit.
+        """
+        for note in (
+            "When the cronjob tool returns 'schedule is required for create', "
+            "include the required `schedule` field (a valid cron expression).",
+            "When calling cronjob create, include a 'schedule' field and, if "
+            "no_agent=True, a 'script' field.",
+        ):
+            with self.subTest(note=note):
+                error = core._prompt_note_content_error(
+                    note, check_rendered_size=False
                 )
+                self.assertIsNotNone(error, f"Paraphrase was accepted: {note}")
+
+    def test_the_lost_lesson_is_storable_as_the_memory_it_always_was(self):
+        """The same lesson, as the kind the new rule 7 sends it to, is accepted.
+
+        This is the whole point of the two rounds together: the prompt path
+        refuses this lesson by design (it is a fact, not one of the approved
+        behavioral policies), and the memory path -- once it stopped reading a
+        prose semicolon as shell syntax -- accepts it.
+        """
+        self.assertIsNone(
+            core._validate_proposal(
+                memory_edit(
+                    "cronjob create requires a schedule parameter (cron "
+                    "expression); with no_agent=True, script is also required.",
+                    name="cronjob-required-arguments",
+                )
+            )
+        )
 
     def test_live_rejected_proposal_now_accepted(self):
         """Round 6: the exact proposal from the live run must pass guardrails."""
