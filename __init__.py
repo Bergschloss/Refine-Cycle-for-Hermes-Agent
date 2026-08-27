@@ -353,22 +353,18 @@ def _on_pre_tool_call(
     cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
     if "git push" not in cmd:
         return None
+    # Check both the command string (for cd/dir context) and the git remote.
     cwd = str(_.get("cwd") or "")
-    # Debug: log what cwd the hook sees
-    import json, pathlib
-    pathlib.Path("/tmp/hook_debug.json").write_text(json.dumps({
-        "cwd": cwd, "kw_keys": sorted(str(k) for k in _), "cmd": cmd[:200]
-    }))
-    # The remote URL is in git config, not the command text. Check it.
     import subprocess
+    remote = ""
     try:
         remote = subprocess.run(
             ["git", "remote", "get-url", "origin"],
             capture_output=True, text=True, timeout=3, cwd=cwd or None,
         ).stdout.strip()
     except Exception:
-        remote = ""
-    if "PrimeIntellect-ai" in remote and "/prime-agent" in remote:
+        pass
+    if ("PrimeIntellect-ai" in cmd or "PrimeIntellect-ai" in remote) and "/prime-agent" in (cmd + remote):
         return {
             "action": "block",
             "message": (
@@ -379,6 +375,7 @@ def _on_pre_tool_call(
             ),
         }
     return None
+
 
 
 def _on_post_llm_call(
