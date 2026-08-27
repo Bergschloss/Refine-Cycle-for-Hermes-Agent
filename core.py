@@ -664,12 +664,59 @@ def _source_revision_is_current(
         connection.close()
 
 
+# A tool may say what its own exit code means. ``terminal`` answers an empty grep
+# with ``exit_code: 1`` and ``exit_code_meaning: "No matches found (not an error)"``,
+# and a non-zero exit is then not a failure. Measured on the snapshot: 19 of 19
+# results carrying that self-declaration were counted as failures -- 100% -- and they
+# produced 9 distinct fingerprints of which 2 tripped the >=2 repeat gate. Same
+# family as O-32's web_search false positive, from a field that states the answer.
+_BENIGN_EXIT_MEANING = re.compile(
+    r"""(?ix)
+    ["']? exit_code_meaning ["']? \s* [:=] \s* ["'] [^"']* \bnot \s+ an \s+ error \b
+    """
+)
+# One marker set, used both by the heuristic below and by the guard that decides
+# whether a benign-exit declaration may be believed. Two copies of this would be
+# two things that must agree, and they would not stay in agreement.
+#
+# The prefix class admits a quote because tool results are JSON: a traceback
+# arrives as ``"output": "Traceback (most recent call last)…"``, and a class of
+# only whitespace and brackets cannot see it. That gap is why neutralising the
+# exit code needed this fixed at the same time — otherwise a benign declaration
+# would have hidden a real traceback that the exit code had been carrying.
+_ERROR_MARKER = re.compile(
+    r"""(?ix)
+    (?: ^ | [\s\[\{(,:;"'] )
+    (?: traceback | error\b | failed\b | failure\b | file\s+not\s+found\b
+      | no\s+such\s+file\b | cannot\s+find\s+the\s+(?:file|path)\b | ENOENT\b
+      | timed?\s*out\b | timeout\b )
+    """
+)
+
+
+def _strip_non_error_declarations(text: str) -> str:
+    """Remove the phrases whose own wording would trip the error markers."""
+    text = re.sub(r"(?i)[\"\']?error[\"\']?\s*:\s*(?:null|\"\"|\'\')", "", text)
+    return _BENIGN_EXIT_MEANING.sub("", text)
+
+
 def _structured_error_status(content: str) -> Optional[bool]:
     """Return a definitive structured status, or None when text is unstructured."""
     try:
         value = json.loads(content)
     except (json.JSONDecodeError, TypeError):
         value = None
+    # Read from the raw text, not the parsed dict: a tool result often carries an
+    # appended loop warning that defeats json.loads, and the declaration must be
+    # honoured on that path too.
+    #
+    # The declaration is believed only when nothing else in the result looks like a
+    # failure. It originates in untrusted tool output, and the non-zero exit code it
+    # neutralises may have been the only thing carrying a genuine error, so a
+    # traceback or an error string anywhere else revokes it.
+    benign_exit = bool(_BENIGN_EXIT_MEANING.search(content or "")) and not (
+        _ERROR_MARKER.search(_strip_non_error_declarations(content or ""))
+    )
     if isinstance(value, dict):
         exit_values = [
             value[key]
@@ -678,7 +725,10 @@ def _structured_error_status(content: str) -> Optional[bool]:
             and isinstance(value[key], (int, float))
             and not isinstance(value[key], bool)
         ]
-        if any(code != 0 for code in exit_values):
+        # Only the exit-code signal is neutralised. A truthy ``error``,
+        # ``success: false`` or error text in the output still decide below, so a
+        # tool cannot mute a real failure by describing its exit code.
+        if not benign_exit and any(code != 0 for code in exit_values):
             return True
         error = value.get("error")
         if error not in (None, "", False, [], {}):
@@ -697,7 +747,7 @@ def _structured_error_status(content: str) -> Optional[bool]:
             content,
         )
     ]
-    if any(code != 0 for code in codes):
+    if not benign_exit and any(code != 0 for code in codes):
         return True
     # An explicit exit-code 0 is evidence of success, but it must not mask
     # textual error markers (Traceback, Error:, etc.) that appear alongside it.
@@ -721,8 +771,11 @@ def _is_error_content(content: str) -> bool:
         else content[:1000] + "\n…\n" + content[-3000:]
     )
     
-    # Strip out quoted error: null / "" / '' patterns to avoid false positives
-    sample = re.sub(r"(?i)[\"\']?error[\"\']?\s*:\s*(?:null|\"\"|\'\')", "", sample)
+    # Strip the phrases whose own wording would otherwise trip the markers: a
+    # quoted ``error: null``, and the tool's ``not an error`` declaration. Only
+    # those are removed, so markers elsewhere in the output still count -- that is
+    # what stops an untrusted tool muting its own failure.
+    sample = _strip_non_error_declarations(sample)
     
     # Narrow, known success forms that must NOT be classified as errors
     # These are complete runner summaries, not prose that happens to include "failed"
@@ -748,12 +801,7 @@ def _is_error_content(content: str) -> bool:
     # We could add more Jest-specific patterns if we have examples
     
     # The rest of the function remains unchanged to catch real errors
-    return bool(
-        re.search(
-            r"(?i)(?:^|[\s\[\{(,:;])(?:traceback|error\b|failed\b|failure\b|file\s+not\s+found\b|no\s+such\s+file\b|cannot\s+find\s+the\s+(?:file|path)\b|ENOENT\b|timed?\s*out\b|timeout\b)",
-            sample,
-        )
-    )
+    return bool(_ERROR_MARKER.search(sample))
 
 def _is_correction(
     content: str, *, has_prior_assistant_response: bool = False

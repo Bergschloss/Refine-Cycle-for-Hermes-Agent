@@ -999,6 +999,63 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(core._is_error_content("x" * 10000 + " timeout"))
         self.assertFalse(core._is_error_content("exit_code: 0\ncompleted normally"))
 
+    def test_a_tool_saying_its_exit_code_is_not_an_error_is_believed(self):
+        """A non-zero exit the tool itself calls benign is not a failure.
+
+        `terminal` answers an empty grep with `exit_code: 1` and
+        `exit_code_meaning: "No matches found (not an error)"`. Measured on the
+        real snapshot: **19 of 19** such results were counted as failures, and
+        they produced 9 distinct fingerprints of which 2 tripped the >=2 repeat
+        gate — bogus repeated failures competing with real ones for the one
+        proposal a run makes. Same family as the web_search false positive
+        (O-32), from a field that states the answer outright.
+
+        The verbatim shape from the snapshot is the first case; the second is the
+        same declaration with the host's loop warning appended, which defeats
+        `json.loads` and must still be honoured on the text path.
+        """
+        for content in (
+            '{"output": "", "exit_code": 1, "error": null, '
+            '"exit_code_meaning": "No matches found (not an error)"}',
+            '{"output": "", "exit_code": 1, "error": null, '
+            '"exit_code_meaning": "No matches found (not an error)"} '
+            "[Tool loop warning: same_tool_failure_warning; count=2]",
+            'exit_code: 1\nexit_code_meaning: "No matches found (not an error)"',
+        ):
+            with self.subTest(content=content[:60]):
+                self.assertFalse(
+                    core._is_error_content(content),
+                    "A benign non-zero exit was counted as a failure.",
+                )
+
+    def test_the_benign_exit_declaration_cannot_mute_a_real_failure(self):
+        """Only the exit-code signal is neutralised, never the rest.
+
+        The declaration comes from tool output, which is untrusted. If believing
+        it could suppress a truthy `error`, a `success: false`, or error text in
+        the output, then any tool could hide its own failures by describing its
+        exit code. Each case below carries the same benign declaration and a
+        real failure alongside it, and must still be classified as a failure.
+        """
+        for content in (
+            '{"exit_code": 1, "error": "connection refused", '
+            '"exit_code_meaning": "No matches found (not an error)"}',
+            '{"exit_code": 1, "success": false, '
+            '"exit_code_meaning": "No matches found (not an error)"}',
+            '{"exit_code": 1, "error": null, "output": "Traceback (most recent '
+            'call last): ValueError: boom", '
+            '"exit_code_meaning": "No matches found (not an error)"}',
+        ):
+            with self.subTest(content=content[:60]):
+                self.assertTrue(
+                    core._is_error_content(content),
+                    "A real failure was muted by the exit-code declaration.",
+                )
+        # And an ordinary non-zero exit, with no such declaration, is unchanged.
+        self.assertTrue(
+            core._is_error_content('{"output": "", "exit_code": 1, "error": null}')
+        )
+
     def test_host_repeat_marker_collapses_and_distinct_errors_remain_distinct(self):
         repeated = patterns.extract_patterns([
             {"tool": "test", "content": "request failed: connection refused", "session_id": "s"},
