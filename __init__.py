@@ -246,11 +246,28 @@ def _on_pre_tool_call(
     if tool_name != "terminal":
         return None
     cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
+    try:
+        with open("/tmp/hook_trace.log", "a") as f:
+            f.write(f"ENTER tool={tool_name} cmd[:50]={cmd[:50]} rules={len(_ACTIVE_BLOCK_RULES)}\n")
+    except Exception:
+        pass
     for condition, action in _ACTIVE_BLOCK_RULES:
         if not condition:
             continue
-        if all(word in cmd.lower() for word in condition.split()):
-            return {"action": "block", "message": action}
+        # Match on stemmed keywords from the condition (>2 chars, no stop words).
+        _STOP = frozenset({"with","the","and","for","from","that","this","your",
+                           "not","but","are","was","has","had","can","will","have","when"})
+        words = [w for w in condition.split() if len(w) > 2 and w not in _STOP]
+        if words:
+            cw = cmd.lower().split()
+            matched = True
+            for w in words:
+                stem = w.removesuffix("ing").removesuffix("ed").removesuffix("s")
+                if not any(stem in c for c in cw):
+                    matched = False
+                    break
+            if matched:
+                return {"action": "block", "message": action}
     return None
 
 
