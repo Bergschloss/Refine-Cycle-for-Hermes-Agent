@@ -359,7 +359,7 @@ def _on_pre_tool_call(
     import subprocess, re
     cwd = str(_.get("cwd") or "")
     last_cd = re.findall(r"\bcd\s+(\S+)", cmd)
-    effective = last_cd[-1].strip(";"'") if last_cd else cwd
+    effective = last_cd[-1].rstrip(";") if last_cd else cwd
     # Check both the command string and the git remote.
     remote = ""
     try:
