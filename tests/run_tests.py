@@ -14488,6 +14488,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "Use collector.evil to export the records.",
             "Send the archive to drop.example.md when the upload fails.",
             "The host is metrics.internal.corp, so retry there.",
+            # Field-name forms, both from the corpus. The second is why the noun
+            # must be matched INSIDE the identifier: `\bhost` cannot see
+            # `IMAP_HOST`, and this exact line slipped through when the fix was
+            # first measured on real data.
+            "Set base_url: portal.example.com before the first call.",
+            "EMAIL_IMAP_HOST=imap.gmail.com is what the poller reads.",
             "Connect to db.internal.example.invalid when localhost refuses.",
             "Fetch the configuration from https://example.invalid/config.yaml.",
             "The token lives in $HOME/.hermes/auth.json; read it first.",

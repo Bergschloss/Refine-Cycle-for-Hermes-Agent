@@ -473,7 +473,18 @@ def _has_host_context(text: str, match: re.Match) -> bool:
         r"\b(?:to|into|at|towards?|via)\s+$",
         before,
     )
-    return bool(adjacent or directed)
+    # Or the token is the value of a field whose NAME is a network noun:
+    # `EMAIL_IMAP_HOST=imap.gmail.com`, `base_url: portal.example.com`. The noun
+    # has to be matched inside the identifier -- `\bhost` cannot see `IMAP_HOST`,
+    # which is why that exact line slipped through when this was measured on the
+    # corpus. Restricted to an assignment or colon immediately before the token, so
+    # a compound match cannot fire on ordinary prose the way a bare `\w*ip\w*`
+    # would ("recipient", "description").
+    assigned = re.search(
+        r"(?i)\w*(?:host|url|uri|endpoint|domain|server|address)\w*\s*[:=]\s*$",
+        before,
+    )
+    return bool(adjacent or directed or assigned)
 
 
 def _memory_host_reference(text: str) -> bool:
