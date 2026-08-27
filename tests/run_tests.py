@@ -15117,6 +15117,32 @@ class TraceContractTests(unittest.TestCase):
                 self.fail(f"Potential credential in trace field {k}: {v[:30]}")
 
 
+def _working_bash() -> str:
+    """Return a bash that actually runs, or "" so these tests skip.
+
+    ``shutil.which("bash")`` is not enough on Windows. A default install carries
+    ``C:\\Windows\\System32\\bash.exe`` -- the WSL launcher -- which is on PATH
+    whether or not a distribution exists behind it. Without one it exits
+    non-zero with ``execvpe(/bin/bash) failed``, and the UTF-16 relay error it
+    prints is not even the output the assertions are looking for, so all six
+    install.sh tests failed for a reason that has nothing to do with install.sh.
+
+    A suite that goes red because the environment lacks a capability teaches the
+    reader to ignore red. Absent capability is a skip; the presence of a launcher
+    is not the capability, so this probes it once, at class-definition time.
+    """
+    path = shutil.which("bash")
+    if not path:
+        return ""
+    try:
+        probe = subprocess.run(
+            [path, "-c", "exit 0"], capture_output=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return path if probe.returncode == 0 else ""
+
+
 class InstallScriptTests(unittest.TestCase):
     """Hermetic tests for install.sh (task C of the clean-install fix).
 
@@ -15130,10 +15156,10 @@ class InstallScriptTests(unittest.TestCase):
     No real Hermes state is touched; everything lives in a TemporaryDirectory.
     """
 
-    BASH = shutil.which("bash")
+    BASH = _working_bash()
     GIT = shutil.which("git")
 
-    @unittest.skipUnless(BASH and GIT, "bash and git required for install.sh tests")
+    @unittest.skipUnless(BASH and GIT, "a working bash and git are required for install.sh tests")
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="installsh-")
         self.addCleanup(self.tmp.cleanup)
