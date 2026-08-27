@@ -11002,6 +11002,77 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     # ── Dry-run (Part E) ──────────────────────────────────────────────────────
 
+    def test_dry_run_reports_that_an_apply_would_be_rejected(self):
+        """A preview must state the verdict the apply would reach.
+
+        The proposal here is the one measured live on 2026-08-27: a prompt note
+        whose action paraphrases an approved form. It reads as a perfectly good
+        note, and the apply refuses it. A preview that shows it without saying so
+        reads as approval, which is how a yield census run entirely through dry
+        runs counted proposals that could never land.
+        """
+        note = (
+            "When calling cronjob create, include a 'schedule' field and, if "
+            "no_agent=True, a 'script' field."
+        )
+        result = core.refine_run(
+            MockLlm(prompt_proposal(note)), session_id="session", dry_run=True
+        )
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertFalse(result["would_apply"])
+        self.assertIn("approved behavioral policy", result["guardrail_error"])
+        self.assertIn("rejected by guardrails", result["message"])
+        # And it is still a dry run: refusal is reported, not enacted.
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(FakeHost.actions, [])
+        # Recorded, so the verdict survives the run it was made in.
+        self.assertIn(
+            "approved behavioral policy", journal.entries()[-1].get("error", "")
+        )
+
+    def test_dry_run_reports_a_proposal_that_would_apply(self):
+        """The same field must say yes when the apply would say yes.
+
+        Otherwise the flag only ever means "we did not check", and a census
+        cannot tell a blocked proposal from an applicable one.
+        """
+        result = core.refine_run(
+            MockLlm(skill_proposal("dry-applicable-skill")),
+            session_id="session",
+            dry_run=True,
+        )
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertTrue(result["would_apply"])
+        self.assertEqual(result["guardrail_error"], "")
+        self.assertNotIn("rejected", result["message"])
+        self.assertEqual(journal.entries()[-1].get("error", ""), "")
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_dry_run_preview_verdict_matches_what_the_apply_decides(self):
+        """The preview is only worth having if it agrees with the apply.
+
+        Two proposals, one of each verdict, each run twice: once previewed, once
+        applied for real. Asserting the pair agrees is what stops the preview
+        drifting into a second, laxer copy of the guardrails.
+        """
+        for proposal, expected_to_apply in (
+            (skill_proposal("agreeing-skill"), True),
+            (prompt_proposal("When a request fails, retry it however you like."), False),
+        ):
+            with self.subTest(expected_to_apply=expected_to_apply):
+                preview = core.refine_run(
+                    MockLlm(proposal), session_id="session", dry_run=True
+                )
+                applied = core.refine_run(MockLlm(proposal), session_id="session")
+                self.assertEqual(preview["would_apply"], expected_to_apply)
+                self.assertEqual(
+                    applied.get("outcome") == "applied", expected_to_apply
+                )
+                if not expected_to_apply:
+                    self.assertIn(
+                        preview["guardrail_error"], applied.get("message", "")
+                    )
+
     def test_dry_run_does_not_mutate_host(self):
         FakeHost.actions.clear()
         model = MockLlm({

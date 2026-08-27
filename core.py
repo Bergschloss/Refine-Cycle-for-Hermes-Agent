@@ -1946,6 +1946,33 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _preview_guardrail_error(proposal: Dict[str, Any]) -> Optional[str]:
+    """The verdict the apply path would reach, for a run that applies nothing.
+
+    The dry-run branch used to return before ``_validate_proposal`` ran at all, so
+    a preview presented a proposal the apply would refuse and said nothing about
+    it. That is not cosmetic. The Part-2 yield census was measured entirely
+    through dry runs, which made every guardrail rejection invisible to it and
+    counted proposals that could never land; the two rejections it did report had
+    to be reconstructed afterwards by calling the validator by hand.
+
+    Every check reachable from here reads state and never writes it, including the
+    prompt-note store and recent-apply lookups, so running it on a dry run keeps
+    the "applies nothing" promise. A transaction stops at its first failing edit,
+    so the preview names that edit rather than summarising.
+    """
+    if str(proposal.get("action", "")) != "multi":
+        return _validate_proposal(proposal)
+    edits = [edit for edit in proposal.get("edits", []) if isinstance(edit, dict)]
+    if not edits:
+        return "Transaction contained no usable edit"
+    for index, edit in enumerate(edits):
+        error = _validate_proposal(edit)
+        if error:
+            return f"edit {index}: {error}"
+    return None
+
+
 def _memory_entry_delimiter() -> str:
     """The host's entry delimiter, read from the host rather than restated here.
 
@@ -3098,13 +3125,20 @@ def _refine_once(
                 else:
                     diff_text = scrub_text(combined)
 
-        # Journal the dry run so /refine audit shows it was considered.
+        # What the apply would decide. A preview that shows a proposal without
+        # saying it is unapplyable is worse than no preview: it reads as approval.
+        would_reject = _preview_guardrail_error(dry_proposal) or ""
+
+        # Journal the dry run so /refine audit shows it was considered, and record
+        # the verdict, so a previewed-but-unapplyable proposal is distinguishable
+        # afterwards from one that would have landed.
         dry_run_entry_id = _journal_nonmutation(
             trigger=trigger,
             reason=safe_reason or "dry-run",
             session_id=session,
             proposal=dry_proposal,
             outcome="dry_run",
+            error=would_reject,
             llm_meta=_run_llm_meta,
         )
         if not dry_run_entry_id:
@@ -3121,7 +3155,12 @@ def _refine_once(
         return _terminal_result(
             outcome="dry_run",
             success=True,
-            message="Dry run: proposal shown, nothing applied.",
+            message=(
+                "Dry run: proposal shown, nothing applied. An apply would be "
+                f"rejected by guardrails: {would_reject}"
+                if would_reject
+                else "Dry run: proposal shown, nothing applied."
+            ),
             proposal=dry_proposal,
             llm_meta=_run_llm_meta,
             evidence=evidence_summary,
@@ -3131,6 +3170,10 @@ def _refine_once(
                 "diff_truncated": truncated,
                 "llm_called": True,
                 "edits_applied": 0,
+                # The preview's verdict, as data rather than prose, so a census
+                # can count what would actually land.
+                "would_apply": not would_reject,
+                "guardrail_error": would_reject,
             },
         )
 
