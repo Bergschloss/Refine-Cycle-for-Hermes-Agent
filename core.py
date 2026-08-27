@@ -675,23 +675,29 @@ _BENIGN_EXIT_MEANING = re.compile(
     ["']? exit_code_meaning ["']? \s* [:=] \s* ["'] [^"']* \bnot \s+ an \s+ error \b
     """
 )
-# One marker set, used both by the heuristic below and by the guard that decides
-# whether a benign-exit declaration may be believed. Two copies of this would be
-# two things that must agree, and they would not stay in agreement.
+# One marker set, named once so the heuristic has a single definition.
 #
-# The prefix class admits a quote because tool results are JSON: a traceback
-# arrives as ``"output": "Traceback (most recent call last)…"``, and a class of
-# only whitespace and brackets cannot see it. That gap is why neutralising the
-# exit code needed this fixed at the same time — otherwise a benign declaration
-# would have hidden a real traceback that the exit code had been carrying.
+# The prefix class deliberately does NOT admit a quote. Admitting one lets the
+# marker match inside a JSON string, which sounds like an improvement -- a
+# traceback does arrive as ``"output": "Traceback…"`` -- and was measured on 6,775
+# real tool results to reclassify 107 of them, of which 52 were plain false
+# positives: 28 successful ``read_file`` results and 24 successful ``search_files``
+# results whose *returned content* merely contains the word "error" or "failed".
+# A marker inside data the tool returned says nothing about whether the call
+# worked, and a bogus repeated failure competes with real ones for the single
+# proposal a run makes. That is the shape of the 398-hit pattern that once
+# swallowed every real failure, so the narrow class stays.
 _ERROR_MARKER = re.compile(
     r"""(?ix)
-    (?: ^ | [\s\[\{(,:;"'] )
+    (?: ^ | [\s\[\{(,:;] )
     (?: traceback | error\b | failed\b | failure\b | file\s+not\s+found\b
       | no\s+such\s+file\b | cannot\s+find\s+the\s+(?:file|path)\b | ENOENT\b
       | timed?\s*out\b | timeout\b )
     """
 )
+# Status values that state a failure in the tool's own vocabulary. Used only to
+# revoke a benign-exit declaration, never to classify on their own.
+_FAILING_STATUS = frozenset({"error", "failed", "failure", "timeout", "cancelled"})
 
 
 def _strip_non_error_declarations(text: str) -> str:
@@ -710,13 +716,28 @@ def _structured_error_status(content: str) -> Optional[bool]:
     # appended loop warning that defeats json.loads, and the declaration must be
     # honoured on that path too.
     #
-    # The declaration is believed only when nothing else in the result looks like a
-    # failure. It originates in untrusted tool output, and the non-zero exit code it
-    # neutralises may have been the only thing carrying a genuine error, so a
-    # traceback or an error string anywhere else revokes it.
-    benign_exit = bool(_BENIGN_EXIT_MEANING.search(content or "")) and not (
-        _ERROR_MARKER.search(_strip_non_error_declarations(content or ""))
-    )
+    # The declaration is believed only when nothing STRUCTURED contradicts it. It
+    # originates in untrusted tool output, and the non-zero exit it neutralises may
+    # have been the only thing carrying a genuine error, so a truthy ``error``, a
+    # false ``success``/``ok``, or a failing ``status`` revokes it.
+    #
+    # Deliberately structural, not textual. Revoking on free-text markers instead
+    # requires the marker to be visible inside a JSON string, and widening the
+    # prefix class for that was measured to add 52 false positives on real data
+    # (see ``_ERROR_MARKER``). Declared limit: a tool that calls its exit benign
+    # while burying a traceback inside a payload string is not detected. That
+    # combination does not occur in the measured corpus, and the alternative costs
+    # more than it buys.
+    benign_exit = bool(_BENIGN_EXIT_MEANING.search(content or ""))
+    if benign_exit and isinstance(value, dict):
+        status = str(value.get("status") or "").strip().lower()
+        if (
+            value.get("error") not in (None, "", False, [], {})
+            or value.get("success") is False
+            or value.get("ok") is False
+            or status in _FAILING_STATUS
+        ):
+            benign_exit = False
     if isinstance(value, dict):
         exit_values = [
             value[key]

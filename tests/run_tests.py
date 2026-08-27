@@ -1032,19 +1032,28 @@ class RefineTests(unittest.TestCase):
         """Only the exit-code signal is neutralised, never the rest.
 
         The declaration comes from tool output, which is untrusted. If believing
-        it could suppress a truthy `error`, a `success: false`, or error text in
-        the output, then any tool could hide its own failures by describing its
-        exit code. Each case below carries the same benign declaration and a
-        real failure alongside it, and must still be classified as a failure.
+        it could suppress a truthy `error`, a false `success`, or a failing
+        `status`, then any tool could hide its own failures by describing its exit
+        code. Each case below carries the same benign declaration and a real
+        failure alongside it, and must still be classified as a failure.
+
+        The revocation is structural on purpose. Revoking on free text instead
+        needs the marker seen inside a JSON string, and widening the prefix class
+        for that was measured to add 52 false positives on real results. The
+        declared limit is a traceback buried inside a payload string alongside a
+        benign declaration -- absent from the measured corpus.
         """
         for content in (
             '{"exit_code": 1, "error": "connection refused", '
             '"exit_code_meaning": "No matches found (not an error)"}',
             '{"exit_code": 1, "success": false, '
             '"exit_code_meaning": "No matches found (not an error)"}',
-            '{"exit_code": 1, "error": null, "output": "Traceback (most recent '
-            'call last): ValueError: boom", '
+            '{"exit_code": 1, "status": "error", '
             '"exit_code_meaning": "No matches found (not an error)"}',
+            # A marker in the tool's own top-level text, not buried in a payload
+            # string, still reaches the heuristic and still counts.
+            'exit_code: 1\nexit_code_meaning: "No matches found (not an error)"\n'
+            'Traceback (most recent call last): ValueError: boom',
         ):
             with self.subTest(content=content[:60]):
                 self.assertTrue(
