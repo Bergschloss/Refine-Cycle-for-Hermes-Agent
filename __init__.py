@@ -356,15 +356,19 @@ def _on_pre_tool_call(
     sentinel = os.path.join(os.environ.get("TEMP", "/tmp"), "refine_hook_on")
     if not os.path.exists(sentinel):
         return None
-    # make is not available on this Windows machine.
-    if re.search(r"\bmake\b", cmd):
-        # Log every firing so we can attribute results to the hook.
-        try:
-            import datetime
-            with open(sentinel + ".log", "a") as f:
-                f.write(f"{datetime.datetime.now().isoformat()} blocked cmd={cmd[:200]}\n")
-        except Exception:
-            pass
+    # Only block 'make' as a build command, not as grep text or in comments.
+    if not (re.match(r"^make\s", cmd) or re.search(r"[;&|]\s*make\s", cmd)):
+        return None
+    if re.search(r"\bgrep\b.*\bmake\b", cmd):
+        return None  # Don't block grep/searches that mention make
+    # Log every firing with session attribution.
+    try:
+        import datetime
+        sid = _.get("session_id", _.get("task_id", "?"))
+        with open(sentinel + ".log", "a") as f:
+            f.write(f"{datetime.datetime.now().isoformat()} session={sid} blocked cmd={cmd[:200]}\n")
+    except Exception:
+        pass
         return {
             "action": "block",
             "message": (
