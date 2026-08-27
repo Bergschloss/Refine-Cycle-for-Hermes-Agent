@@ -396,6 +396,21 @@ _PROMPT_NOTE_SAFE_ACTION = re.compile(
 _PROMPT_NOTE_QUOTED_FIELD = re.compile(
     r"['\"\u2018\u2019]([A-Za-z_]{1,30})['\"\u2018\u2019]"
 )
+
+# A directive that ADDS a step or RE-ROUTES to a working path is useful, not
+# dangerous. Dangerous directives REMOVE work or skip controls. This pattern
+# accepts "use curl instead of wget", "fork before pushing", "push to your
+# fork" -- unambiguous re-routing language. The existing allowlist remains the
+# first gate and already blocks the control-skipping forms.
+_ACTION_REROUTE_OR_ADD = re.compile(
+    r"(?i)^\s*(?:"
+    r"fork\s+(?:(?:the|this|that|your)\s+)?(?:repos?(?:itory)?|project|it)(?:\s+(?:before|and|then|first|,\s*then)\s*(?:.*))?|"
+    r"fork\s+(?:before|and|then|first)\s+\S+|"
+    r"push\s+(?:to\s+)?(?:your\s+|a\s+|the\s+)?fork(?:\s+(?:instead|first)\b)?|"
+    r"(?:use|try|run|execute|call)\s+.{1,120}\s+(?:instead\s+of|rather\s+than)\s+.{1,120}|"
+    r"prefer\s+.{1,60}\s+over\s+.{1,60}"
+    r")\s*\.?\s*$"
+)
 # Long enough to be unambiguous as a substring: ``session_id`` and ``x_csrf`` are
 # credentials, ``designation`` is not caught by any of these.
 _CREDENTIAL_FIELD_SUBSTRINGS = (
@@ -2110,14 +2125,15 @@ def _prompt_note_content_error(
         return "Prompt note must use 'When <specific condition>, <one action>.'"
     if len(lines) > 1 and not _PROMPT_NOTE_FORMAT.match(lines[1]):
         return "Every line of a prompt note must use 'When <specific condition>, <one action>.'"
-    resource_kinds = {_resource_reference_kind(line) for line in lines}
-    resource_kinds.discard(None)
-    if resource_kinds:
-        if "network_or_shell" in resource_kinds:
+    resource_kinds = set()
+    for line in lines:
+        inspected = unicodedata.normalize("NFKC", line)
+        if _RESOURCE_NETWORK_OR_SHELL.search(inspected):
             return "Prompt note cannot reference URLs, commands, or shell syntax"
-        if "host" in resource_kinds:
+        if _memory_host_reference(inspected):
             return "Prompt note cannot reference hosts"
-        return "Prompt note cannot reference file paths or environment variables"
+        if _RESOURCE_TARGET.search(inspected):
+            return "Prompt note cannot reference file paths or environment variables"
     if any(_CONTEXT_OVERRIDE_INTENT.search(line) for line in lines):
         return "Prompt note cannot override prior guidance"
     for line in lines:
@@ -2125,7 +2141,11 @@ def _prompt_note_content_error(
         if not condition_match or _HIGHER_PRIORITY_GUIDANCE.search(condition_match.group(1)):
             return "Prompt note condition cannot refer to higher-priority guidance"
         action_match = _PROMPT_NOTE_ACTION.match(line)
-        if not action_match or not _PROMPT_NOTE_SAFE_ACTION.fullmatch(action_match.group(1)):
+        if not action_match:
+            return "Prompt note action must match an approved behavioral policy"
+        action_text = action_match.group(1)
+        if not (_PROMPT_NOTE_SAFE_ACTION.fullmatch(action_text)
+                or _ACTION_REROUTE_OR_ADD.fullmatch(action_text)):
             return "Prompt note action must match an approved behavioral policy"
         # The whole line, not just the action: the condition is free text up to
         # 200 characters, so "When the 'api_key' field is missing, include the
