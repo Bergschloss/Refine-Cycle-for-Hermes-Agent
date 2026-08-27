@@ -182,6 +182,12 @@ def _is_invocation_bound(llm: PluginLlm) -> bool:
 
 def _invocation_failure(exc: PluginLlmInvocationError) -> Dict[str, str]:
     """Map a host-stable route error without persisting route or credential text."""
+    if _is_timeout(exc):
+        return {
+            "action": "no_op",
+            "reason": "Refine model call timed out; the route is available.",
+            "failure": "llm_timeout",
+        }
     failure = (
         "llm_transport_unsupported"
         if getattr(exc, "code", "") == "unsupported_api_mode"
@@ -215,6 +221,49 @@ def _is_response_format_rejection(exc: Exception) -> bool:
             return True
         text = str(node).lower()
         if "invalid_request_error" in text or "response_format" in text:
+            return True
+    return False
+
+
+def _is_timeout(exc: Exception) -> bool:
+    """True when the failure is a provider/host deadline, not a route or auth error.
+
+    The host collapses a bound-call failure to a coarse code and drops the
+    HTTP detail, so walk the exception chain (the plugin re-raises ``from`` the
+    raw provider error) the same way ``_is_response_format_rejection`` does.
+    A timeout is transient — the route is fine, the reasoning read just needed
+    more time — so it is retried, unlike a 5xx or a permission/region denial.
+    """
+    _TIMEOUT_TYPE_NAMES = {
+        "timeouterror",
+        "apitimeouterror",
+        "readtimeout",
+        "connecttimeout",
+        "pooltimeout",
+        "writetimeout",
+    }
+    _TIMEOUT_MARKERS = (
+        "timeout",
+        "timed out",
+        "timedout",
+        "deadline exceeded",
+        "read timed out",
+        "request timed out",
+        "gateway timed out",
+    )
+    seen: set = set()
+    for node in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        code = getattr(node, "code", None)
+        if isinstance(code, str) and code.lower() in _TIMEOUT_TYPE_NAMES:
+            return True
+        class_name = type(node).__name__.lower()
+        if class_name in _TIMEOUT_TYPE_NAMES:
+            return True
+        text = str(node).lower()
+        if any(marker in text for marker in _TIMEOUT_MARKERS):
             return True
     return False
 
@@ -281,6 +330,19 @@ PROPOSAL_MAX_TOKENS = proposal_max_tokens(1)
 # the model burned the whole budget thinking and never emitted the JSON. Cap =
 # measured max 1586 * 1.5 margin ≈ 2400, kept below the full proposal budget.
 REVIEWER_MAX_TOKENS = 2400
+
+# Proposal reads a real bounded trajectory with a reasoning model, not an
+# auxiliary helper. The host's auxiliary default (30 s) is sized for helpers
+# and silently drops the slow tail of these reads: timeout, 429 and a dead
+# route collapsed into one undersized window and four rounds read wrong. The
+# value is from the measurement, not the ceiling: observed successful proposal
+# latency 2026-08-25 on the live trajectory read was 11 348–29 776 ms per
+# attempt (each attempt is an independent extraction). 30 s was the failure
+# floor; max*1.5 ≈ 44.7 s -> 45 s gives a reasoning read room to finish while
+# still failing fast enough to retry on a hung host.
+_PROPOSAL_TIMEOUT_SECONDS = 45.0
+# The reviewer verdict reads the same real trajectory; give it the same room.
+_REVIEW_TIMEOUT_SECONDS = 45.0
 
 REFINE_PROPOSAL_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -620,6 +682,7 @@ def _propose_structured(
         purpose="refine",
         temperature=0.0,
         max_tokens=max_tokens,
+        timeout=_PROPOSAL_TIMEOUT_SECONDS,
         **resolved_target,
     )
     system_prompt = scrub_text(REFINE_SYSTEM_PROMPT)
@@ -844,6 +907,7 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                     purpose="refine",
                     temperature=0.0,
                     max_tokens=REVIEWER_MAX_TOKENS,
+                    timeout=_REVIEW_TIMEOUT_SECONDS,
                     **resolved_target,
                 )
             except PluginLlmTrustError:
@@ -870,6 +934,7 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                 purpose="refine",
                 temperature=0.0,
                 max_tokens=REVIEWER_MAX_TOKENS,
+                timeout=_REVIEW_TIMEOUT_SECONDS,
                 **resolved_target,
             )
             _record_call_meta(result, call_started)
@@ -949,6 +1014,10 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
     except Exception as exc:
         safe_error = scrub_text(str(exc))
         logger.warning("Reviewer fallback failed: %s", safe_error)
+        if _is_timeout(exc):
+            failure = _review_timeout_failure()
+            failure["error"] = safe_error
+            return failure
         return {
             "should_refine": False,
             "rationale": "Reviewer model call failed.",
@@ -1658,11 +1727,25 @@ def propose(
     except Exception as exc:
         safe_error = scrub_text(str(exc))
         logger.error("LLM proposal failed: %s", safe_error, exc_info=True)
+        timed_out = _is_timeout(exc)
         return {
             "action": "no_op",
-            "reason": f"LLM call failed: {safe_error}",
-            "failure": "llm_call_error",
+            "reason": (
+                "Refine model call timed out."
+                if timed_out
+                else f"LLM call failed: {safe_error}"
+            ),
+            "failure": "llm_timeout" if timed_out else "llm_call_error",
         }
+
+
+def _review_timeout_failure() -> Dict[str, str]:
+    return {
+        "should_refine": False,
+        "rationale": "Reviewer model call timed out.",
+        "instructions": "",
+        "failure": "llm_timeout",
+    }
 
 
 def _ensure_list(value: Any) -> List[str]:

@@ -2382,6 +2382,53 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(mock_propose.call_count, 2)
         self.assertEqual(result["llm_meta"]["primary_attempts"], 2)
 
+    def test_primary_llm_timeout_is_retried_once(self):
+        """A primary-backend llm_timeout must retry the proposal once before journaling."""
+        fail = {"action": "no_op", "failure": "llm_timeout", "reason": "model call timed out"}
+        ok = skill_proposal("retry-llm-timeout")
+        with patch.object(core._llm, "propose", side_effect=[fail, ok]) as mock_propose:
+            result = core.refine_run(MockLlm())
+        self.assertTrue(result["success"])
+        self.assertEqual(mock_propose.call_count, 2)
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 2)
+
+    def test_primary_llm_timeout_stops_after_retry_budget(self):
+        """A persistent llm_timeout must give up after exactly one retry (2 attempts)."""
+        fail = {"action": "no_op", "failure": "llm_timeout", "reason": "model call timed out"}
+        with patch.object(core._llm, "propose", return_value=fail) as mock_propose:
+            result = core.refine_run(MockLlm())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "llm_error")
+        self.assertEqual(mock_propose.call_count, 2)
+        self.assertEqual(result["llm_meta"]["primary_attempts"], 2)
+
+    def test_primary_llm_timeout_is_distinguishable_from_route_error(self):
+        """A timeout must journal as llm_timeout (llm_error), not llm_route_error."""
+        fail = {"action": "no_op", "failure": "llm_timeout", "reason": "model call timed out"}
+        with patch.object(core._llm, "propose", return_value=fail) as mock_propose:
+            result = core.refine_run(MockLlm())
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "llm_error")
+        self.assertEqual(entry["error"], "The refine model call timed out.")
+
+    def test_is_timeout_reads_the_cause_chain(self):
+        """_is_timeout must mirror _is_response_format_rejection's chain walk."""
+        # Direct and class-name forms.
+        self.assertTrue(llm._is_timeout(TimeoutError("Provider read timed out")))
+        self.assertTrue(llm._is_timeout(TimeoutError()))
+        # A raw provider error wrapped 'from' the plugin-level exception.
+        wrapped = RuntimeError("proposal failed")
+        wrapped.__cause__ = TimeoutError("connect timed out")
+        self.assertTrue(llm._is_timeout(wrapped))
+        # A timeout surfaced via the invocation error code/message still counts.
+        plugin_like = RuntimeError("route unavailable")
+        plugin_like.__cause__ = TimeoutError("request timed out")
+        self.assertTrue(llm._is_timeout(plugin_like))
+        # Non-timeout failures must NOT classify as timeouts (both directions).
+        self.assertFalse(llm._is_timeout(RuntimeError("HTTP 403 RegionError")))
+        self.assertFalse(llm._is_timeout(RuntimeError("response_format unsupported")))
+        self.assertFalse(llm._is_timeout(RuntimeError("permission denied")))
+
     def test_json_extraction_handles_trailing_braces_and_pydantic(self):
         """Wave 2.7: balanced-brace scanner extracts valid JSON despite trailing }."""
         # Valid JSON followed by trailing text with a brace
@@ -6425,7 +6472,8 @@ class RefineTests(unittest.TestCase):
 
         failed = llm.review_fallback(MockLlm(RuntimeError("reviewer timeout")), "evidence")
         self.assertFalse(failed["should_refine"])
-        self.assertEqual(failed["failure"], "llm_call_error")
+        # Round A: a timeout-worded reviewer failure is now distinguishable.
+        self.assertEqual(failed["failure"], "llm_timeout")
     def test_reviewer_call_exception_is_journaled_as_llm_error(self):
         now = time.time()
         FakeHost.make_db([

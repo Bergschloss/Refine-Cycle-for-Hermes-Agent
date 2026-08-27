@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Retry only transient primary proposal failures. Provider permission/region
 # refusals are terminal and must not be sent twice.
-_PRIMARY_RETRY_FAILURES = frozenset({"llm_call_error", "no_final_text"})
+_PRIMARY_RETRY_FAILURES = frozenset({"llm_call_error", "llm_timeout", "no_final_text"})
 _PRIMARY_NONRETRY_MARKERS = (
     "regionerror", "permissiondenied", "permission denied", "forbidden",
     "unauthorized", "http 401", "http 403",
@@ -3235,6 +3235,7 @@ def _refine_once(
                 "The model used its full output budget before a final refine proposal."
             ),
             "llm_call_error": "The refine model call failed.",
+            "llm_timeout": "The refine model call timed out.",
             "llm_route_error": "The active host route is unavailable for refine.",
             "llm_transport_unsupported": (
                 "The active host route uses a transport refine cannot safely use."
@@ -3248,6 +3249,7 @@ def _refine_once(
         )
         if failure in (
             "llm_call_error",
+            "llm_timeout",
             "llm_route_error",
             "llm_transport_unsupported",
             "llm_trust_denied",
