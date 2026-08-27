@@ -72,14 +72,27 @@ def _escape_foreign_tags(text: str) -> str:
 
 
 _RECORD_SEPARATOR = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
-_RESOURCE_REFERENCE = re.compile(
-    r"""(?ix)
+# The forms that name something an instruction could act on. Naming one of
+# these is what turns a durable note from a statement into an operation, so both
+# durable-context paths refuse them.
+_RESOURCE_TARGET_FORMS = r"""
     (?: [a-z]+:// )                         # any URL scheme
     | (?: ~[/\\] | (?<![\w.])[/\\][\w.] )   # absolute or home-relative path
     | (?: [A-Za-z]: (?=\S) )                    # absolute or drive-relative Windows path
-    | (?: \$\{?\w+ | %\w+% )                # environment expansion
-    | [`|;&><$]                               # shell metacharacters
-    """
+    # Environment expansion. The name must start like an identifier: ``$5`` is a
+    # price in prose, not a variable, and a memory that says "the run cost $5"
+    # references nothing. ``$1`` as a positional parameter only means anything
+    # inside a script, which a memory body is not.
+    | (?: \$\{?[A-Za-z_]\w* | %\w+% )       # environment expansion
+"""
+# Bare shell metacharacters. A prompt note is a single "When <condition>,
+# <allowlisted action>." line, so none of these has any role in one and the
+# character class is the right test there. A memory body is Markdown prose,
+# where they are ordinary punctuation -- see ``_memory_resource_error``.
+_SHELL_METACHARACTERS = r"[`|;&><$]"
+_RESOURCE_TARGET = re.compile("(?ix)" + _RESOURCE_TARGET_FORMS)
+_RESOURCE_REFERENCE = re.compile(
+    "(?ix)" + _RESOURCE_TARGET_FORMS + "|" + _SHELL_METACHARACTERS
 )
 _RESOURCE_NETWORK_OR_SHELL = re.compile(r"(?ix)(?:[a-z]+://|[`|;&><$])")
 _HOST_REFERENCE = re.compile(
@@ -1763,14 +1776,35 @@ def _resource_reference_kind(text: str) -> Optional[str]:
 
 
 def _memory_resource_error(content: str) -> Optional[str]:
-    """Reject resources in memory, which is future behavioral context.
+    """Reject operational resources in memory, which is future behavioral context.
 
     Skills may legitimately document commands and URLs. A memory is injected as
-    durable guidance instead, so a path, host, URL, environment expansion, or
-    shell metacharacter has no safe operational role there.
+    durable guidance instead, so a URL, host, path or environment expansion --
+    a target the agent could act on -- has no safe operational role there.
+
+    Bare shell metacharacters are deliberately not part of this test, unlike the
+    prompt-note path that shares the target forms. A memory body is Markdown
+    prose, and ``;``, ``&``, ``$``, ``<``, ``>`` and backticks all occur in
+    ordinary English and ordinary Markdown; testing for the character rejected
+    sentences that name no resource at all. Measured on a real run, that is what
+    discarded the only useful lesson eleven real sessions produced -- on one
+    prose semicolon, in a body whose subject was a missing argument.
+
+    Dropping the character class costs no protection that this rule was for: a
+    shell construct only becomes operational once it names a target, and every
+    such target is still refused by the URL, host, path and environment clauses
+    below. What it stops costing is the false positive on prose.
+
+    NFKC is inspection-only: persisted memory bytes stay intact, while
+    compatibility forms such as full-width URL punctuation cannot bypass the same
+    policy applied to their ASCII equivalents.
     """
-    if _resource_reference_kind(content):
-        return "Memory content cannot reference resources, hosts, URLs, paths, environment variables, or shell syntax"
+    inspected = unicodedata.normalize("NFKC", content)
+    if _RESOURCE_TARGET.search(inspected) or _has_host_reference(inspected):
+        return (
+            "Memory content cannot reference resources, hosts, URLs, paths, or "
+            "environment variables"
+        )
     return None
 
 
