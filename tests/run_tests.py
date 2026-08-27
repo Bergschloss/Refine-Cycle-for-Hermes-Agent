@@ -999,6 +999,64 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(core._is_error_content("x" * 10000 + " timeout"))
         self.assertFalse(core._is_error_content("exit_code: 0\ncompleted normally"))
 
+    def test_returned_data_mentioning_an_error_is_not_a_failed_call(self):
+        """A successful read of a file that talks about errors is a success.
+
+        Measured on 6,775 real tool results: 355 were counted as failures while
+        their own payload stated no failure at all — 293 `read_file`, 34
+        `search_files` — producing 325 fingerprints of which 26 tripped the >=2
+        repeat gate. A run makes one proposal, so those competed with real
+        failures for it. O-32 found one pattern of this shape from web_search;
+        this is the same defect two orders of magnitude larger.
+
+        First case is the verbatim shape from the snapshot: a config file whose
+        text contains `error`.
+        """
+        for content in (
+            '{"content": "1|_config_version: 28\\n2|agent:\\n3|  api_max_retries: 3\\n'
+            '4|  on_error: retry\\n", "total_lines": 4, "is_binary": false}',
+            '{"total_count": 231, "matches_format": "path-grouped", '
+            '"matches": "core.py\\n  708: def _is_error_content(content):"}',
+            '{"content": "raise RuntimeError(\\"the request timed out\\")", '
+            '"total_lines": 1}',
+        ):
+            with self.subTest(content=content[:60]):
+                self.assertFalse(
+                    core._is_error_content(content),
+                    "Data a tool returned was read as evidence about the call.",
+                )
+
+    def test_a_payload_with_an_output_channel_is_still_read_heuristically(self):
+        """`output` is where a tool says what happened, so it keeps being read.
+
+        This is the line the previous test draws. `content` and match listings are
+        what a tool fetched; `output`, `stdout` and `stderr` are what it reports.
+        `execute_code` answering `status: success` while its program printed an
+        HTTP 400 is a real failure in the trajectory and must stay one — that is
+        the case that makes the discrimination worth having rather than just
+        trusting every self-report.
+
+        Both cases carry the marker the way the real corpus does, separated from
+        the opening quote. A marker glued directly to it (`"stderr": "Traceback…`)
+        is the limit declared on `_ERROR_MARKER`: seeing it needs a prefix class
+        that admits a quote, which was measured to add 52 false positives.
+        """
+        for content in (
+            '{"status": "success", "output": "HTTP Error: 400 validation_error", '
+            '"tool_calls_made": 0}',
+            '{"status": "success", "stderr": "  Traceback (most recent call last): '
+            'ValueError: boom"}',
+        ):
+            with self.subTest(content=content[:60]):
+                self.assertTrue(
+                    core._is_error_content(content),
+                    "A failure reported through an output channel was missed.",
+                )
+        # And an explicit failure field still wins regardless of shape.
+        self.assertTrue(
+            core._is_error_content('{"content": "x", "error": "File not found"}')
+        )
+
     def test_a_tool_saying_its_exit_code_is_not_an_error_is_believed(self):
         """A non-zero exit the tool itself calls benign is not a failure.
 

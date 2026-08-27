@@ -698,6 +698,10 @@ _ERROR_MARKER = re.compile(
 # Status values that state a failure in the tool's own vocabulary. Used only to
 # revoke a benign-exit declaration, never to classify on their own.
 _FAILING_STATUS = frozenset({"error", "failed", "failure", "timeout", "cancelled"})
+# Where a tool says what happened, as opposed to what it fetched. A payload with
+# one of these keeps being read heuristically; a payload without one is returning
+# data, and data is not evidence about the call that returned it.
+_OUTPUT_CHANNELS = frozenset({"output", "stdout", "stderr"})
 
 
 def _strip_non_error_declarations(text: str) -> str:
@@ -759,6 +763,24 @@ def _structured_error_status(content: str) -> Optional[bool]:
         if exit_values and all(code == 0 for code in exit_values):
             return False
         if value.get("success") is True or value.get("ok") is True:
+            return False
+        # A payload that reports no failure AND carries no output channel is a
+        # tool returning DATA, not a tool reporting an outcome. Its data is not
+        # evidence about the call: `read_file` on a config that mentions "error",
+        # or `search_files` matching a line containing "failed", is a success.
+        #
+        # Measured on 6,775 real tool results: 355 were classified as failures
+        # while their own payload stated no failure at all -- 293 `read_file`, 34
+        # `search_files` -- producing 325 distinct fingerprints of which 26 tripped
+        # the >=2 repeat gate. A run makes one proposal, so 26 bogus repeated
+        # failures compete with the real ones for it. O-32 found one such pattern
+        # from web_search; this is the same defect two orders of magnitude larger.
+        #
+        # The discrimination is which field the marker sits in. `output`, `stdout`
+        # and `stderr` are where a tool says what happened, so a payload carrying
+        # one still falls through to the heuristic — `execute_code` reporting
+        # `status: success` with an HTTP 400 in its output stays a failure.
+        if not (_OUTPUT_CHANNELS & value.keys()):
             return False
 
     codes = [
