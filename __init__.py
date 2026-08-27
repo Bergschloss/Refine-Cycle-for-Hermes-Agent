@@ -351,13 +351,31 @@ def _on_pre_tool_call(
     if tool_name != "terminal":
         return None
     cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
-    if "git push" in cmd and "PrimeIntellect-ai" in cmd:
+    if "git push" not in cmd:
+        return None
+    cwd = str(_.get("cwd") or "")
+    # Debug: log what cwd the hook sees
+    import json, pathlib
+    pathlib.Path("/tmp/hook_debug.json").write_text(json.dumps({
+        "cwd": cwd, "kw_keys": sorted(str(k) for k in _), "cmd": cmd[:200]
+    }))
+    # The remote URL is in git config, not the command text. Check it.
+    import subprocess
+    try:
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=3, cwd=cwd or None,
+        ).stdout.strip()
+    except Exception:
+        remote = ""
+    if "PrimeIntellect-ai" in remote and "/prime-agent" in remote:
         return {
             "action": "block",
             "message": (
-                "Push to PrimeIntellect-ai blocked: Bergschloss has no "
-                "write access. Fork the repo to Bergschloss/prime-agent, "
-                "push to the fork instead, then open a pull request."
+                "Push to PrimeIntellect-ai/prime-agent.git blocked: "
+                "Bergschloss has no write access to this repository. "
+                "Fork the repo to Bergschloss/prime-agent, push to "
+                "the fork instead, then open a pull request."
             ),
         }
     return None
