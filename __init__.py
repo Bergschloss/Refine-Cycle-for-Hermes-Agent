@@ -1068,7 +1068,7 @@ def register(ctx) -> None:
     except Exception:
         logger.debug("write approval check failed", exc_info=True)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
-    # ctx.register_hook("pre_tool_call", _on_pre_tool_call)  # off for control
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
