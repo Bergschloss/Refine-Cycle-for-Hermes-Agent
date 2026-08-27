@@ -901,15 +901,58 @@ def _structured_error_status(content: str) -> Optional[bool]:
     return None
 
 
-def _is_error_content(content: str) -> bool:
-    """Classify structured status first, then bounded head/tail error text."""
+# Tools whose job is to FETCH content, so their payload is the fetched data, not
+# a report about the call. Normalized to lowercase tokens. For these, the words
+# inside the returned bytes (source code, search matches, page text) are the
+# file's words, not the tool's: a file that mentions "error" or "exception" is
+# not a failing tool call. Only the tool's own report of the call counts.
+_CONTENT_FETCHER_TOKENS = frozenset({
+    "readfile", "readtext", "read", "readmultiple", "cat", "view", "head", "tail",
+    "openfile", "getfilecontents", "getpagetext", "getpagedom", "gettext",
+    "grep", "rg", "ack", "searchfiles", "search", "searchcode",
+    "ls", "find", "reach", "seek", "webfetch", "webextract", "webscrape",
+    "dump", "tailf",
+})
+
+
+def _tool_name_tokens(tool_name: str) -> set:
+    """Lowercase alphanumeric tokens of a tool name (mcp__x__read_file -> {...})."""
+    return {t for t in re.split(r"[^a-z0-9]+", tool_name.lower()) if t}
+
+
+# A content fetcher can genuinely fail and say so — "File not found: /x",
+# "No such file or directory", "permission denied". Those are the tool reporting
+# the call, and they arrive at the HEAD of the payload, not buried inside fetched
+# bytes. This is the only unstructured signal that still counts for a fetcher.
+_TOOL_FAILURE_HEAD = re.compile(
+    r"""(?ix)^\s*(?:["']?)\s*
+    (?: error\b\s*[:!] | traceback\b | \*+\s*error\b
+      | file\s+not\s+found\b | no\s+such\s+(?:file|directory|path)\b
+      | cannot\s+find\b | permission\s+denied\b
+      | \b(?:eperm|eacces|enoent|eisdir|enotdir)\b
+      | failed\s+to\s+\w+\s*[:]
+      | unable\s+to\s+(?:read|open|access|find)\b )
+    """
+)
+
+
+def _is_error_content(content: str, *, tool_name: Optional[str] = None) -> bool:
+    """Classify structured status first, then bounded head/tail error text.
+
+    ``tool_name`` lets content-fetching tools be handled on their own terms:
+    their returned bytes are not evidence about the call, so only a structured
+    status or an explicit failure at the payload head counts.
+    """
     if not content:
         return False
     
     structured = _structured_error_status(content)
     if structured is not None:
         return structured
-    
+
+    if tool_name and _CONTENT_FETCHER_TOKENS.intersection(_tool_name_tokens(tool_name)):
+        return bool(_TOOL_FAILURE_HEAD.match(content))
+
     # Only sample for heuristic if the content is large
     sample = (
         content
@@ -1178,9 +1221,9 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         error_items: List[Dict[str, Any]] = []
         for row in failure_rows:
             content = scrub_text(str(row["content"] or ""))
-            if not _is_error_content(content):
-                continue
             tool_name = _one_line(scrub_text(str(row["tool_name"] or "")))[:120]
+            if not _is_error_content(content, tool_name=tool_name):
+                continue
             bounded = (
                 content
                 if len(content) <= 4000
@@ -1300,7 +1343,9 @@ def collect_cross_session_patterns(
                         continue
                     seen.add(sid)
                 content = scrub_text(str(row["content"] or ""))
-                if not _is_error_content(content):
+                if not _is_error_content(
+                    content, tool_name=str(row["tool_name"] or "")
+                ):
                     continue
                 bounded = (
                     content

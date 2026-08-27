@@ -15140,6 +15140,49 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             has_prior_assistant_response=False,
         ))
 
+    def test_fetcher_file_content_is_not_error_evidence(self):
+        """B2: a fetched file mentioning error/failed is not a call failure.
+
+        The signal must come from what the tool reported about the call, not
+        from the returned bytes. Source code or page text that contains the word
+        "error" is the file's words, not the tool's.
+        """
+        source = (
+            "1\\t#include \"core/FenceManager.h\"\\n"
+            "2\\t// error handling\\n3\\tthrow new Error('x');\\n"
+            "4\\texceptionHandler\\n"
+        )
+        # With the tool name, content words are not evidence about the call.
+        self.assertFalse(core._is_error_content(source, tool_name="read_file"))
+        self.assertFalse(core._is_error_content(source, tool_name="mcp__jules__Read"))
+        self.assertFalse(core._is_error_content(source, tool_name="WebFetch"))
+        self.assertFalse(core._is_error_content(source, tool_name="Grep"))
+        # Without the tool name the heuristic still trips on the words, which
+        # documents that the tool name is what supplies the discrimination.
+        self.assertTrue(core._is_error_content(source))
+        # A fetcher that REPORTS a failure at the payload head is still an error.
+        self.assertTrue(core._is_error_content(
+            "Error: file not found: /x", tool_name="read_file"
+        ))
+        self.assertTrue(core._is_error_content(
+            "No such file or directory: /x", tool_name="cat"
+        ))
+        self.assertTrue(core._is_error_content(
+            "Permission denied: /root/x", tool_name="Read"
+        ))
+        # A structured fetcher failure (truthy error field) is still an error.
+        self.assertTrue(core._is_error_content(
+            '{"error": "read produced 117,600 chars", "content": ""}',
+            tool_name="read_file",
+        ))
+        # Non-fetcher tools are unaffected by the tool-name branch.
+        self.assertTrue(core._is_error_content(
+            "Traceback: boom", tool_name="Bash"
+        ))
+        self.assertFalse(core._is_error_content(
+            "all done; no errors.", tool_name="Bash"
+        ))
+
     def test_indented_traceback_terminal_exception_is_normalized_without_overmatching(self):
         indented = (
             "Traceback (most recent call last):\n"
