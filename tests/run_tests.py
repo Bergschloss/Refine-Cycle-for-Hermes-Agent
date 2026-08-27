@@ -978,6 +978,65 @@ class RefineTests(unittest.TestCase):
         # The returned session_id must be the resolved one
         self.assertEqual(result["session_id"], "session")
 
+    def test_a_repeated_failure_before_the_excerpt_window_is_still_counted(self):
+        """The failure counting reads the session; the excerpt renders 60 rows.
+
+        These were one query, so `limit` bounded both and a repeated failure
+        outside the newest 60 rows was invisible. Measured on the real snapshot:
+        40 of 69 repeated-failure groups (58%) had their first failure before the
+        window opened, and it tracked session length -- sessions over 300 rows had
+        1 group visible and 19 not. The traced case failed 14 times in a 1015-row
+        session and arrived as `errors=1, patterns=1`.
+
+        The fixture reproduces that shape: three identical failures, then 80
+        unrelated rows on top of them, so every failure is pushed out of a 60-row
+        window while the session still holds them.
+        """
+        now = time.time()
+        rows = [
+            ("session", "tool", "ERROR: schedule is required for create", "cronjob",
+             now - 200 + index, 1)
+            for index in range(3)
+        ] + [
+            ("session", "user", f"later unrelated turn {index}", "", now - 100 + index, 1)
+            for index in range(80)
+        ]
+        FakeHost.make_db(rows)
+
+        evidence = core.collect_evidence("session", limit=60)
+        self.assertEqual(
+            evidence["error_count"], 3,
+            "A failure older than the excerpt window was not counted.",
+        )
+        counts = [p.get("count") for p in evidence.get("error_patterns") or []]
+        self.assertIn(3, counts, f"The repeat was not aggregated: {counts}")
+        # The excerpt itself stays bounded -- this must not become a way to grow
+        # the prompt, only a way to count correctly.
+        self.assertLessEqual(len(evidence["messages"]), 60)
+        # And the snippets shown agree with what was counted, rather than being
+        # drawn from a window that no longer holds those failures.
+        self.assertTrue(evidence["tool_errors"])
+        self.assertIn("schedule is required", evidence["tool_errors"][-1]["snippet"])
+
+    def test_failures_inside_the_window_are_counted_once_not_twice(self):
+        """Two collection paths over overlapping rows is how double counting starts.
+
+        The failures are now read by their own query, and the excerpt loop no
+        longer collects them. If both did, every failure inside the newest 60 rows
+        would count twice and every threshold would trip at half its setting.
+        """
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", "ERROR: request failed for /item/100", "http", now - 3, 1),
+            ("session", "tool", "ERROR: request failed for /item/200", "http", now - 2, 1),
+            ("session", "assistant", "Retrying", "", now - 1, 1),
+        ])
+        evidence = core.collect_evidence("session", limit=60)
+        self.assertEqual(evidence["error_count"], 2)
+        self.assertEqual(
+            [p.get("count") for p in evidence.get("error_patterns") or []], [2]
+        )
+
     def test_recursive_sanitation_covers_every_journal_field(self):
         entry_id = journal.log(
             trigger="manual", reason='password: "p@ss:w,rd!"', session_id="session",

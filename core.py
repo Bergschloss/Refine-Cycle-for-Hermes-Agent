@@ -1056,10 +1056,62 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 previous_was_assistant_response = bool(
                     predecessor_role == "assistant" and predecessor["has_content"]
                 )
+        # Failure counting reads the session; the excerpt above renders it.
+        #
+        # These were one query, so `limit` bounded both, and a repeated failure
+        # outside the newest 60 rows was invisible. Measured on the snapshot: 40 of
+        # 69 repeated-failure groups (58%) had their first failure before the
+        # window opened, and it tracks session length — sessions over 300 rows had
+        # 1 group visible and 19 not. Long sessions are exactly where a failure
+        # gets repeated eight or nineteen times. The `skill_manage` case failed 14
+        # times in a 1015-row session and arrived as `errors=1, patterns=1`.
+        #
+        # `cross_session_max_rows` already declares itself as the row budget for a
+        # pass, so it governs here too rather than a second number being invented.
+        # Only `role='tool'` rows are read, and `extract_patterns` still returns at
+        # most `FORMAT_PATTERNS_LIMIT` patterns, so the prompt does not grow — only
+        # the counts stop being wrong.
+        failure_sql = (
+            "SELECT m.content, m.tool_name, m.timestamp FROM messages m "
+            "LEFT JOIN sessions s ON s.id = m.session_id "
+            "WHERE m.session_id = ? AND m.active = 1 AND m.role = 'tool'"
+        )
+        failure_params: List[Any] = [resolved]
+        if skipped_sources:
+            placeholders = ",".join("?" for _ in skipped_sources)
+            failure_sql += (
+                f" AND (s.source IS NULL OR LOWER(s.source) NOT IN ({placeholders}))"
+            )
+            failure_params.extend(skipped_sources)
+        failure_sql += " ORDER BY m.timestamp DESC, m.rowid DESC LIMIT ?"
+        failure_params.append(max(int(limit), config.cross_session_max_rows()))
+        failure_rows = list(
+            reversed(connection.execute(failure_sql, tuple(failure_params)).fetchall())
+        )
+
         messages: List[Dict[str, Any]] = []
         tool_errors: List[Dict[str, Any]] = []
         corrections: List[Dict[str, Any]] = []
         error_items: List[Dict[str, Any]] = []
+        for row in failure_rows:
+            content = scrub_text(str(row["content"] or ""))
+            if not _is_error_content(content):
+                continue
+            tool_name = _one_line(scrub_text(str(row["tool_name"] or "")))[:120]
+            bounded = (
+                content
+                if len(content) <= 4000
+                else content[:1000] + "\n…\n" + content[-3000:]
+            )
+            pattern_content = _strip_untrusted_tags(bounded)
+            tool_errors.append({"tool": tool_name, "snippet": pattern_content[:300]})
+            error_items.append({
+                "tool": tool_name,
+                "content": pattern_content,
+                "session_id": resolved,
+                "ts": row["timestamp"] or 0,
+            })
+
         for row in chronological_rows:
             # Every string from SQLite is scrubbed at this single extraction
             # boundary so evidence, journals, and returned tool results inherit it.
@@ -1072,20 +1124,8 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             )[:120]
             shown = content[:400] + ("…" if len(content) > 400 else "")
             messages.append({"role": role, "content": shown, "tool_name": tool_name})
-            if role == "tool" and _is_error_content(content):
-                bounded = (
-                    content
-                    if len(content) <= 4000
-                    else content[:1000] + "\n…\n" + content[-3000:]
-                )
-                pattern_content = _strip_untrusted_tags(bounded)
-                tool_errors.append({"tool": tool_name, "snippet": pattern_content[:300]})
-                error_items.append({
-                    "tool": tool_name,
-                    "content": pattern_content,
-                    "session_id": resolved,
-                    "ts": row["timestamp"] or 0,
-                })
+            # Tool failures are collected above, over the whole session; collecting
+            # them here as well would count every windowed failure twice.
             if role == "user" and _is_correction(
                 content,
                 has_prior_assistant_response=previous_was_assistant_response,
