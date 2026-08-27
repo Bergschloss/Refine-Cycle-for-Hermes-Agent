@@ -1960,6 +1960,15 @@ def _preview_guardrail_error(proposal: Dict[str, Any]) -> Optional[str]:
     prompt-note store and recent-apply lookups, so running it on a dry run keeps
     the "applies nothing" promise. A transaction stops at its first failing edit,
     so the preview names that edit rather than summarising.
+
+    One declared inaccuracy, in the transaction case only. ``_apply_edit`` checks
+    each edit against live state, so edit 1 is judged after edit 0 has landed;
+    nothing has landed during a preview, so an edit that depends on an earlier one
+    in the same transaction (patching a skill the transaction itself creates)
+    previews as rejected and would apply. Erring toward "would be rejected" is the
+    right way round for a preview, and the shape the model is told to use --- a new
+    skill plus the memory entry that records when to reach for it --- has no such
+    dependency.
     """
     if str(proposal.get("action", "")) != "multi":
         return _validate_proposal(proposal)
