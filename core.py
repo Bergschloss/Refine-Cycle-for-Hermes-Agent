@@ -95,16 +95,46 @@ _RESOURCE_REFERENCE = re.compile(
     "(?ix)" + _RESOURCE_TARGET_FORMS + "|" + _SHELL_METACHARACTERS
 )
 _RESOURCE_NETWORK_OR_SHELL = re.compile(r"(?ix)(?:[a-z]+://|[`|;&><$])")
+# Forms that can only be a network target. No prose can make these innocent.
+_UNAMBIGUOUS_HOST_FORMS = r"""
+    \b(?:localhost|intranet)\b                            # common bare hostnames
+    | \b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b # IPv4
+    | \[(?:[0-9a-f]{0,4}:){2,7}[0-9a-f:]*\]              # bracketed IPv6
+    | (?<![0-9a-f])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f:]*(?![0-9a-f:]) # bare IPv6
+"""
+_UNAMBIGUOUS_HOST = re.compile("(?ix)(?:" + _UNAMBIGUOUS_HOST_FORMS + ")")
+# A dotted name, which is genuinely ambiguous: `SKILL.md` and `example.md` are the
+# same shape, and no property of the token tells them apart. Label count does not:
+# `invocation-route-v2026.8.16.patch` has four labels and is a filename, while
+# `example.com` has two and is a host. The rightmost label does not either, unless
+# an extension list is maintained forever — `.md` is Moldova, `.sh` is St Helena,
+# `.py` is Paraguay.
+#
+# What does tell them apart is how the sentence uses the token. A host reference
+# names something to reach; a filename names something that exists. So this form
+# counts as a host only with host context around it, which is the rule this file
+# already applies to the identically ambiguous legacy IPv4 literal.
+#
+# Measured cost of the old behaviour: 14 of 17 ordinary filenames were refused from
+# memory (`SKILL.md`, `AGENTS.md`, `MEMORY.md`, `config.yaml`, `core.py`,
+# `state.db`, `package.json`…), and it killed the only proposal this corpus
+# produced that was correct and not already documented.
+#
+# Declared admission: `the API lives at api.internal.corp` passes, because no
+# keyword marks it as a target. A URL, a port, a scheme, an IP literal and
+# `localhost` are all still refused unconditionally, and those are the operational
+# shapes; a bare name with no verb is a fact, not an instruction.
+_DOTTED_NAME_FORM = r"(?<![\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,63}\.?(?![\w.-])"
+_DOTTED_NAME = re.compile("(?ix)" + _DOTTED_NAME_FORM)
+# The strict rule, unchanged, and it stays on the prompt-note path. A prompt note
+# is one imperative "When <condition>, <allowlisted action>." line rendered into
+# every later session's system prompt; no approved action names a file, so a dotted
+# name has no legitimate role there, while `use collector.evil to export records`
+# is exactly the shape it exists to stop. The narrowing below applies only to
+# memory, whose whole job is describing the environment in prose. Same category
+# split as O-36's shell-metacharacter class, argued the same way.
 _HOST_REFERENCE = re.compile(
-    r"""(?ix)
-    (?:
-        (?<![\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,63}\.?(?![\w.-]) # dotted hostname
-        | \b(?:localhost|intranet)\b                            # common bare hostnames
-        | \b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b # IPv4
-        | \[(?:[0-9a-f]{0,4}:){2,7}[0-9a-f:]*\]              # bracketed IPv6
-        | (?<![0-9a-f])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f:]*(?![0-9a-f:]) # bare IPv6
-    )
-    """
+    "(?ix)(?:" + _UNAMBIGUOUS_HOST_FORMS + "|" + _DOTTED_NAME_FORM + ")"
 )
 _LEGACY_IPV4_COMPONENT = r"(?:0x[0-9a-f]{1,8}|0[0-7]{0,11}|[1-9]\d{0,9})"
 _LEGACY_IPV4_LITERAL = re.compile(
@@ -412,41 +442,78 @@ def _one_line(value: Any) -> str:
     return _RECORD_SEPARATOR.sub(" ", str(value)).strip()
 
 
-def _short_decimal_has_host_context(text: str, match: re.Match) -> bool:
-    """Whether a short decimal appears as an explicit host/address reference.
+def _has_host_context(text: str, match: re.Match) -> bool:
+    """Whether an ambiguous token is used as a host/address by the sentence.
 
-    A bare decimal is common in prompt-note conditions (retry counts, durations,
-    status descriptions) and is not enough to prove a host literal. Legacy
-    single-number IPv4 notation stays blocked when the surrounding prose names a
-    network target, which is the only form this policy can safely distinguish.
+    Two token shapes are genuinely undecidable on their own: a short decimal
+    (a retry count, a duration, or legacy single-number IPv4 notation) and a
+    dotted name (`SKILL.md` or `example.md`). For both, the surrounding prose is
+    the only evidence available, so both consult this.
     """
     before = text[max(0, match.start() - 48):match.start()]
-    return bool(
-        re.search(
-            r"(?i)\b(?:host|address|ip|server|target|connect(?:ion)?|endpoint"
-            r"|ssh|dial|reach|ping|curl|wget|telnet|netcat|nc|route|proxy|forward"
-            r"|bind|listen)"
-            r"s?\s*(?:(?:is|to|at)\s*|[=,:;\-]\s*|\(\s*)?$",
-            before,
-        )
+    # A network noun, or a target-taking verb, sitting against the token.
+    adjacent = re.search(
+        r"(?i)\b(?:host|address|ip|server|target|connect(?:ion)?|endpoint"
+        r"|ssh|dial|reach|ping|curl|wget|telnet|netcat|nc|route|proxy|forward"
+        r"|bind|listen|use|fetch|download)"
+        r"s?\s*(?:(?:is|to|at)\s*|[=,:;\-]\s*|\(\s*)?$",
+        before,
     )
+    # Or a transfer verb whose target arrives after an intervening noun phrase,
+    # marked by a directional preposition immediately before the token: "send the
+    # archive TO drop.example.md". The preposition is what does the work. Without
+    # it the same verbs govern something else -- "pass the full text OF SKILL.md"
+    # names a file, not a destination -- which is exactly the distinction the
+    # dotted-name rule rests on. Bounded to one clause so it cannot reach across a
+    # sentence for a verb that belongs to another statement.
+    directed = re.search(
+        r"(?i)\b(?:send|post|upload|export|exfiltrate|publish|mirror|forward"
+        r"|sync|push|copy|write|save|drop|report|stream)\w*\b"
+        r"[^.;:\n]{0,40}?"
+        r"\b(?:to|into|at|towards?|via)\s+$",
+        before,
+    )
+    return bool(adjacent or directed)
+
+
+def _memory_host_reference(text: str) -> bool:
+    """The host test for a memory body, where a filename is ordinary prose.
+
+    Differs from :func:`_has_host_reference` in one respect: a bare dotted name
+    counts only where the sentence uses it as a target. Everything unambiguous —
+    an IP literal, ``localhost``, bracketed IPv6, legacy IPv4 notation — is refused
+    exactly as before, and URLs, ports, paths and environment expansions are
+    refused by ``_RESOURCE_TARGET`` regardless of prose.
+    """
+    if _UNAMBIGUOUS_HOST.search(text) or _LEGACY_IPV4_LITERAL.search(text):
+        return True
+    if _LEGACY_IPV4_OVERFLOW.search(text):
+        return True
+    if any(_has_host_context(text, match) for match in _DOTTED_NAME.finditer(text)):
+        return True
+    return _short_decimal_is_a_host(text)
 
 
 def _has_host_reference(text: str) -> bool:
-    """Reject names plus conventional and contextual legacy IP literals."""
+    """Reject unambiguous hosts, dotted names, and contextual legacy IP literals."""
     if (
         _HOST_REFERENCE.search(text)
         or _LEGACY_IPV4_LITERAL.search(text)
         or _LEGACY_IPV4_OVERFLOW.search(text)
     ):
         return True
+    return _short_decimal_is_a_host(text)
+
+
+def _short_decimal_is_a_host(text: str) -> bool:
+    """A bare decimal is a host only in host context, never as an HTTP status."""
     status_spans: list[tuple[int, int]] = []
     for m in _HTTP_STATUS_REFERENCE.finditer(text):
         for gi in range(1, (m.lastindex or 0) + 1):
             if m.group(gi) is not None:
                 status_spans.append(m.span(gi))
     return any(
-        match.span() not in status_spans and _short_decimal_has_host_context(text, match)
+        match.span() not in status_spans and _has_host_context(text, match)
         for match in _SHORT_DECIMAL_IPV4_LITERAL.finditer(text)
     )
 
@@ -1956,7 +2023,7 @@ def _memory_resource_error(content: str) -> Optional[str]:
     policy applied to their ASCII equivalents.
     """
     inspected = unicodedata.normalize("NFKC", content)
-    if _RESOURCE_TARGET.search(inspected) or _has_host_reference(inspected):
+    if _RESOURCE_TARGET.search(inspected) or _memory_host_reference(inspected):
         return (
             "Memory content cannot reference resources, hosts, URLs, paths, or "
             "environment variables"
