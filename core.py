@@ -710,12 +710,37 @@ def _strip_non_error_declarations(text: str) -> str:
     return _BENIGN_EXIT_MEANING.sub("", text)
 
 
+def _leading_json_object(content: str) -> Optional[Dict[str, Any]]:
+    """The payload object when host annotations follow it, else None."""
+    text = (content or "").strip()
+    if not text.startswith("{"):
+        return None
+    closing = text.rfind("}")
+    if closing <= 0:
+        return None
+    try:
+        value = json.loads(text[: closing + 1])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _structured_error_status(content: str) -> Optional[bool]:
     """Return a definitive structured status, or None when text is unstructured."""
     try:
         value = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        value = None
+        # The host appends annotations after the payload — a pagination hint, a
+        # loop warning, or an entire discovered AGENTS.md — and strict parsing
+        # rejects the whole result, so the structured rules below never ran and
+        # the text heuristic decided instead, on prose the tool did not produce.
+        #
+        # Measured: 404 of the 409 results strict parsing rejects have a parseable
+        # leading object, and 115 of those were counted as failures while their own
+        # payload stated no failure (110 `search_files`, 5 `read_file`) — 110
+        # fingerprints, 3 tripping the >=2 gate. The annotation is metadata about
+        # the result, never the result's own verdict, so the leading object decides.
+        value = _leading_json_object(content)
     # Read from the raw text, not the parsed dict: a tool result often carries an
     # appended loop warning that defeats json.loads, and the declaration must be
     # honoured on that path too.

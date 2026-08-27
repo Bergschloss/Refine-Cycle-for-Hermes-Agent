@@ -1057,6 +1057,43 @@ class RefineTests(unittest.TestCase):
             core._is_error_content('{"content": "x", "error": "File not found"}')
         )
 
+    def test_host_annotations_after_the_payload_do_not_decide_the_verdict(self):
+        """The host appends notes after the JSON; strict parsing dropped them all.
+
+        A result often carries `[Hint: Results truncated…]`, a loop warning, or an
+        entire discovered `AGENTS.md` after the payload. `json.loads` rejects the
+        whole string, so the structured rules never ran and the text heuristic
+        decided instead — on prose the tool never produced.
+
+        Measured: 404 of the 409 results strict parsing rejects have a parseable
+        leading object, and 115 of those were counted as failures while their own
+        payload stated no failure (110 `search_files`, 5 `read_file`), producing
+        110 fingerprints of which 3 tripped the >=2 repeat gate.
+
+        The first two cases are the annotations verbatim from the corpus. The
+        injected AGENTS.md is the sharpest: its prose is someone else's document,
+        and it decided whether a successful search counted as a failure.
+        """
+        payload = '{"total_count": 231, "matches_text": "core.py\\n  12: ok"}'
+        for tail in (
+            " [Hint: Results truncated. Use offset=100 to see more, or narrow with "
+            "a more specific pattern or file_glob.]",
+            " [Subdirectory context discovered: ai-tools/AGENTS.md]\n# Instructions\n"
+            "> This project does not accept pull requests; a failed build is an error.",
+        ):
+            with self.subTest(tail=tail[:40]):
+                self.assertFalse(
+                    core._is_error_content(payload + tail),
+                    "A host annotation decided the verdict for the tool.",
+                )
+        # The payload's own verdict still wins, annotation or not.
+        self.assertTrue(
+            core._is_error_content(
+                '{"success": false, "error": "boom"} '
+                "[Tool loop warning: repeated_exact_failure_warning; count=2]"
+            )
+        )
+
     def test_a_tool_saying_its_exit_code_is_not_an_error_is_believed(self):
         """A non-zero exit the tool itself calls benign is not a failure.
 
