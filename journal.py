@@ -2933,7 +2933,14 @@ def _rollback_memory_locked(entry_id: str) -> Dict[str, Any]:
                 f"recovery id: {entry_id}. {scrub_text(str(exc))}"
             ),
         }
-    return {"success": True, "message": f"Removed the exact appended {target} memory entry"}
+    # ``target`` is the host's own name for the store ("memory" or "user"), so
+    # interpolating it before the word "memory" read as "memory memory entry" on
+    # every personal-memory rollback -- including in the live evidence quoted in
+    # VERIFICATION.md.
+    return {
+        "success": True,
+        "message": f"Removed the exact appended entry from the {target} store",
+    }
 
 
 def rollback_prompt_note(entry_id: str) -> Dict[str, Any]:
