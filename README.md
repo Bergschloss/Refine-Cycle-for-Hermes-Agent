@@ -176,6 +176,13 @@ hermes gateway restart
 running gateway. This exact sequence is verified end to end on Hermes 0.20.1;
 see VERIFICATION.md.
 
+> **The plugin works inside the running gateway.** The LLM invocation route is
+> bound by the live gateway process, so in a bare command-line process
+> `refine_run` returns `llm_invocation_unavailable` by design (and `/refine
+> status` names that blocker directly). Automatic refinement, proposals, and
+> apply/rollback all run inside the gateway — test with a real session or the
+> restart above, not with a one-shot script.
+
 Then, optionally, configure it in `config.yaml`:
 
 ```yaml
