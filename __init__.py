@@ -348,6 +348,21 @@ def _tool_matches(tool_name: str, target: str) -> bool:
     return tn.endswith("__" + tgt) or tn.endswith(":" + tgt) or tn.endswith("." + tgt)
 
 
+def _binary_matches(binary: str, target: str) -> bool:
+    """Check if binary matches target; cmake won't match make."""
+    if binary == target:
+        return True
+    if target in binary:
+        prefix = binary[:binary.index(target)]
+        suffix = binary[binary.index(target) + len(target):]
+        if prefix and (prefix[-1].isalpha() or prefix[-1] == "_"):
+            return False
+        if suffix and (suffix[0].isalpha() or suffix[0] == "_"):
+            return False
+        return True
+    return False
+
+
 def _on_pre_tool_call(
     tool_name: str = "",
     args: Any = None,
