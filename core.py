@@ -2033,6 +2033,7 @@ def refine_audit() -> Dict[str, Any]:
             journal_entries = journal.entries()
             stats_snapshot = ledger.load_stats()
             skill_baselines = ledger.snapshot_skill_baselines(journal_entries)
+            memory_baselines = ledger.snapshot_memory_baselines(journal_entries)
     except Exception as exc:
         safe_error = scrub_text(str(exc))
         logger.error("Audit attribution snapshot failed: %s", safe_error)
@@ -2051,6 +2052,7 @@ def refine_audit() -> Dict[str, Any]:
         journal_entries=journal_entries,
         stats_snapshot=stats_snapshot,
         skill_baselines=skill_baselines,
+        memory_baselines=memory_baselines,
     )
     report = ledger.format_audit(rows)
     if not complete:

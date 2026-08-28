@@ -414,6 +414,51 @@ def _merge_journal_stats(
     return merged
 
 
+def _latest_applied_memory_contents(
+    journal_entries: Optional[List[Dict[str, Any]]],
+) -> Dict[str, str]:
+    """Map target -> last applied memory content the plugin itself wrote.
+
+    Mirror of ``_latest_applied_skill_digests`` for kind="memory". The audit
+    needs to know what refine last left behind so it can check whether that
+    content still exists; without this map a memory row's verdict silently
+    credits or blames refine for edits the host made afterwards.
+    """
+    latest: Dict[str, Tuple[float, str]] = {}
+    for entry in journal_entries or []:
+        if not isinstance(entry, dict) or entry.get("outcome") != "applied":
+            continue
+        proposal = entry.get("proposal")
+        if not isinstance(proposal, dict):
+            continue
+        if _kind_is_skill(proposal.get("kind")) or proposal.get("kind") != "memory":
+            continue
+        if proposal.get("action") not in ("create", "patch"):
+            continue
+        name = str(proposal.get("name", "")).strip()
+        content = proposal.get("content")
+        if not name or not isinstance(content, str):
+            continue
+        try:
+            ts = float(entry.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        existing = latest.get(name)
+        if existing is None or ts >= existing[0]:
+            latest[name] = (ts, content.strip())
+    return {name: content for name, (_, content) in latest.items()}
+
+
+def snapshot_memory_baselines(
+    journal_entries: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Capture current memory targets for one journal generation under the lock."""
+    baselines: Dict[str, Optional[Dict[str, Any]]] = {}
+    for name, content in _latest_applied_memory_contents(journal_entries).items():
+        baselines[f"memory:{name}"] = journal.memory_baseline("memory", content)
+    return baselines
+
+
 def _latest_applied_skill_digests(
     journal_entries: Optional[List[Dict[str, Any]]],
 ) -> Dict[str, str]:
@@ -464,6 +509,7 @@ def audit(
     journal_entries: Optional[List[Dict[str, Any]]] = None,
     stats_snapshot: Optional[Dict[str, Any]] = None,
     skill_baselines: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    memory_baselines: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     patterns_available = current_patterns is not None
     by_fingerprint = {
@@ -474,6 +520,7 @@ def audit(
     stats = stats_snapshot if stats_snapshot is not None else load_stats()
     merged_stats = _merge_journal_stats(stats, journal_entries)
     intended_skill_digests = _latest_applied_skill_digests(journal_entries)
+    intended_memory_contents = _latest_applied_memory_contents(journal_entries)
     for key, meta in sorted(merged_stats.items()):
         if not isinstance(meta, dict):
             logger.warning("Ignoring malformed ledger row for %s", scrub_text(str(key)))
@@ -628,6 +675,35 @@ def audit(
                 if external_change:
                     externally_modified = True
                     verdict = f"unreliable — externally {external_change}"
+            else:
+                attribution_unknown = True
+                verdict = "unreliable — intended state unknown"
+
+        # Memory rows get the same treatment with the method's own limit: the
+        # host has no usage counter for memory entries (counting a name in
+        # conversations proves nothing), so the only checkable fact is whether
+        # the exact content refine appended is still present. Exact-content
+        # membership cannot tell an EDIT from a REMOVAL -- both make the
+        # string disappear -- so the row says "no longer present as applied"
+        # rather than guessing which. Read-only, like the skill check.
+        if meta.get("kind", "skill") == "memory" and outcome == "applied":
+            intended_content = intended_memory_contents.get(name)
+            if intended_content:
+                baseline = (
+                    memory_baselines.get(f"memory:{name}")
+                    if memory_baselines is not None
+                    else journal.memory_baseline("memory", intended_content)
+                )
+                if baseline is None:
+                    attribution_unknown = True
+                    verdict = "unreliable — target state unavailable"
+                elif baseline.get("present") is False:
+                    # Honest naming: edit and removal are indistinguishable
+                    # through exact membership, so the state is named for what
+                    # is KNOWN (no longer present as applied), not for a
+                    # guessed cause.
+                    externally_modified = True
+                    verdict = "unreliable — no longer present as applied"
             else:
                 attribution_unknown = True
                 verdict = "unreliable — intended state unknown"

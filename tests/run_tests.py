@@ -8360,6 +8360,113 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             result = journal.skill_baseline("any-skill")
         self.assertIsNone(result)
 
+    # ── D2: memory baseline via exact-content membership ──────────────────────
+
+    def test_memory_baseline_present_when_content_unchanged(self):
+        """The exact applied string still in the store -> present with index."""
+        applied = "Verify the endpoint before retrying failed requests."
+        FakeHost.memory_entries.append(applied)
+        try:
+            baseline = journal.memory_baseline("memory", applied,
+                                               memory_entries=FakeHost.memory_entries)
+        finally:
+            FakeHost.memory_entries.remove(applied)
+        self.assertIsNotNone(baseline)
+        self.assertTrue(baseline["present"])
+        self.assertEqual(baseline["index"], 0)
+
+    def test_memory_baseline_absent_after_removal_reports_not_present(self):
+        applied = "Verify the endpoint before retrying failed requests."
+        baseline = journal.memory_baseline("memory", applied,
+                                           memory_entries=["An unrelated entry."])
+        self.assertIsNotNone(baseline)
+        self.assertFalse(baseline["present"])
+        self.assertIsNone(baseline["index"])
+
+    def test_memory_baseline_edit_cannot_be_distinguished_from_removal(self):
+        """The method's documented limit, asserted: an edited entry collapses
+        to present:False exactly like a removed one. The verdict text must
+        name the observable state, never a guessed cause."""
+        applied = "Verify the endpoint before retrying failed requests."
+        edited = applied + " Also verify the payload."
+        baseline = journal.memory_baseline("memory", edited and applied,
+                                           memory_entries=[edited])
+        self.assertEqual(baseline, {"present": False, "index": None})
+
+    def test_memory_baseline_unreadable_store_returns_none(self):
+        memory_module = sys.modules["tools.memory_tool"]
+        with patch.object(
+            memory_module.MemoryStore, "load_from_disk",
+            side_effect=OSError("host down"),
+        ):
+            result = journal.memory_baseline("memory", "some content")
+        self.assertIsNone(result)
+
+    def test_audit_memory_row_present_as_applied_keeps_verdict(self):
+        name = "memory-present"
+        content = "Audit baseline: this memory note is still exactly present."
+        created = time.time() - 20 * 86400
+        entries = [{
+            "id": "mem-audit-1", "ts": created, "outcome": "applied",
+            "proposal": {"name": name, "kind": "memory", "action": "create",
+                         "content": content},
+            "recovery": {"type": "memory_append", "target": "memory",
+                         "index": 0, "prefix_digest": "x", "content": content},
+        }]
+        ledger._save_stats({f"memory:{name}": {
+            "created_ts": created, "updated_ts": created, "journal_id": "mem-audit-1",
+            "name": name, "kind": "memory", "action": "create", "outcome": "applied",
+        }})
+        rows = ledger.audit([], journal_entries=entries,
+                            memory_baselines={f"memory:{name}": {"present": True, "index": 0}})
+        row = next(r for r in rows if r["kind"] == "memory")
+        self.assertNotIn("unreliable", row["verdict"])
+        self.assertFalse(row["externally_modified"])
+
+    def test_audit_memory_removal_yields_honest_verdict(self):
+        name = "memory-removed"
+        content = "Audit baseline: this note was later removed by consolidation."
+        created = time.time() - 20 * 86400
+        entries = [{
+            "id": "mem-audit-2", "ts": created, "outcome": "applied",
+            "proposal": {"name": name, "kind": "memory", "action": "create",
+                         "content": content},
+            "recovery": {"type": "memory_append", "target": "memory", "index": 0,
+                         "prefix_digest": "x", "content": content},
+        }]
+        ledger._save_stats({f"memory:{name}": {
+            "created_ts": created, "updated_ts": created, "journal_id": "mem-audit-1",
+            "name": name, "kind": "memory", "action": "create", "outcome": "applied",
+        }})
+        # Edit and removal are indistinguishable to exact membership; both
+        # yield present:False and both must land in the same honest state.
+        for label in ("removed", "edited"):
+            with self.subTest(current_state=label):
+                rows = ledger.audit(
+                    [], journal_entries=entries,
+                    memory_baselines={f"memory:{name}": {"present": False, "index": None}},
+                )
+                row = next(r for r in rows if r["kind"] == "memory")
+                self.assertTrue(row["externally_modified"])
+                self.assertEqual(row["verdict"], "unreliable — no longer present as applied")
+
+    def test_audit_memory_unavailable_state_is_attribution_unknown(self):
+        name = "memory-unreadable"
+        content = "Audit baseline: host memory state could not be read."
+        entries = [{
+            "id": "mem-audit-3", "ts": time.time() - 20 * 86400, "outcome": "applied",
+            "proposal": {"name": name, "kind": "memory", "action": "create",
+                         "content": content},
+        }]
+        ledger._save_stats({f"memory:{name}": {
+            "created_ts": time.time() - 20 * 86400, "journal_id": "mem-audit-1",
+            "name": name, "kind": "memory", "action": "create", "outcome": "applied",
+        }})
+        rows = ledger.audit([], journal_entries=entries, memory_baselines={})
+        row = next(r for r in rows if r["kind"] == "memory")
+        self.assertTrue(row["attribution_unknown"])
+        self.assertEqual(row["verdict"], "unreliable — target state unavailable")
+
     # ── Phase 2: planning baseline capture tests ───────────────────────────────
 
     def test_skill_patch_proposal_carries_planning_baseline(self):

@@ -587,6 +587,14 @@ Two honesty rules behind the verdicts:
   guessed. This horizon governs recurrence verdicts only — `unused_skills`'
   separate `min_age_days` (14) answers a different question ("has the skill
   been left idle") and is unchanged.
+- **Memory rows check presence, not usage.** The host keeps no usage counter
+  for memory entries, so the only checkable fact for an applied memory edit is
+  whether the exact content refine appended is still in the store. Exact
+  membership cannot tell an edit from a removal — both make the string
+  disappear — so when the content is gone the verdict is
+  `unreliable — no longer present as applied`, never "was deleted". If the
+  host memory state cannot be read at all, the row says
+  `unreliable — target state unavailable` rather than guessing.
 
 ### Agent-invocable tool
 

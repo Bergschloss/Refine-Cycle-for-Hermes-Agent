@@ -2221,6 +2221,41 @@ def _memory_entries(target: str) -> Optional[List[str]]:
         return None
 
 
+def memory_baseline(
+    target: str, content: str, memory_entries: Optional[List[str]] = None
+) -> Optional[Dict[str, Any]]:
+    """Locate the plugin's own last applied memory content among current entries.
+
+    Returns:
+        None — host memory state is unavailable (read error); cannot confirm
+        or deny anything.
+        {"present": True, "index": <int>} — the exact stripped content the
+        plugin appended still sits in the store.
+        {"present": False, "index": None} — the exact string is no longer in
+        the store.
+
+    Limit, named honestly: membership of one exact string cannot distinguish
+    "the entry was edited" from "the entry was removed". A host-side edit of
+    the entry (Hermes consolidation rewrites entries freely) and a deletion
+    both collapse to ``present: False``. Callers must therefore report
+    "no longer present as applied", never "was deleted". Nothing here infers
+    WHY the content is gone.
+    """
+    if memory_entries is not None:
+        values = list(memory_entries)
+    else:
+        values = _memory_entries(target)
+        if values is None:
+            return None
+    wanted = (content or "").strip()
+    if not wanted:
+        return None
+    for position, entry in enumerate(values):
+        if isinstance(entry, str) and entry.strip() == wanted:
+            return {"present": True, "index": position}
+    return {"present": False, "index": None}
+
+
 def backup_memory(target: str) -> Optional[str]:
     entries_value = _memory_entries(target)
     if entries_value is None:
