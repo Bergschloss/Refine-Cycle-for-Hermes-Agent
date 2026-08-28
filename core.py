@@ -2958,6 +2958,7 @@ def _render_proposer_context(
     run_context: str,
     reviewer_context: str,
     active_notes: Optional[List[Dict[str, str]]] = None,
+    history_safe_fields_only: bool = False,
 ) -> str:
     """Render the bounded, scrubbed context handed to the proposer subagent."""
     skills_list = _llm._render_overview(
@@ -2980,6 +2981,7 @@ def _render_proposer_context(
         list(refinement_history or []),
         max_entries=config.history_max_entries(),
         max_chars=_llm.refinement_history_max_chars(config.overview_max_chars()),
+        safe_fields_only=history_safe_fields_only,
     )
     unused_block = ""
     if unused_skills:
@@ -3054,6 +3056,7 @@ def _propose_with_subagent(
     run_context: str,
     reviewer_context: str,
     target: Optional[Dict[str, str]],
+    history_safe_fields_only: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Produce a proposal via a read-only skills-verifying subagent.
 
@@ -3107,6 +3110,7 @@ def _propose_with_subagent(
         run_context=run_context,
         reviewer_context=reviewer_context,
         active_notes=_active_prompt_notes_safe(),
+        history_safe_fields_only=history_safe_fields_only,
     )
     # The host caps goal at 16k and context at 32k characters. Both are built
     # from already-bounded inputs; clip defensively so a future renderer
@@ -3584,12 +3588,13 @@ def _refine_once(
                 unused_skills=_unused_skills_safe(),
                 # Journal entries can contain trajectory-derived summaries.
                 # Exact historical-session analysis must not import those
-                # global records.
-                refinement_history=(
-                    []
-                    if explicit_session
-                    else journal.recent_refinements(config.history_max_entries())
+                # global records — but dedup must not depend on how the run
+                # was invoked, so the history crosses in safe-fields-only
+                # form: outcome/kind/name/version, no reason/expects text.
+                refinement_history=journal.recent_refinements(
+                    config.history_max_entries()
                 ),
+                history_safe_fields_only=explicit_session,
                 run_context=proposal_context,
                 reviewer_context=reviewer_context,
                 target=_run_target,
@@ -3655,11 +3660,12 @@ def _refine_once(
                 user_corrections=[item.get("snippet", "") for item in corrections],
                 unused_skills=_unused_skills_safe(),
                 # Journal entries can contain trajectory-derived summaries. Exact
-                # historical-session analysis must not import those global records.
-                refinement_history=(
-                    []
-                    if explicit_session
-                    else journal.recent_refinements(config.history_max_entries())
+                # historical-session analysis must not import those global
+                # records — but dedup must not depend on how the run was
+                # invoked, so the history crosses in safe-fields-only form:
+                # outcome/kind/name/version, no reason/expects text.
+                refinement_history=journal.recent_refinements(
+                    config.history_max_entries()
                 ),
                 purpose="refine",
                 run_context=proposal_context,
@@ -3667,6 +3673,7 @@ def _refine_once(
                 skill_content_loader=journal.read_skill_content,
                 target=_run_target,
                 active_notes=_active_prompt_notes_safe(),
+                history_safe_fields_only=explicit_session,
             )
         # propose() resets its per-call metadata at the start of every outer
         # attempt. Snapshot immediately so retry costs remain attributable to

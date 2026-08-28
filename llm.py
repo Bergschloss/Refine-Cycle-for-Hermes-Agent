@@ -1257,9 +1257,22 @@ def _render_overview(
 
 
 def _render_refinement_history(
-    records: List[Dict[str, Any]], *, max_entries: int, max_chars: int
+    records: List[Dict[str, Any]],
+    *,
+    max_entries: int,
+    max_chars: int,
+    safe_fields_only: bool = False,
 ) -> str:
-    """Render durable edit outcomes as safe, bounded model feedback."""
+    """Render durable edit outcomes as safe, bounded model feedback.
+
+    ``safe_fields_only`` drops the model-written ``reason`` and
+    ``expected_outcome`` fields. Both quote trajectory fragments in a
+    measurable share of real journal records (fingerprints, raw errors,
+    user quotes), so callers that cross a session-containment boundary
+    (explicit ``/refine session <id>`` runs) get only outcome/kind/name/
+    version — enough to recognize a repeated proposal, nothing from
+    another session's trajectory.
+    """
     if not records:
         return ""
     indent = "  " if max_chars > 2 else ""
@@ -1270,14 +1283,18 @@ def _render_refinement_history(
         if not isinstance(proposal, dict):
             continue
         outcome = _overview_text(record.get("outcome", ""))[:20] or "unknown"
-        reason = _overview_text(record.get("reason", "")) or _overview_text(
-            proposal.get("reason", "")
-        ) or "—"
-        expected = _overview_text(
-            str(proposal.get("expected_outcome", ""))[
-                :MAX_PERSISTED_PROPOSAL_TEXT_CHARS
-            ]
-        ) or "—"
+        if safe_fields_only:
+            reason = "—"
+            expected = "—"
+        else:
+            reason = _overview_text(record.get("reason", "")) or _overview_text(
+                proposal.get("reason", "")
+            ) or "—"
+            expected = _overview_text(
+                str(proposal.get("expected_outcome", ""))[
+                    :MAX_PERSISTED_PROPOSAL_TEXT_CHARS
+                ]
+            ) or "—"
         try:
             version = int(record.get("version", proposal.get("version", 0)) or 0)
         except (TypeError, ValueError):
@@ -1304,10 +1321,13 @@ def _render_refinement_history(
                 ]
             ) or "—"
 
-        line = (
-            f"{outcome:<10} — expects: {expected} — {kind:<6} {name} "
-            f"{version_text} — reason: {reason}"
-        )
+        if safe_fields_only:
+            line = f"{outcome:<10} — {kind:<6} {name} {version_text}"
+        else:
+            line = (
+                f"{outcome:<10} — expects: {expected} — {kind:<6} {name} "
+                f"{version_text} — reason: {reason}"
+            )
         lines.append(indent + _truncate_overview_line(line, text_limit))
     return "\n".join(lines)
 
@@ -1643,6 +1663,7 @@ def propose(
     skill_content_loader: Optional[Callable[[str], Optional[str]]] = None,
     target: Optional[Dict[str, str]] = None,
     active_notes: Optional[List[Dict[str, str]]] = None,
+    history_safe_fields_only: bool = False,
 ) -> Dict[str, Any]:
     """Propose one edit; skill patches are regenerated from safe full content."""
     _call_meta.value = {}
@@ -1704,6 +1725,7 @@ def propose(
         refinement_history,
         max_entries=history_max_entries,
         max_chars=refinement_history_max_chars(overview_max_chars),
+        safe_fields_only=history_safe_fields_only,
     )
     history_block = (
         "\n=== PREVIOUS REFINEMENTS ===\n" + history_lines + "\n"

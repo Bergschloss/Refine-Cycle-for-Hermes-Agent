@@ -3379,10 +3379,6 @@ class RefineTests(unittest.TestCase):
             core,
             "collect_cross_session_patterns",
             side_effect=AssertionError("explicit session queried cross-session rows"),
-        ), patch.object(
-            core.journal,
-            "recent_refinements",
-            side_effect=AssertionError("explicit session queried global journal history"),
         ), patch.object(core._llm, "propose", side_effect=capture_proposal):
             result = core.refine_run(
                 MockLlm(),
@@ -3393,18 +3389,35 @@ class RefineTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(result["outcome"], "dry_run")
-        self.assertEqual(captured["refinement_history"], [])
         self.assertEqual(captured["error_patterns"], [])
         self.assertIn(selected_marker, captured["evidence_text"])
         self.assertIn(selected_marker, captured["user_corrections"])
+        # Dedup must not depend on how the run was invoked: the history IS
+        # passed, but across the containment boundary only in safe-fields-only
+        # form. The rendered history in the model inputs carries
+        # outcome/kind/name — and neither the model-written reason nor the
+        # expected_outcome of another session's records.
+        self.assertTrue(captured.get("history_safe_fields_only"))
+        self.assertEqual(captured["refinement_history"][0]["proposal"]["name"], "other-history")
+        # The CONTAINMENT guarantee is about what reaches the model: render
+        # the crossing history exactly as the proposer prompt would and
+        # assert no model-written field of the foreign record survives.
+        rendered_history = llm._render_refinement_history(
+            captured["refinement_history"],
+            max_entries=config.history_max_entries(),
+            max_chars=2000,
+            safe_fields_only=True,
+        )
         model_inputs = json.dumps({
             "evidence_text": captured["evidence_text"],
             "error_patterns": captured["error_patterns"],
             "user_corrections": captured["user_corrections"],
-            "refinement_history": captured["refinement_history"],
+            "rendered_history": rendered_history,
         })
         self.assertNotIn(other_pattern_marker, model_inputs)
         self.assertNotIn(history_marker, model_inputs)
+        # But the dedup-relevant identity DID cross the boundary.
+        self.assertIn("other-history", rendered_history)
 
     def test_skill_patch_gets_current_complete_content(self):
         name = "existing-skill"
@@ -16337,6 +16350,56 @@ class SubagentProposerTests(unittest.TestCase):
         # A no_op writes nothing, consumes no budget.
         self.assertEqual(len(FakeHost.actions), 0)
         self.assertEqual(journal.count_today_applied(), 0)
+
+    # --- Fix 2: dedup history crosses explicit_session boundary safely ---
+
+    def test_refinement_history_safe_fields_only_drops_model_text(self):
+        """safe_fields_only keeps outcome/kind/name; drops reason/expects."""
+        records = [{
+            "outcome": "applied",
+            "reason": "fp:9c9834f8614d 8x and /item/100 BLOCKED hardline",
+            "proposal": {
+                "action": "create", "kind": "skill", "name": "some-skill",
+                "reason": "quoted 'user correction text here'",
+                "expected_outcome": "BLOCKED (hardline) errors stop",
+            },
+            "version": 2,
+        }]
+        normal = llm._render_refinement_history(
+            records, max_entries=5, max_chars=2000
+        )
+        safe = llm._render_refinement_history(
+            records, max_entries=5, max_chars=2000, safe_fields_only=True
+        )
+        # Normal mode renders the model-written text fields.
+        self.assertIn("expects:", normal)
+        self.assertIn("reason:", normal)
+        # Safe mode keeps only dedup-relevant fields.
+        self.assertIn("applied", safe)
+        self.assertIn("some-skill", safe)
+        self.assertNotIn("expects:", safe)
+        self.assertNotIn("reason:", safe)
+        self.assertNotIn("fp:9c9834f8614d", safe)
+        self.assertNotIn("BLOCKED", safe)
+        self.assertNotIn("user correction text", safe)
+
+    def test_explicit_session_history_renders_safe_fields_only(self):
+        """The explicit-session run renders history without reason/expects."""
+        records = [{
+            "outcome": "applied",
+            "reason": "private-global-history-marker",
+            "proposal": {
+                "action": "create", "kind": "skill", "name": "other-history",
+                "reason": "private-global-history-marker",
+                "expected_outcome": "private-global-history-expects",
+            },
+        }]
+        rendered = llm._render_refinement_history(
+            records, max_entries=5, max_chars=2000, safe_fields_only=True
+        )
+        self.assertIn("other-history", rendered)
+        self.assertNotIn("private-global-history-marker", rendered)
+        self.assertNotIn("private-global-history-expects", rendered)
 
     # --- Fix 1: applied prompt notes reach the proposer in BOTH arms ---
 
