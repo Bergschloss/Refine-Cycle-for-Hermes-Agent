@@ -8,6 +8,12 @@ next one, and what single probe settles it?**
 
 Ranked by consequence if true.
 
+**Status after this pass:** H1 and H2 were confirmed and fixed in the same pass — `d4bfe70`
+(classification reads the raw row) and `0e12ca0` (the session budget is spent on failing
+sessions), suite 756 OK, both measured against a live database before and after. Their
+sections below are kept as written, because the reasoning is the part worth reusing. H3 is
+open and unfixed. H4 and H5 were probed and cleared.
+
 Everything below was measured on a **live desktop install** (`%LOCALAPPDATA%\hermes\state.db`,
 2694 active tool rows, 170 sessions, 58 journal entries, 5 applied edits) using read-only
 queries. Only aggregate counts left that machine; no trajectory content was read into a
@@ -156,10 +162,24 @@ matching fingerprint is not empty, so the guard does not apply, and absence is r
 silence again. A verdict reporting on something it cannot see.
 
 **Consequence if true.** The ledger is the plugin's only feedback loop on whether its own
-edits help, and this credits an ungrounded edit as working, permanently. It is not a corner
-case: for `kind='prompt'` the usage dimension is hardcoded unavailable (`ledger.py:581-582`,
-a prompt note has no invocation token to count), so **recurrence is the entire verdict** — and
-on this install all 5 applied edits are prompt notes.
+edits help, and this credits an ungrounded edit as working, permanently. Reading the verdict
+chain closely bounds where the damage lands: the `working` branch also requires
+`uses > 0 and usage_scope == "since_exact"` (`ledger.py:616-618`), so the false positive is
+reachable only for a **skill** that is genuinely being used. An ungrounded fingerprint cannot
+manufacture the negative verdict — absence yields `False`, and `did not help` needs `True`.
+
+**A sharper finding fell out of checking that.** Because `uses` is hardcoded unavailable for
+non-skills (`ledger.py:581-582` — the host exposes a usage counter only for skills), the
+`working` branch is unreachable for a prompt note or a memory entry by construction. Their
+recurrence can only ever produce `did not help` or nothing. On this install every applied
+edit is a prompt note, and the audit says exactly that: 4 `unclear`, 2 `rolled back`, all six
+rows `pattern_recurred=None, usage_scope=unavailable`. So for the edit kind that dominates in
+practice, the feedback loop has no positive verdict available at all — it can report failure
+or silence, never success. Whether that is a deliberate boundary or an oversight is not
+something the code says; `ledger.py:581-582` justifies withholding *usage*, not withholding
+*usefulness*. Worth a decision before anyone reads `unclear` as "no effect".
+(Measured via `ledger.audit()` called directly, which supplies no pattern window; run
+`/refine audit` on the server for the numbers on the real path.)
 
 **Measured:** all 5 applied entries carry `grounded=True, fingerprint_offered=8`. The model
 did use offered fingerprints on this sample. So the exposure is structural, not yet observed.
@@ -177,6 +197,14 @@ carry `grounded` into the ledger meta and make an ungrounded fingerprint yield
 `recurred=None` with its own verdict string, the way `no recurrence window` already
 distinguishes "unmeasured" from "silent". Prefer the second: it makes the failure
 distinguishable in the audit instead of making it fatal at apply time.
+
+The plumbing for the second already exists and is three small edits: `record_edit` receives
+`llm_meta` today and can store `fingerprint_grounded` additively, exactly as it does
+`reported_model` (`ledger.py:203-210`); `_merge_journal_stats` can read the same value from
+`entry["llm_meta"]["grounded"]` (`ledger.py:387-404`); and the verdict chain withholds
+recurrence when the stored value is explicitly `False`. Historical rows carry no such key, so
+treat *missing* as grounded — only a positively-known-ungrounded fingerprint should change a
+verdict, or every row already in the ledger silently re-labels itself.
 
 ---
 
