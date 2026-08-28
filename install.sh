@@ -145,7 +145,19 @@ else
   host HEAD:   $HOST_DESC
   patch base:  $PATCH_BASE_LONG (built against stock v2026.8.16)
   attempts:
-$APPLY_FAILURES"
+$APPLY_FAILURES
+
+  WHAT YOU GET WITHOUT THE PATCH (be clear about this):
+  - refine_run falls back to the DEFAULT structured proposer for every
+    proposal, ignoring the invocation-bound route: a run inside a session
+    bound to provider X can still bill a provider Y configured gateway-wide.
+  - every such run ends in outcome=llm_invocation_unavailable with
+    'target_source: invocation_bound, primary_attempts: 0' in its llm_meta —
+    that is the honest signal the route is missing, not a silent no_op.
+  - the plugin's own features (detection, journal, audit, rollback) all work;
+    only the route binding is absent.
+  Options: upgrade the host checkout to v2026.8.16+, or apply the patch
+  manually after resolving the drift (see assets/ header for the hunks)."
 fi
 say "core patch applied ($APPLIED_FROM)."
 
