@@ -15963,7 +15963,13 @@ class SubagentProposerTests(unittest.TestCase):
             self.launch_calls.append(request)
             if self.launch_error is not None:
                 raise self.launch_error
-            return types.SimpleNamespace(subagent_id="sa-0-abc12345")
+            # Real host shape: SubagentHandle carries the child's resolved
+            # route (provider/model) for attribution.
+            return types.SimpleNamespace(
+                subagent_id="sa-0-abc12345",
+                provider="openrouter",
+                model="openrouter/free",
+            )
 
         def wait(self, handle, timeout_seconds=None):
             self.wait_timeout = timeout_seconds
@@ -16030,6 +16036,10 @@ class SubagentProposerTests(unittest.TestCase):
         self.assertEqual(meta["proposal_source"], "subagent")
         self.assertEqual(meta["subagent_api_calls"], 3)
         self.assertEqual(meta["subagent_state"], "SUCCEEDED")
+        # Route attribution: the handle's resolved child route is journaled
+        # even though the parent structured propose() never ran.
+        self.assertEqual(meta["reported_provider"], "openrouter")
+        self.assertEqual(meta["reported_model"], "openrouter/free")
 
     def test_no_lifecycle_falls_back_to_structured(self):
         """Without a bound lifecycle the structured path must be used."""

@@ -3099,6 +3099,13 @@ def _propose_with_subagent(
         "proposal_source": "subagent",
         "subagent_api_calls": int(api_calls) if isinstance(api_calls, (int, float)) else 0,
         "subagent_state": state,
+        # Route attribution: on the subagent path the parent's structured
+        # propose() never runs, so last_call_meta() has nothing to snapshot
+        # and _run_llm_meta would journal no reported_* route at all. The
+        # handle carries the child's actual resolved route — the honest
+        # attribution for who produced this proposal.
+        "reported_provider": str(getattr(handle, "provider", "") or ""),
+        "reported_model": str(getattr(handle, "model", "") or ""),
     }
     if state != "SUCCEEDED" or not isinstance(summary, str) or not summary.strip():
         meta.update(
