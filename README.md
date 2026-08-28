@@ -127,6 +127,22 @@ The proposal is requested via `json_schema` structured output, with an automatic
 fallback to `json_mode` and then raw-text JSON salvage for providers that reject
 `response_format.type=json_schema`.
 
+### Proposer path
+
+Two arms produce the proposal. **The subagent arm is the default**: a read-only
+child that can open skill bodies (`skills_list`/`skill_view`) before deciding,
+which measurably produces fewer unusable proposals than judging from
+name+description alone. It requires a bound parent turn — on hosts or in call
+forms where the subagent route is unavailable (no parent turn bound, launch
+refused, answer unparsable), the run falls back to the **structured call**,
+which judges from bounded name+description overviews. The structured path is a
+documented fallback, not the primary route: on long sessions it does not keep
+up (in paired measurement it timed out twice out of five passes at the 4,000-row
+scan cap), so hosts whose integrations never bind a parent turn get materially
+worse proposals on long sessions. The 45-second subagent wait is deliberate and
+was not raised. `proposer_subagent_strict` (default `false`) makes a subagent
+failure a journaled error (`subagent_strict_error`) instead of a downgrade.
+
 ---
 
 ## Installation
@@ -648,6 +664,8 @@ All keys live under `plugins.entries.refine`:
 | `reviewer_fallback_enabled` | bool | `true` | Allow one reviewer call when the mechanical gate finds nothing. |
 | `reviewer_min_messages` | int | `20` | Minimum session size for reviewer fallback. |
 | `reviewer_cooldown_minutes` | int | `60` | Minimum durable gap between reviewer decisions. |
+| `proposer_subagent_enabled` | bool | `true` | Produce proposals via a read-only subagent that can open skill bodies before deciding. Requires a bound parent turn; without one the structured call is the fallback either way. |
+| `proposer_subagent_strict` | bool | `false` | Make a subagent failure a journaled `subagent_strict_error` instead of silently downgrading to the structured call. |
 | `prompt_notes_enabled` | bool | `true` | Permit `prompt` proposals and note injection. |
 | `prompt_notes_max_count` | int | `5` | Maximum active notes injected into one turn. |
 | `prompt_notes_max_chars` | int | `600` | Maximum characters in the complete injected note block. |

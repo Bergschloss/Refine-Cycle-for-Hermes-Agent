@@ -16163,6 +16163,25 @@ class SubagentProposerTests(unittest.TestCase):
         self.assertIn("launch_failed", result["llm_meta"].get("subagent_fallback_reason", ""))
         self.assertFalse(result["llm_called"], "no structured LLM call may be made")
 
+    def test_subagent_enabled_by_default_when_key_absent(self):
+        """Missing config key -> the subagent arm is the default path.
+
+        The measurements that motivated the subagent route compared it
+        against the structured path; a host that never mentions the key in
+        its config must still get the better arm wherever a parent turn is
+        bound. Strict stays fail-closed false: an unknown config state must
+        not turn subagent failures into lost passes silently.
+        """
+        entry = FakeHost.entry_config()
+        entry.pop("proposer_subagent_enabled", None)
+        entry.pop("proposer_subagent_strict", None)
+        try:
+            self.assertTrue(config.proposer_subagent_enabled())
+            self.assertFalse(config.proposer_subagent_strict())
+        finally:
+            entry.pop("proposer_subagent_enabled", None)
+            entry.pop("proposer_subagent_strict", None)
+
     def test_strict_off_refine_once_keeps_fallback(self):
         """Strict off: same failure still falls back to the structured path."""
         lifecycle = self._FakeLifecycle(launch_error=RuntimeError("no parent"))
