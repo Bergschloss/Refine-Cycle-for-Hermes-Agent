@@ -15980,9 +15980,13 @@ class SubagentProposerTests(unittest.TestCase):
     @staticmethod
     def _result(state="SUCCEEDED", summary="", api_calls=3):
         # Real host shape: result.terminal_state is a SubagentTerminalState
-        # object whose .state holds the string.
+        # object whose .state holds a SubagentState enum (str() of it is
+        # "SubagentState.SUCCEEDED"; the bare name is .name).
+        enum_like = types.SimpleNamespace(name=state)
         return types.SimpleNamespace(
-            terminal_state=types.SimpleNamespace(state=state, completed=state == "SUCCEEDED"),
+            terminal_state=types.SimpleNamespace(
+                state=enum_like, completed=state == "SUCCEEDED"
+            ),
             summary=summary,
             usage_metadata={"api_calls": api_calls},
         )

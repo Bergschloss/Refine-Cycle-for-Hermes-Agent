@@ -3082,11 +3082,16 @@ def _propose_with_subagent(
             "proposal_source": "structured",
             "subagent_fallback_reason": "result_unavailable",
         }
-    # terminal_state on the result is the SubagentTerminalState object; the
-    # string state lives in its .state attribute.
+    # Live host shape: result.terminal_state is a SubagentTerminalState whose
+    # .state is a SubagentState enum — str() of it is "SubagentState.SUCCEEDED",
+    # the bare name lives on .name.
     _terminal = getattr(result, "terminal_state", None)
-    _state_str = getattr(_terminal, "state", _terminal) if _terminal is not None else ""
-    state = str(_state_str or "")
+    _raw_state = getattr(_terminal, "state", _terminal) if _terminal is not None else ""
+    _state_name = getattr(_raw_state, "name", None)
+    if isinstance(_state_name, str) and _state_name:
+        state = _state_name
+    else:
+        state = str(_raw_state or "")
     summary = getattr(result, "summary", None)
     usage = getattr(result, "usage_metadata", None) or {}
     api_calls = usage.get("api_calls", 0) if isinstance(usage, dict) else 0
