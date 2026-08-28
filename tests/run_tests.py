@@ -10656,7 +10656,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         import pathlib as _pathlib
         import re as _re
 
-        source = _pathlib.Path(core.__file__).read_text()
+        source = _pathlib.Path(core.__file__).read_text(encoding="utf-8")
         start = source.index("_PROMPT_NOTE_SAFE_ACTION = re.compile(")
         opening = source.index('"""', start)
         finish = source.index('"""', opening + 3)
