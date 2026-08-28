@@ -12770,6 +12770,50 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             core.collect_cross_session_patterns()
         self.assertIn("row limit reached", "\n".join(logs.output).lower())
 
+    def test_cross_session_budget_is_spent_on_failing_sessions(self):
+        """The newest sessions must not consume the session budget.
+
+        Rows arrive newest-first, so admitting a session on its first row of any
+        kind spent every slot on recent activity and dropped the failing sessions
+        that the gate exists to count.
+        """
+        FakeHost.entry_config()["cross_session_max_sessions"] = 2
+        now = time.time()
+        rows = [
+            (f"quiet-{index}", "tool", '{"success": true, "matches": 3}', "grep", now - index, 1)
+            for index in range(1, 6)
+        ]
+        rows += [
+            (
+                f"failing-{index}", "tool",
+                "ERROR: request failed for /item/900", "http", now - 100 - index, 1,
+            )
+            for index in range(1, 4)
+        ]
+        FakeHost.make_db(rows)
+        found = core.collect_cross_session_patterns(days=7)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["sessions_seen"], 2)
+        self.assertTrue(patterns.has_signal(found, [], min_count=2, session_cap=2))
+
+    def test_cross_session_session_limit_binds_and_says_so(self):
+        """The other direction: the cap still bounds spread, and now it is visible."""
+        FakeHost.entry_config()["cross_session_max_sessions"] = 1
+        now = time.time()
+        FakeHost.make_db([
+            ("fail-a", "tool", "ERROR: request failed for /item/1", "http", now - 2, 1),
+            ("fail-b", "tool", "ERROR: request failed for /item/2", "http", now - 1, 1),
+        ])
+        with self.assertLogs(core.logger, "WARNING") as logs:
+            found = core.collect_cross_session_patterns(days=7)
+        self.assertIn("session limit reached", "\n".join(logs.output).lower())
+        self.assertEqual(found[0]["sessions_seen"], 1)
+
+        FakeHost.entry_config()["cross_session_max_sessions"] = 5
+        with self.assertNoLogs(core.logger, "WARNING"):
+            found = core.collect_cross_session_patterns(days=7)
+        self.assertEqual(found[0]["sessions_seen"], 2)
+
     def test_usage_fallback_does_not_match_common_prose_substrings(self):
         usage = sys.modules["tools.skill_usage"]
         original = usage.get_usage_count

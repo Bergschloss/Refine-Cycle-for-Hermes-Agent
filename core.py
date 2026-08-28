@@ -1351,21 +1351,35 @@ def collect_cross_session_patterns(
         )
         seen: set = set()
         rows_seen = 0
+        cap_reached = False
 
         def iter_items():
-            nonlocal rows_seen
+            nonlocal rows_seen, cap_reached
             for row in cursor:
                 rows_seen += 1
-                sid = scrub_text(str(row["session_id"] or ""))
-                if sid and sid not in seen:
-                    if session_cap is not None and len(seen) >= session_cap:
-                        continue
-                    seen.add(sid)
                 content = scrub_text(str(row["content"] or ""))
+                # The session budget is spent on sessions that carry a failure, not
+                # on the newest sessions. Rows arrive newest-first, so admitting a
+                # session on its first row of ANY kind gave all 25 slots to recent
+                # activity: measured on a live install, 66 sessions had failures in
+                # the horizon and this query could reach 12 of them, 13 slots having
+                # gone to sessions with no failure at all. sessions_seen is the
+                # stronger half of the signal gate, so that bound decided the gate
+                # on a fifth of the evidence -- the same "bound applied before the
+                # filter that decides relevance" that hid 58% of repeated failures
+                # from `collect_evidence`. Classifying before admitting costs one
+                # `_is_error_content` per scanned row once the cap is full; the
+                # audit path (max_sessions=None) already pays that on every row.
                 if not _is_error_content(
                     content, tool_name=str(row["tool_name"] or "")
                 ):
                     continue
+                sid = scrub_text(str(row["session_id"] or ""))
+                if sid and sid not in seen:
+                    if session_cap is not None and len(seen) >= session_cap:
+                        cap_reached = True
+                        continue
+                    seen.add(sid)
                 bounded = (
                     content
                     if len(content) <= 4000
@@ -1388,6 +1402,14 @@ def collect_cross_session_patterns(
             logger.warning(
                 "Cross-session row limit reached (%d); interactive evidence may be truncated",
                 max_rows,
+            )
+        # The row cap has always announced itself. The session cap was silent, so a
+        # gate closed by a bound looked identical to a gate closed by thin evidence.
+        if cap_reached:
+            logger.warning(
+                "Cross-session session limit reached (%d); failures in older "
+                "sessions were not counted",
+                session_cap,
             )
         return result
     except Exception as exc:
