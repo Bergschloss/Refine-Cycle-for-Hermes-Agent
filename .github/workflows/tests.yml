@@ -40,19 +40,19 @@ jobs:
       # is the only CI signal, and a suite that runs nothing returns 0, so a
       # dead entry point must be a hard failure.
       #
-      # The floor is deliberately 600, NOT today's count (666 here, 660 in the
-      # other checkout). A floor tied to the current count turns every
-      # intentional test removal into a CI failure and invites raising the floor
-      # to make it pass. 600 catches catastrophic loss (a dead entry point
-      # yields 0) while leaving normal test churn alone. This number guards the
-      # suite, so do not "tidy" it away.
+      # The floor started at 600 (a dead entry point yields 0). Raised to 700
+      # on 2026-08-28 by explicit owner decision: the suite stood at 744 and a
+      # floor 144 below it would let a sixth of the tests vanish silently.
+      # 700 is ~6% under the live count — it catches the loss of 44+ tests
+      # while leaving normal test churn alone. This number guards the suite,
+      # so do not "tidy" it away; raise it only alongside the tests it guards.
       - name: Run tests
         shell: bash
         run: |
           set -o pipefail
           python tests/run_tests.py 2>&1 | tee suite.log
           ran=$(grep -oE '^Ran [0-9]+ tests' suite.log | grep -oE '[0-9]+' || echo 0)
-          floor=600
+          floor=700
           echo "ran=$ran floor=$floor"
           if [ "$ran" -lt "$floor" ]; then
             echo "::error::Suite floor breached: ran $ran tests, floor is $floor."
