@@ -103,7 +103,7 @@ trajectory (state.db) → scrub → fingerprint + aggregate → signal gate
 | **1. Collect evidence** | Reads the last N messages of the selected session from `<HERMES_HOME>/state.db` with `mode=ro`. Credentials are redacted before downstream use. |
 | **2. Aggregate** | Normalizes errors to invariant shapes, records complete 12-character fingerprints, and counts recurrence within and across sessions. |
 | **3. Signal gate and reviewer** | Repeated patterns or explicit corrections reach the proposal model. If neither exists, a substantial session may receive one small, conservative reviewer call; a decline is a sanitized, journaled `no_op`. |
-| **4. LLM proposal** | Requests one structured `create`, `patch`, or `no_op` proposal with an optional one-sentence, falsifiable `expected_outcome`. Kinds are `skill`, `memory`, and `prompt`. A proposal may instead carry an `edits` array of inseparable edits under one shared reason, `expected_outcome`, and `summary`. Every model-bound field is sanitized. The proposal output budget is derived locally from the shared 15,000-character content limit and scales with `max_edits_per_proposal`; the reviewer remains separately capped at 300 tokens. A cut-off, malformed, or reasoning-only reply is journaled as `llm_incomplete` rather than presented as a normal `no_op`. Skill patches receive the current complete `SKILL.md` only when it is unchanged by scrubbing and no larger than 15,000 characters. |
+| **4. LLM proposal** | Requests one structured `create`, `patch`, or `no_op` proposal with an optional one-sentence, falsifiable `expected_outcome`. Kinds are `skill`, `memory`, and `prompt`. A proposal may instead carry an `edits` array of inseparable edits under one shared reason, `expected_outcome`, and `summary`. Every model-bound field is sanitized. The proposal output budget is derived locally from the shared 15,000-character content limit and scales with `max_edits_per_proposal`; the reviewer remains separately capped at 2,400 tokens. A cut-off, malformed, or reasoning-only reply is journaled as `llm_incomplete` rather than presented as a normal `no_op`. Skill patches receive the current complete `SKILL.md` only when it is unchanged by scrubbing and no larger than 15,000 characters. |
 | **5. Guardrails** | Enforces agent-created patch targets, fresh create names, content/frontmatter, prompt-note policy shape, size limits, daily budget, and recent-duplicate rejection. Every check runs per edit, so a later edit of a transaction is measured against the edits already applied before it. |
 | **6. Prepare** | Captures a skill's pre-edit content as both a journal snapshot and a readable `.bak` file, or memory/prompt-note recovery metadata, then appends and `fsync`s a `prepared` journal record before mutation. |
 | **7. Apply and reconcile** | Runs the standard host API for skills/memory (`patch` maps to host `edit`) or atomically writes the plugin-owned prompt-note store. It proves target state and records `applied`, `pending_approval`, `conflict`, or `error`. A `conflict` occurs when a skill patch was planned against content that changed before apply, disappeared, or can no longer be read reliably; the budget is not consumed and the edit is not advertised as reversible. Host pending approvals reconcile lazily before later runs, audit, or rollback. |
@@ -139,15 +139,17 @@ which judges from bounded name+description overviews. The structured path is a
 documented fallback, not the primary route: on long sessions it does not keep
 up (in paired measurement it timed out twice out of five passes at the 4,000-row
 scan cap), so hosts whose integrations never bind a parent turn get materially
-worse proposals on long sessions. The 45-second subagent wait is deliberate and
-was not raised. `proposer_subagent_strict` (default `false`) makes a subagent
+worse proposals on long sessions. The 45-second timeout on the structured
+path and reviewer reads is deliberate and was not raised; the subagent
+wait is separately configurable via `proposer_subagent_timeout_seconds`
+(default 180). `proposer_subagent_strict` (default `false`) makes a subagent
 failure a journaled error (`subagent_strict_error`) instead of a downgrade.
 
 ---
 
 ## Installation
 
-> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (674 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; only **new proposals** additionally require the host route patch (see below).
+> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (744 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below).
 
 The plugin lives in `<HERMES_HOME>/plugins/refine/` — `~/.hermes/plugins/refine/`
 on Linux and macOS, and `%LOCALAPPDATA%\hermes\plugins\refine\` on Windows.
@@ -173,8 +175,8 @@ hermes gateway restart
 
 `plugins install` clones the repository into `<HERMES_HOME>/plugins/refine/`,
 `plugins enable` registers it with Hermes, and the restart activates it in the
-running gateway. This exact sequence is verified end to end on Hermes 0.20.1;
-see VERIFICATION.md.
+running gateway. This exact sequence is verified end to end on Hermes 0.20.1
+and 0.20.2; see VERIFICATION.md.
 
 > **The plugin works inside the running gateway.** The LLM invocation route is
 > bound by the live gateway process, so in a bare command-line process
@@ -698,6 +700,7 @@ All keys live under `plugins.entries.refine`:
 | `reviewer_cooldown_minutes` | int | `60` | Minimum durable gap between reviewer decisions. |
 | `proposer_subagent_enabled` | bool | `true` | Produce proposals via a read-only subagent that can open skill bodies before deciding. Requires a bound parent turn; without one the structured call is the fallback either way. |
 | `proposer_subagent_strict` | bool | `false` | Make a subagent failure a journaled `subagent_strict_error` instead of silently downgrading to the structured call. |
+| `proposer_subagent_timeout_seconds` | int | `180` | Wall-clock bound on the subagent proposal wait (minimum 5). The structured-call and reviewer timeouts are separate constants in `llm.py` (45 s) and are not configurable. |
 | `prompt_notes_enabled` | bool | `true` | Permit `prompt` proposals and note injection. |
 | `prompt_notes_max_count` | int | `5` | Maximum active notes injected into one turn. |
 | `prompt_notes_max_chars` | int | `600` | Maximum characters in the complete injected note block. |
@@ -981,7 +984,8 @@ initiated.
 - **No system prompt access** — the base prompt stays immutable.
 - **Host support.** Uses the plugin API available since Hermes 0.17.0
   (`register_tool`, `register_command`, `register_hook`, `ctx.llm`). Verified on
-  **0.19.0** (server, patched core) and **0.20.1** (desktop, stock core). New
+  **0.19.0** (server, patched core), **0.20.1** (desktop, stock core), and
+  **0.20.2** (subagent proposal path end to end). New
   proposals additionally need the host route patch (see Installation); without it
   they fail loudly with `llm_invocation_unavailable`, which is the intended honest
   gate. The manifest format cannot express a host requirement, so this is enforced
