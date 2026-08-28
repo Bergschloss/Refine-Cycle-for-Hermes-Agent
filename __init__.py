@@ -252,7 +252,8 @@ def _parse_prompt_note_rule(content):
     )
     if m:
         alternative = m.group(1).strip()
-        target = m.group(2).strip()
+        raw_target = m.group(2).strip()
+        target = raw_target
         # Normalize target: strip "the", trailing dots, parentheticals
         target = re.sub(r"\s*\(.*?\)", "", target).strip(" .")
         target = re.sub(r"^(?:the|a|an)\s+", "", target, flags=re.I)
@@ -260,8 +261,16 @@ def _parse_prompt_note_rule(content):
             r"\s+(?:cli|command|tool|binary|utility|mcp|api|sdk)$", "",
             target, flags=re.I,
         ).lower()
+        # If the condition or raw target mentions tool/MCP/API, force block_tool.
+        is_tool_context = bool(re.search(
+            r"\b(?:tool|mcp|api|sdk)\b",
+            raw_target + " " + parts[0], re.I,
+        ))
+        rule_type = "block_tool" if is_tool_context else (
+            "block_binary" if _looks_like_cli(target) else "block_tool"
+        )
         return {
-            "type": "block_binary" if _looks_like_cli(target) else "block_tool",
+            "type": rule_type,
             "target": target,
             "action": action_text,
         }
@@ -354,9 +363,12 @@ def _on_pre_tool_call(
         # --- Block a specific CLI binary ---
         if rt == "block_binary" and tool_name == "terminal":
             cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
-            binary = _extract_binary(cmd)
-            if binary and _binary_matches(binary, target):
-                return {"action": "block", "message": rule["action"]}
+            # check all binaries in the pipeline/chain
+
+            for binary in _extract_binaries(cmd):
+                if _binary_matches(binary, target):
+            
+                                return {"action": "block", "message": rule["action"]}
 
         # --- Block a specific tool name ---
         if rt == "block_tool":
@@ -378,13 +390,16 @@ def _on_pre_tool_call(
     return None
 
 
-def _extract_binary(cmd):
-    """Extract the executable name from a shell command string."""
+def _extract_binaries(cmd: str) -> list:
+    """Extract all executable names from a pipeline/chain command."""
     import re, shlex
-    # Split on chain operators to get individual commands
-    for segment in re.split(r"[;&|]{1,2}", cmd):
+    binaries = []
+    for segment in re.split(r"[;&|\n]{1,2}", cmd):
         segment = segment.strip()
-        if not segment:
+        if not segment or segment.startswith("$"):
+            continue
+        toks = segment.split()
+        if toks and "=" in toks[0]:
             continue
         try:
             tokens = shlex.split(segment)
@@ -392,30 +407,18 @@ def _extract_binary(cmd):
             tokens = segment.split()
         if not tokens:
             continue
-        binary = tokens[0]
-        # Strip path, keep basename
-        binary = binary.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-        # Strip .exe suffix
+        idx = 0
+        while idx < len(tokens) and tokens[idx].lower() in ("sudo","env","nohup","time"):
+            idx += 1
+        if idx >= len(tokens):
+            continue
+        binary = tokens[idx].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         if binary.lower().endswith(".exe"):
             binary = binary[:-4]
-        return binary.lower()
-    return None
+        binaries.append(binary.lower())
+    return binaries
 
 
-def _binary_matches(binary, target):
-    """Check if binary matches a target using word-boundary rules."""
-    # Exact match
-    if binary == target:
-        return True
-    # cmake should NOT match make
-    if binary != target and target in binary:
-        # Only match if target is at a word boundary
-        prefix = binary[:binary.index(target)]
-        suffix = binary[binary.index(target) + len(target):]
-        if prefix and prefix[-1].isalpha():
-            return False  # "cmake" -> "c" is alpha before "make"
-        return True
-    return False
 
 
 def _on_pre_llm_call(**kwargs) -> Optional[dict]:
