@@ -1240,10 +1240,12 @@ class RefineTests(unittest.TestCase):
             patterns.fingerprint("bash", prefix + "unique-tail-alpha"),
             patterns.fingerprint("bash", prefix + "unique-tail-bravo"),
         )
-        # Same content still gives the same fp
-        self.assertEqual(
+        # The fp is scoped by tool: the same text under a different tool is a
+        # different pattern (a refactor that drops tool_name from the hash key
+        # would silently merge every same-text error across tools).
+        self.assertNotEqual(
             patterns.fingerprint("bash", prefix + "same"),
-            patterns.fingerprint("bash", prefix + "same"),
+            patterns.fingerprint("python", prefix + "same"),
         )
 
     def test_quoted_secret_keys_and_escaped_values_are_redacted(self):
