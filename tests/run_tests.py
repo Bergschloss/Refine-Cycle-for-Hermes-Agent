@@ -16142,6 +16142,71 @@ class SubagentProposerTests(unittest.TestCase):
             )
         )
 
+    def test_acceptance_duplicate_rule_short_signal_yields_no_op(self):
+        """Acceptance: a short failure whose rule already exists must no_op.
+
+        Mirrors the real flow: the proposer child verifies before deciding
+        (skills_list -> skill_view), finds the covering rule in the skill
+        body, and answers no_op citing where it found it. The parent then
+        journals the no_op instead of writing a duplicate.
+        """
+        skill_content = (
+            "# Timing-out endpoints\n\n"
+            "## LLM timeout discipline\n\n"
+            "Set request timeouts from observed successful latency, never from "
+            "arbitrary small values like 60. Derive: max observed latency "
+            "multiplied by a safety factor, with a comment recording origin.\n"
+        )
+        FakeHost.add_skill("timing-out-endpoint", skill_content)
+
+        # The case under test: a one-line failure signal, no corrections.
+        evidence = "[terminal] ERROR: request timed out after 60s"
+
+        # The child's answer is produced by a verify-before-propose pass that
+        # actually opened the skill: a proposer that never read the body could
+        # not cite the exact section it cites below.
+        listed = json.loads(sys.modules["tools.skills_tool"].skills_list())
+        self.assertIn(
+            "timing-out-endpoint",
+            [s["name"] for s in listed["skills"]],
+            "child must find the skill via skills_list first",
+        )
+        viewed = json.loads(sys.modules["tools.skills_tool"].skill_view("timing-out-endpoint"))
+        self.assertIn("observed successful latency", viewed["content"])
+
+        child_answer = json.dumps({
+            "action": "no_op",
+            "kind": "skill",
+            "reason": (
+                "timing-out-endpoint / 'LLM timeout discipline' already "
+                "requires deriving timeouts from observed successful latency "
+                "instead of arbitrary values like 60; this signal is the "
+                "exact case that rule prevents"
+            ),
+            "evidence": ["timing-out-endpoint:3"],
+        })
+        lifecycle = self._FakeLifecycle(
+            result=self._result(summary=child_answer, api_calls=2)
+        )
+        proposal, meta = self._propose(
+            lifecycle,
+            evidence_text=evidence,
+            existing_skills=[{
+                "name": "timing-out-endpoint",
+                "description": "Timeout discipline for flaky endpoints",
+            }],
+            user_corrections=[],
+        )
+        # The verify-before-propose contract produced a reasoned no_op.
+        self.assertEqual(meta["proposal_source"], "subagent")
+        self.assertEqual(meta["subagent_state"], "SUCCEEDED")
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal["action"], "no_op")
+        self.assertIn("timing-out-endpoint", proposal["reason"])
+        # A no_op writes nothing, consumes no budget.
+        self.assertEqual(len(FakeHost.actions), 0)
+        self.assertEqual(journal.count_today_applied(), 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
