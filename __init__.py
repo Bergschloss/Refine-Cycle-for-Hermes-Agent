@@ -397,45 +397,6 @@ def _on_session_reset(session_id: str = "", **kwargs) -> None:
     _clear_session_prompt_notes(session_id, timeout=_HOST_PATH_LOCK_TIMEOUT)
 
 
-def _on_pre_tool_call(
-    tool_name: str = "",
-    args: Any = None,
-    **_: Any,
-) -> Optional[Dict[str, str]]:
-    """Block calls to missing tools; toggle via sentinel file."""
-    if tool_name != "terminal":
-        return None
-    cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
-    import os, re
-    # Sentinel keeps the hook registered (tests pass) but inactive by default.
-    sentinel = os.path.join(os.environ.get("TEMP", "/tmp"), "refine_hook_on")
-    if not os.path.exists(sentinel):
-        return None
-    # Only block 'make' as a build command, not as grep text or in comments.
-    if not (re.match(r"^make\s", cmd) or re.search(r"[;&|]\s*make\s", cmd)):
-        return None
-    if re.search(r"\bgrep\b.*\bmake\b", cmd):
-        return None  # Don't block grep/searches that mention make
-    # Log every firing with session attribution.
-    try:
-        import datetime
-        sid = _.get("session_id", _.get("task_id", "?"))
-        with open(sentinel + ".log", "a") as f:
-            f.write(f"{datetime.datetime.now().isoformat()} session={sid} blocked cmd={cmd[:200]}\n")
-    except Exception:
-        pass
-        return {
-            "action": "block",
-            "message": (
-                "make is not installed on this machine. "
-                "Read the Makefile and run its commands directly."
-            ),
-        }
-    return None
-
-
-
-
 def _on_post_llm_call(
     session_id: str = "", conversation_history: Any = None, **kwargs
 ) -> None:
