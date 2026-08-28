@@ -255,7 +255,11 @@ def _parse_prompt_note_rule(content):
         target = m.group(2).strip()
         # Normalize target: strip "the", trailing dots, parentheticals
         target = re.sub(r"\s*\(.*?\)", "", target).strip(" .")
-        target = re.sub(r"^(?:the|a|an)\s+", "", target, flags=re.I).lower()
+        target = re.sub(r"^(?:the|a|an)\s+", "", target, flags=re.I)
+        target = re.sub(
+            r"\s+(?:cli|command|tool|binary|utility|mcp|api|sdk)$", "",
+            target, flags=re.I,
+        ).lower()
         return {
             "type": "block_binary" if _looks_like_cli(target) else "block_tool",
             "target": target,
@@ -324,6 +328,17 @@ def _looks_like_tool(word):
     return bool(re.match(r"^[a-z_][a-z0-9_]+$", word))
 
 
+def _tool_matches(tool_name: str, target: str) -> bool:
+    """Match a tool name against a target, handling mcp__ and namespace prefixes."""
+    if not tool_name or not target:
+        return False
+    tn, tgt = tool_name.lower(), target.lower()
+    if tn == tgt or tgt in tn:
+        return True
+    # Handle mcp__server__tool and namespace:tool patterns
+    return tn.endswith("__" + tgt) or tn.endswith(":" + tgt) or tn.endswith("." + tgt)
+
+
 def _on_pre_tool_call(
     tool_name: str = "",
     args: Any = None,
@@ -345,12 +360,12 @@ def _on_pre_tool_call(
 
         # --- Block a specific tool name ---
         if rt == "block_tool":
-            if tool_name == target or target in tool_name:
+            if _tool_matches(tool_name, target):
                 return {"action": "block", "message": rule["action"]}
 
         # --- Require specific fields ---
         if rt == "require_fields":
-            if tool_name == rule.get("tool", ""):
+            if _tool_matches(tool_name, rule.get("tool", "")):
                 if isinstance(args, dict):
                     missing = [f for f in rule.get("fields", []) if f not in args]
                     if missing:
