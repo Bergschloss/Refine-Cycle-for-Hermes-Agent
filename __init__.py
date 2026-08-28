@@ -278,14 +278,14 @@ def _parse_prompt_note_rule(content):
             "action": action_text,
         }
 
-    # --- "use X instead" (no "of") --- implied target from condition ---
+    # --- "use X instead" (no "of"): implied target would have to come from
+    # the CONDITION prose. A condition describes when advice applies, not what
+    # to block — synthesizing a target from its nouns once produced
+    # block_binary target='code' from 'exit code 127', which blocks the real
+    # `code` CLI. Notes without an explicit reroute target are advice only.
     m = re.search(r"\buse\s+(.+?)\s+instead\s*\.?\s*$", action_text, re.I)
     if m:
-        # Target is whatever the condition describes
-        cond = parts[0].lower()
-        if cond.startswith("when "):
-            cond = cond[5:]
-        return _rule_from_condition(cond, action_text)
+        return None
 
     # --- Param rule: "always include both 'A' and 'B' fields" ---
     m = re.search(
@@ -306,27 +306,10 @@ def _parse_prompt_note_rule(content):
             "action": action_text,
         }
 
-    # --- Fallback: treat condition words as target keywords ---
-    cond = parts[0].lower()
-    if cond.startswith("when "):
-        cond = cond[5:]
-    return _rule_from_condition(cond, action_text)
-
-
-def _rule_from_condition(cond, action_text):
-    """Build a rule from a descriptive condition string."""
-    import re
-    # Extract distinctive nouns that look like tool/command names
-    words = [w for w in re.findall(r"[a-z][a-z0-9._-]+", cond)]
-    # Filter to words that look like CLI commands or tool names
-    candidates = [w for w in words if _looks_like_cli(w) or _looks_like_tool(w)]
-    if candidates:
-        target = candidates[-1]  # last tool-like word is usually the target
-        return {
-            "type": "block_binary" if _looks_like_cli(target) else "block_tool",
-            "target": target,
-            "action": action_text,
-        }
+    # --- Fallback: no structured rule. The old fallback treated condition
+    # nouns as block targets (block_binary target='identical'/'characters'/
+    # 'code' from prose) — a false block stops the agent, so a note that does
+    # not name its target explicitly must stay advice, never a rule.
     return None
 
 
