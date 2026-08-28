@@ -9181,6 +9181,34 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn("No invocation-bound host LLM", text)
         self.assertIn("blockers: none — automatic refinement is active", text)
 
+    def test_block_rule_matchers_both_directions(self):
+        """Block 20: the stored-rule matcher is the thing that turns a
+        persisted note into a live block at hook time; it had zero direct
+        tests (the first pass's B20 gap was closed for the parser, not for
+        the matcher). Both directions: what it matches and what it must
+        NOT match (cmake must not match make — the historical false block)."""
+        f = plugin_init._tool_matches
+        self.assertTrue(f("terminal", "terminal"))            # exact
+        self.assertTrue(f("mcp__jules__create_coding_task", "create_coding_task"))
+        self.assertTrue(f("tools:skills_tool:skills_list", "skills_list"))
+        self.assertFalse(f("", "x"))                          # empty tool
+        self.assertFalse(f("terminal", ""))                   # empty target
+        self.assertFalse(f("skill_view", "skill_manage"))     # unrelated
+
+        b = plugin_init._binary_matches
+        self.assertTrue(b("make", "make"))                    # exact
+        self.assertFalse(b("cmake", "make"))                  # the bbedd22 case
+        self.assertFalse(b("makefile", "make"))               # alpha suffix
+        self.assertTrue(b("/usr/bin/make", "make"))           # path prefix ok
+        self.assertFalse(b("", "make"))
+        self.assertFalse(b("make", ""))
+
+        # the CLI/tool look-alike gates that turn prose words into targets
+        self.assertTrue(plugin_init._looks_like_cli("cmake"))
+        self.assertFalse(plugin_init._looks_like_cli("Collector.Evil"))
+        self.assertTrue(plugin_init._looks_like_tool("write_file"))
+        self.assertFalse(plugin_init._looks_like_tool("9bad name"))
+
     def test_status_reports_route_present_and_missing_both_ways(self):
         """Phase B: /refine status must say whether the invocation-route core
         patch is on this host. Both directions: a patched host sees
