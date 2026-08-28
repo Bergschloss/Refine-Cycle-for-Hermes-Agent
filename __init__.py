@@ -249,16 +249,35 @@ def _on_pre_tool_call(
     for condition, action in _ACTIVE_BLOCK_RULES:
         if not condition:
             continue
-        # Match on stemmed keywords from the condition (>2 chars, no stop words).
+        # Match condition keywords against the command's executable and first
+        # arguments — not arbitrary text in commit messages or comments.
+        tokens = []
+        for token in cmd.lower().split():
+            token = token.rstrip(";")
+            if token in ("cd", "echo", "export", "set", "unset", "pwd", "ls", "cat"):
+                continue
+            if token.startswith("-"):
+                continue
+            if re.match(r"^[a-z][a-z0-9._-]*$", token):
+                tokens.append(token)
+        if not tokens:
+            continue
         _STOP = frozenset({"with","the","and","for","from","that","this","your",
                            "not","but","are","was","has","had","can","will","have","when"})
-        words = [w for w in condition.split() if len(w) > 2 and w not in _STOP]
+        # Extract tool-like words from the condition: non-stop words that are
+        # NOT activity descriptors (ending in -ing). "building with make" →
+        # keep "make", skip "building".
+        words = []
+        for w in condition.split():
+            if w in _STOP or len(w) <= 2 or w.endswith("ing"):
+                continue
+            stem = w.removesuffix("ed").removesuffix("s")
+            if len(stem) >= 2:
+                words.append(stem)
         if words:
-            cw = cmd.lower().split()
             matched = True
-            for w in words:
-                stem = w.removesuffix("ing").removesuffix("ed").removesuffix("s")
-                if not any(stem in c for c in cw):
+            for stem in words:
+                if not any(stem in t for t in tokens):
                     matched = False
                     break
             if matched:
