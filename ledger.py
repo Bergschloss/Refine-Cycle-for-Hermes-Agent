@@ -207,6 +207,17 @@ def record_edit(
             reported_model = scrub_text(str(previous["reported_model"]))[:60]
         if reported_model:
             stats[key]["reported_model"] = reported_model
+        # H3: a fingerprint the model offered but that was never observed in
+        # the error window is UNVERIFIED evidence. Whether the proposal's
+        # fingerprint was grounded (offered in the error window) is computed
+        # in core and arrives via llm_meta; persist it so audit() can refuse
+        # to read window-absence as observed-silence. Absent = historical row
+        # or a run with no fingerprint metadata; audit treats it as grounded
+        # so legacy rows keep their verdicts.
+        if isinstance(llm_meta, dict) and "grounded" in llm_meta:
+            stats[key]["fingerprint_grounded"] = bool(llm_meta["grounded"])
+        elif isinstance(previous, dict) and "fingerprint_grounded" in previous:
+            stats[key]["fingerprint_grounded"] = previous["fingerprint_grounded"]
         _save_stats(stats)
 
 
@@ -364,6 +375,11 @@ def _merge_journal_stats(
         model_substituted = bool(
             isinstance(llm_meta, dict) and llm_meta.get("model_substituted")
         )
+        fingerprint_grounded = (
+            bool(llm_meta["grounded"])
+            if isinstance(llm_meta, dict) and "grounded" in llm_meta
+            else None
+        )
         if isinstance(existing, dict) and existing.get("journal_id") == entry_id:
             existing["outcome"] = entry.get("outcome", existing.get("outcome", ""))
             existing["pending_id"] = entry.get("pending_id", existing.get("pending_id", ""))
@@ -371,6 +387,8 @@ def _merge_journal_stats(
                 existing["reported_model"] = reported_model
             if model_substituted and not existing.get("model_substituted"):
                 existing["model_substituted"] = True
+            if fingerprint_grounded is not None:
+                existing["fingerprint_grounded"] = fingerprint_grounded
             continue
         if isinstance(existing, dict):
             try:
@@ -410,6 +428,10 @@ def _merge_journal_stats(
             meta["model_substituted"] = True
         elif isinstance(existing, dict) and existing.get("model_substituted"):
             meta["model_substituted"] = True
+        if fingerprint_grounded is not None:
+            meta["fingerprint_grounded"] = fingerprint_grounded
+        elif isinstance(existing, dict) and "fingerprint_grounded" in existing:
+            meta["fingerprint_grounded"] = existing["fingerprint_grounded"]
         merged[key] = meta
     return merged
 
@@ -598,6 +620,22 @@ def audit(
             # fingerprint recurrence was never computable, so the empty
             # window changes nothing for that row. Recurrence evidence still
             # wins when the fingerprint DID reappear in some other window.
+            # H3: a fingerprint the model OFFERED but that was never observed
+            # in the error window (fingerprint_grounded False) is unverified
+            # evidence -- window absence proves nothing about a pattern that
+            # may never have existed. Read as unmeasured, like an empty
+            # window. Historical rows without the field keep old behavior.
+            ungrounded_fp = bool(
+                fingerprint
+                and patterns_available
+                and meta.get("fingerprint_grounded") is False
+            )
+            # Observed recurrence still wins: if the fingerprint DID reappear
+            # in the current window, that is real evidence regardless of
+            # whether the model's proposal was grounded at apply time. Only
+            # fabricated silence (absence) is unmeasured.
+            if ungrounded_fp and recurred is False:
+                recurred = None
             window_empty = patterns_available and not current_patterns
             if window_empty:
                 # The False computed above came from an ABSENT table, not from
@@ -609,6 +647,13 @@ def audit(
                 verdict = "no recurrence window"
             elif recurred is True:
                 verdict = "did not help"
+            elif ungrounded_fp:
+                # H3: the model proposed a fingerprint that was never in the
+                # offered window. Recurrence is unmeasured (recurred=None
+                # above); naming it "working" would credit the edit for a
+                # success that was never measured. Its own verdict, so the
+                # operator can re-check grounding instead of trusting luck.
+                verdict = "unverified fingerprint"
             elif uses == 0 and age_days >= 14 and usage_scope == "since_exact":
                 # since_approx cannot prove unused or working: the DB fallback
                 # detects usage by pattern-matching message content, which can
@@ -722,6 +767,11 @@ def audit(
             "attribution_unknown": attribution_unknown,
             "journal_id": meta.get("journal_id", ""),
             "outcome": outcome,
+            "fingerprint_grounded": (
+                meta["fingerprint_grounded"]
+                if "fingerprint_grounded" in meta
+                else None
+            ),
             "reported_model": (
                 scrub_text(str(meta.get("reported_model", "")))[:60]
                 if meta.get("reported_model")

@@ -17030,6 +17030,108 @@ class SubagentProposerTests(unittest.TestCase):
             fresh_row = ledger.audit([], journal_entries=recent_entries)[0]
         self.assertEqual(fresh_row["verdict"], "too early")
 
+    # --- H3: an ungrounded fingerprint must not read as observed silence ---
+
+    def test_audit_ungrounded_fingerprint_does_not_count_as_working(self):
+        """H3 fix: model-proposed fingerprint absent from the window.
+
+        core records llm_meta.grounded=False when the proposal's
+        pattern_fingerprint was never in the offered error window. Absence
+        from the CURRENT window is then unmeasured, not silence: the
+        row must get its own verdict instead of 'working'.
+        """
+        name = "ungrounded-fp"
+        content = skill_content(name, "# Guidance")
+        FakeHost.add_skill(name, content)
+        created = time.time() - 30 * 86400
+        entries = [{
+            "id": "ug", "ts": created, "outcome": "applied",
+            "llm_meta": {"grounded": False, "fingerprint_offered": 5},
+            "proposal": {"name": name, "kind": "skill", "action": "create",
+                         "content": content,
+                         "pattern_fingerprint": "a1b2c3d4e5f6"},
+        }]
+        ledger._save_stats({name: {
+            "created_ts": created, "updated_ts": created, "journal_id": "un",
+            "name": name, "kind": "skill", "action": "create",
+            "pattern_fingerprint": "a1b2c3d4e5f6", "outcome": "applied",
+        }})
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+            row = ledger.audit([{"fingerprint": "ffffffffffff", "tool": "other",
+                                 "count": 3, "sessions_seen": 2,
+                                 "last_ts": time.time() - 3600}],
+                               journal_entries=entries)[0]
+        self.assertEqual(row["verdict"], "unverified fingerprint")
+        self.assertIsNone(row["pattern_recurred"])
+        # The row itself carries the flag so the operator can re-check it.
+        self.assertEqual(row.get("fingerprint_grounded"), False)
+
+    def test_audit_grounded_fingerprint_absent_window_still_working(self):
+        """Grounded fingerprint + silence = 'working' unchanged (both dirs)."""
+        name = "grounded-fp"
+        content = skill_content(name, "# Guidance")
+        FakeHost.add_skill(name, content)
+        old_ts = time.time() - 30 * 86400
+        entries = [{
+            "id": "gf", "ts": old_ts, "outcome": "applied",
+            "llm_meta": {"grounded": True},
+            "proposal": {"name": name, "kind": "skill", "action": "create",
+                         "content": content,
+                         "pattern_fingerprint": "abc123def456"},
+        }]
+        ledger._save_stats({name: {
+            "created_ts": old_ts, "updated_ts": old_ts, "journal_id": "gf",
+            "name": name, "kind": "skill", "action": "create",
+            "pattern_fingerprint": "abc123def456", "outcome": "applied",
+        }})
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+            row = ledger.audit([{"fingerprint": "ffffffffffff", "tool": "other",
+                                 "count": 3, "sessions_seen": 2,
+                                 "last_ts": time.time() - 3600}],
+                               journal_entries=entries)[0]
+        self.assertEqual(row["verdict"], "working")
+        self.assertFalse(row["pattern_recurred"])
+        self.assertEqual(row.get("fingerprint_grounded"), True)
+
+    def test_audit_historical_row_without_grounded_field_unchanged(self):
+        """No llm_meta (historical row) -> grounded by default, 'working'."""
+        name = "historical-row"
+        content = skill_content(name, "# Guidance")
+        FakeHost.add_skill(name, content)
+        old_ts = time.time() - 30 * 86400
+        entries = [{
+            "id": "hist", "ts": old_ts, "outcome": "applied",
+            "proposal": {"name": name, "kind": "skill", "action": "create",
+                         "content": content,
+                         "pattern_fingerprint": "abc123def456"},
+        }]
+        ledger._save_stats({name: {
+            "created_ts": old_ts, "updated_ts": old_ts, "journal_id": "hist",
+            "name": name, "kind": "skill", "action": "create",
+            "pattern_fingerprint": "abc123def456", "outcome": "applied",
+        }})
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+            row = ledger.audit([{"fingerprint": "ffffffffffff", "tool": "other",
+                                 "count": 3, "sessions_seen": 2,
+                                 "last_ts": time.time() - 3600}],
+                               journal_entries=entries)[0]
+        self.assertEqual(row["verdict"], "working")
+        # Historical row: the flag is exposed as None (unmeasured), and the
+        # verdict chain treated it as grounded (missing = grounded).
+        self.assertIsNone(row["fingerprint_grounded"])
+
+    def test_ledger_record_edit_stores_fingerprint_grounded(self):
+        """record_edit keeps the grounded flag; absence keeps rows legacy."""
+        proposal = {"name": "gr-store", "kind": "skill", "action": "create",
+                    "pattern_fingerprint": "abc123def456"}
+        ledger.record_edit(proposal, "gid", outcome="applied",
+                           llm_meta={"grounded": False})
+        self.assertIs(ledger.load_stats()["gr-store"].get("fingerprint_grounded"), False)
+        ledger.record_edit({"name": "gr-store", "kind": "skill", "action": "create"},
+                           "gr2", outcome="applied")
+        # llm_meta absent -> field untouched from previous write
+        self.assertIs(ledger.load_stats()["gr-store"]["fingerprint_grounded"], False)
+
     # --- Fix 2: dedup history crosses explicit_session boundary safely ---
 
     def test_refinement_history_safe_fields_only_drops_model_text(self):
