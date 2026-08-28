@@ -246,13 +246,6 @@ def _on_pre_tool_call(
     if tool_name != "terminal":
         return None
     cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
-    try:
-        import os as _os
-        log = _os.path.join(_os.environ.get("TEMP", _os.environ.get("TMP", "/tmp")), "hook_trace.log")
-        with open(log, "a") as f:
-            f.write(f"ENTER tool={tool_name} cmd[:50]={cmd[:50]} rules={len(_ACTIVE_BLOCK_RULES)}\n")
-    except Exception:
-        pass
     for condition, action in _ACTIVE_BLOCK_RULES:
         if not condition:
             continue
