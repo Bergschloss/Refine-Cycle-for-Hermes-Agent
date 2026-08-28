@@ -3017,7 +3017,8 @@ def _propose_with_subagent(
         class SubagentLaunchRequest:  # noqa: N801 - contract mirror
             __slots__ = (
                 "goal", "context", "role", "allowed_toolsets",
-                "correlation_id", "timeout_seconds", "model", "model_provider",
+                "blocked_tools", "correlation_id", "timeout_seconds",
+                "model", "model_provider",
             )
             def __init__(self, **kwargs):
                 for field in self.__slots__:
@@ -3046,6 +3047,8 @@ def _propose_with_subagent(
                 context=context,
                 role="leaf",
                 allowed_toolsets=("skills",),
+                blocked_tools=("skill_manage", "write_file", "edit", "patch",
+                               "terminal", "delegate_task"),
                 correlation_id=_PROPOSER_CORRELATION_PREFIX + uuid.uuid4().hex[:12],
             )
         )
@@ -3078,7 +3081,11 @@ def _propose_with_subagent(
             "proposal_source": "structured",
             "subagent_fallback_reason": "result_unavailable",
         }
-    state = str(getattr(result, "terminal_state", ""))
+    # terminal_state on the result is the SubagentTerminalState object; the
+    # string state lives in its .state attribute.
+    _terminal = getattr(result, "terminal_state", None)
+    _state_str = getattr(_terminal, "state", _terminal) if _terminal is not None else ""
+    state = str(_state_str or "")
     summary = getattr(result, "summary", None)
     usage = getattr(result, "usage_metadata", None) or {}
     api_calls = usage.get("api_calls", 0) if isinstance(usage, dict) else 0
