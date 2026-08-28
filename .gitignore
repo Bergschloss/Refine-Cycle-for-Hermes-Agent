@@ -67,6 +67,10 @@ secrets/
 .kiro/
 scratch/
 semantic-review/
+
+# Test-created skills land in the live skills/ dir when a test writes one
+# without a sandboxed hermes_home; never ship them.
+skills/
 *.bundle
 
 # Throwaway planning artifacts from the refine loop. Deliberate, durable plans
