@@ -1557,6 +1557,50 @@ def _finalize_edits(
     })
 
 
+def finalize_proposal(
+    llm: PluginLlm,
+    parsed: Optional[Dict[str, Any]],
+    *,
+    short: str,
+    instructions: str,
+    max_edits: int,
+    skill_content_loader: Optional[Callable[[str], Optional[str]]] = None,
+    target: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Normalize a parsed proposal dict into the shared downstream shape.
+
+    Single owner of the parse→finalize transition for BOTH production paths:
+    the structured ``propose()`` call and the subagent proposer. Keeping them
+    on one function guarantees a subagent proposal is validated, regenerated
+    (skill patches) and sanitized exactly like a structured one — the
+    subagent changes only how the proposal is produced.
+    """
+    if parsed is None:
+        return _semantic_failure("LLM returned non-object output")
+    if parsed.get("failure"):
+        return sanitize(parsed)
+    raw_edits = parsed.get("edits")
+    if isinstance(raw_edits, list) and raw_edits:
+        return _finalize_edits(
+            llm,
+            short,
+            instructions,
+            parsed,
+            raw_edits,
+            max_edits=max_edits,
+            skill_content_loader=skill_content_loader,
+            target=target,
+        )
+    return _finalize_edit(
+        llm,
+        short,
+        instructions,
+        parsed,
+        skill_content_loader=skill_content_loader,
+        target=target,
+    )
+
+
 def propose(
     llm: PluginLlm,
     evidence_text: str,
@@ -1688,28 +1732,12 @@ def propose(
                 target=target,
             )
         )
-        if parsed is None:
-            return _semantic_failure("LLM returned non-object output")
-        if parsed.get("failure"):
-            return sanitize(parsed)
-
-        raw_edits = parsed.get("edits")
-        if isinstance(raw_edits, list) and raw_edits:
-            return _finalize_edits(
-                llm,
-                short,
-                instructions,
-                parsed,
-                raw_edits,
-                max_edits=max_edits,
-                skill_content_loader=skill_content_loader,
-                target=target,
-            )
-        return _finalize_edit(
+        return finalize_proposal(
             llm,
-            short,
-            instructions,
             parsed,
+            short=short,
+            instructions=instructions,
+            max_edits=max_edits,
             skill_content_loader=skill_content_loader,
             target=target,
         )

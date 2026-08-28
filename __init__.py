@@ -222,6 +222,11 @@ def _start_auto_refine(
 
 _BLOCK_RULES: list = []  # list of dicts: {type, target, action, ...}
 
+# Child sessions of subagents this plugin launched as proposers. Populated by
+# the subagent_start hook (matched by subagent id) and drained on
+# subagent_stop; the pre_tool_call hook refuses skill_manage for these.
+_PROPOSER_CHILD_SESSIONS: set = set()
+
 def _update_block_rules(notes):
     """Parse prompt-notes into structured block rules."""
     global _BLOCK_RULES
@@ -364,10 +369,26 @@ def _binary_matches(binary: str, target: str) -> bool:
 def _on_pre_tool_call(
     tool_name: str = "",
     args: Any = None,
-    **_: Any,
+    **kwargs: Any,
 ) -> Optional[Dict[str, str]]:
-    """Block tool calls that match a persisted prompt-note rule."""
+    """Block tool calls that match a persisted prompt-note rule.
+
+    Also enforces the proposer subagent's read-only contract: a child the
+    plugin launched as a proposer may read skills but never write them.
+    """
     import re, shlex
+
+    session_id = str(kwargs.get("session_id", "") or "")
+    if session_id and session_id in _PROPOSER_CHILD_SESSIONS:
+        if tool_name == "skill_manage":
+            return {
+                "action": "block",
+                "message": (
+                    "You are the refine proposer and have no write access. "
+                    "Use skills_list and skill_view to verify, then return "
+                    "your JSON proposal."
+                ),
+            }
 
     for rule in _BLOCK_RULES:
         rt = rule.get("type", "")
@@ -1189,9 +1210,37 @@ REFINE_RUN_SCHEMA = {
 }
 
 
+def _on_subagent_start(
+    child_subagent_id: str = "",
+    child_session_id: str = "",
+    **_: Any,
+) -> None:
+    """Mark a child this plugin launched as a proposer (read-only session)."""
+    if not child_subagent_id or not child_session_id:
+        return
+    if str(child_subagent_id) in core._PROPOSER_SUBAGENT_IDS:
+        _PROPOSER_CHILD_SESSIONS.add(str(child_session_id))
+
+
+def _on_subagent_stop(
+    child_subagent_id: str = "",
+    child_session_id: str = "",
+    **_: Any,
+) -> None:
+    """Drop the read-only marker once the proposer child has finished."""
+    if child_session_id:
+        _PROPOSER_CHILD_SESSIONS.discard(str(child_session_id))
+    if child_subagent_id:
+        core._PROPOSER_SUBAGENT_IDS.discard(str(child_subagent_id))
+
+
 def register(ctx) -> None:
     global _REGISTERED_CONTEXT
     _REGISTERED_CONTEXT = ctx
+    # Hand the host's plugin-safe subagent lifecycle service to the proposer
+    # path. Accessor, not the service itself: the service resolves the active
+    # parent lazily, which is only ever correct at proposal time.
+    core._set_subagent_lifecycle_provider(lambda: ctx.subagent_lifecycle)
     # One-time migration of runtime data out of the plugin install directory.
     # Must not fail registration — a broken migration just leaves data in place.
     try:
@@ -1246,6 +1295,8 @@ def register(ctx) -> None:
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
+    ctx.register_hook("subagent_start", _on_subagent_start)
+    ctx.register_hook("subagent_stop", _on_subagent_stop)
     _warn_if_core_patch_missing()
     _warn_on_register()
 

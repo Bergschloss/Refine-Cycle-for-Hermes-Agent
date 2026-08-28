@@ -5881,7 +5881,15 @@ class RefineTests(unittest.TestCase):
             self.assertTrue(worker_exited.wait(1))
         self.assertEqual(
             set(context.hooks),
-            {"pre_llm_call", "pre_tool_call", "post_llm_call", "on_session_end", "on_session_reset"},
+            {
+                "pre_llm_call",
+                "pre_tool_call",
+                "post_llm_call",
+                "on_session_end",
+                "on_session_reset",
+                "subagent_start",
+                "subagent_stop",
+            },
         )
         self.assertIsNone(calls[0][0])
         # A mid-session pass is not an ending one: its session can still hold a
@@ -15926,6 +15934,213 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn(head, done.stderr, "refusal must name the host HEAD")
         self.assertIn("df4b65147d", done.stderr, "refusal must name the patch base")
         self.assertEqual(self._snapshot(), before, "refusal must not modify files")
+
+
+class SubagentProposerTests(unittest.TestCase):
+    """The proposer subagent: preferred path, fallbacks, read-only contract."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        FakeHost.reset(self.root)
+        core._set_subagent_lifecycle_provider(None)
+        self.addCleanup(self.temp.cleanup)
+
+    def tearDown(self):
+        core._set_subagent_lifecycle_provider(None)
+        core._PROPOSER_SUBAGENT_IDS.clear()
+        plugin_init._PROPOSER_CHILD_SESSIONS.clear()
+
+    class _FakeLifecycle:
+        def __init__(self, result=None, launch_error=None, timed_out=False):
+            self.payload = result
+            self.launch_error = launch_error
+            self.timed_out = timed_out
+            self.launch_calls = []
+            self.cancelled = []
+
+        def launch(self, request):
+            self.launch_calls.append(request)
+            if self.launch_error is not None:
+                raise self.launch_error
+            return types.SimpleNamespace(subagent_id="sa-0-abc12345")
+
+        def wait(self, handle, timeout_seconds=None):
+            self.wait_timeout = timeout_seconds
+            if self.timed_out:
+                return types.SimpleNamespace(completed=False)
+            return types.SimpleNamespace(completed=True)
+
+        def cancel(self, handle, reason=""):
+            self.cancelled.append(reason)
+
+        def result(self, handle):
+            return self.payload
+
+    @staticmethod
+    def _result(state="SUCCEEDED", summary="", api_calls=3):
+        return types.SimpleNamespace(
+            terminal_state=state,
+            summary=summary,
+            usage_metadata={"api_calls": api_calls},
+        )
+
+    def _propose(self, lifecycle, **overrides):
+        kwargs = dict(
+            evidence_text="[tool] ERROR: endpoint refused /v1/x",
+            existing_skills=[{"name": "http-errors", "description": "handles 403s"}],
+            existing_memories=["memory snippet one"],
+            error_patterns=[{"fingerprint": "fp1", "count": 3, "sample": "x"}],
+            user_corrections=["use the other endpoint"],
+            unused_skills=[],
+            refinement_history=[],
+            run_context="reason text",
+            reviewer_context="",
+            target={"provider": "p", "model": "m"},
+        )
+        kwargs.update(overrides)
+        core._set_subagent_lifecycle_provider(lambda: lifecycle)
+        return core._propose_with_subagent(MockLlm(), **kwargs)
+
+    def test_subagent_path_returns_proposal_and_records_cost(self):
+        """A bound lifecycle with a valid answer produces the subagent proposal."""
+        lifecycle = self._FakeLifecycle(
+            result=self._result(
+                summary=json.dumps(
+                    {
+                        "action": "create",
+                        "kind": "memory",
+                        "name": "endpoint-rule",
+                        "content": "Use the fallback endpoint.",
+                        "reason": "repeated 403",
+                        "expected_outcome": "no more retries",
+                    }
+                )
+            )
+        )
+        proposal, meta = self._propose(lifecycle)
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal["action"], "create")
+        self.assertEqual(meta["proposal_source"], "subagent")
+        self.assertEqual(meta["subagent_api_calls"], 3)
+        self.assertEqual(meta["subagent_state"], "SUCCEEDED")
+
+    def test_no_lifecycle_falls_back_to_structured(self):
+        """Without a bound lifecycle the structured path must be used."""
+        proposal, meta = self._propose(None)
+        self.assertIsNone(proposal)
+        self.assertEqual(meta["proposal_source"], "structured")
+        self.assertEqual(meta["subagent_fallback_reason"], "no_lifecycle")
+
+    def test_launch_failure_falls_back(self):
+        lifecycle = self._FakeLifecycle(launch_error=RuntimeError("no parent"))
+        proposal, meta = self._propose(lifecycle)
+        self.assertIsNone(proposal)
+        self.assertEqual(meta["proposal_source"], "structured")
+        self.assertEqual(meta["subagent_fallback_reason"], "launch_failed")
+
+    def test_wait_timeout_cancels_and_falls_back(self):
+        lifecycle = self._FakeLifecycle(timed_out=True)
+        proposal, meta = self._propose(lifecycle)
+        self.assertIsNone(proposal)
+        self.assertEqual(meta["subagent_fallback_reason"], "subagent_timeout")
+        self.assertTrue(lifecycle.cancelled, "timed-out child must be cancelled")
+
+    def test_unparsable_summary_falls_back(self):
+        lifecycle = self._FakeLifecycle(result=self._result(summary="no json here"))
+        proposal, meta = self._propose(lifecycle)
+        self.assertIsNone(proposal)
+        self.assertEqual(meta["subagent_fallback_reason"], "subagent_unparsable_output")
+
+    def test_failed_child_falls_back(self):
+        lifecycle = self._FakeLifecycle(result=self._result(state="FAILED", summary="x"))
+        proposal, meta = self._propose(lifecycle)
+        self.assertIsNone(proposal)
+        self.assertEqual(meta["subagent_fallback_reason"], "subagent_failed_failed")
+
+    def test_child_launched_with_read_only_skills_toolset(self):
+        """The child gets the skills toolset, leaf role, and a correlation id."""
+        lifecycle = self._FakeLifecycle(
+            result=self._result(
+                summary=json.dumps(
+                    {"action": "no_op", "reason": "rule already exists"}
+                )
+            )
+        )
+        self._propose(lifecycle)
+        self.assertEqual(len(lifecycle.launch_calls), 1)
+        request = lifecycle.launch_calls[0]
+        self.assertEqual(request.allowed_toolsets, ("skills",))
+        self.assertEqual(request.role, "leaf")
+        self.assertTrue(
+            request.correlation_id.startswith(core._PROPOSER_CORRELATION_PREFIX)
+        )
+        self.assertEqual(request.timeout_seconds, None)
+
+    def test_memory_and_evidence_are_passed_in_request(self):
+        """The child cannot read memory itself — it must arrive in the request."""
+        lifecycle = self._FakeLifecycle(
+            result=self._result(
+                summary=json.dumps({"action": "no_op", "reason": "covered"})
+            )
+        )
+        self._propose(lifecycle)
+        request = lifecycle.launch_calls[0]
+        self.assertIn("memory snippet one", request.context)
+        self.assertIn("endpoint refused", request.context)
+        self.assertIn("use the other endpoint", request.context)
+        self.assertIn("http-errors", request.context)
+        self.assertTrue(len(request.goal) <= 16000)
+        self.assertTrue(len(request.context) <= 32000)
+
+    def test_subagent_proposal_uses_identical_validation(self):
+        """A bad action from the subagent is rejected exactly like structured."""
+        bad = json.dumps({"action": "delete", "kind": "skill", "name": "x"})
+        lifecycle = self._FakeLifecycle(result=self._result(summary=bad))
+        proposal, meta = self._propose(lifecycle)
+        self.assertIsNotNone(proposal)
+        self.assertTrue(proposal.get("failure"), "invalid action must be refused")
+        self.assertEqual(meta["proposal_source"], "subagent")
+        # The identical rejection comes from the shared finalize_proposal:
+        direct = core._llm.finalize_proposal(
+            MockLlm(),
+            {"action": "delete", "kind": "skill", "name": "x"},
+            short="s",
+            instructions="i",
+            max_edits=1,
+        )
+        self.assertEqual(proposal.get("failure"), direct.get("failure"))
+
+    def test_proposer_child_session_enforced_read_only(self):
+        """pre_tool_call refuses skill_manage inside a proposer child session."""
+        core._PROPOSER_SUBAGENT_IDS.add("sa-0-abc12345")
+        plugin_init._on_subagent_start(
+            child_subagent_id="sa-0-abc12345", child_session_id="child-sess"
+        )
+        blocked = plugin_init._on_pre_tool_call(
+            "skill_manage",
+            {"action": "create", "name": "x", "content": "y"},
+            session_id="child-sess",
+        )
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked["action"], "block")
+        # Read tools pass, and other sessions are untouched.
+        self.assertIsNone(
+            plugin_init._on_pre_tool_call("skill_view", {"name": "x"}, session_id="child-sess")
+        )
+        self.assertIsNone(
+            plugin_init._on_pre_tool_call(
+                "skill_manage", {"action": "create"}, session_id="other-sess"
+            )
+        )
+        plugin_init._on_subagent_stop(
+            child_subagent_id="sa-0-abc12345", child_session_id="child-sess"
+        )
+        self.assertIsNone(
+            plugin_init._on_pre_tool_call(
+                "skill_manage", {"action": "create"}, session_id="child-sess"
+            )
+        )
 
 
 if __name__ == "__main__":

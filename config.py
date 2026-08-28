@@ -660,6 +660,28 @@ def prompt_notes_max_chars() -> int:
     return get_int("prompt_notes_max_chars", 600, min_val=1)
 
 
+def proposer_subagent_enabled() -> bool:
+    """Whether refine may produce proposals through a read-only subagent.
+
+    The subagent path lets the proposer open skill bodies (skills_list/
+    skill_view) before deciding, instead of judging from name+description
+    only. It requires a bound parent turn; when none exists the structured
+    call is used as the fallback either way, so this switch only governs
+    the preferred path, not availability.
+    """
+    return _get_fail_closed_bool("proposer_subagent_enabled")
+
+
+def proposer_subagent_timeout_seconds() -> int:
+    """How long the explicit-path refine_run waits on the proposer subagent.
+
+    Bound on the synchronous wait; on timeout the child is cancelled and the
+    structured fallback is used. The automatic path never waits (the launch
+    itself fails without a bound parent turn).
+    """
+    return get_int("proposer_subagent_timeout_seconds", 180, min_val=5)
+
+
 def prompt_notes_default_scope() -> str:
     """Default lifetime for new prompt notes; invalid values fail closed to global."""
     scope = get_str("prompt_notes_default_scope", "global").strip().lower()
