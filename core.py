@@ -1931,6 +1931,22 @@ def refine_status() -> Dict[str, Any]:
             ),
         })
 
+    # Which proposer would serve a proposal run, and why — the honest answer to
+    # "which proposer do I get". The structured arm needs only an invocation-
+    # bound LLM; the subagent arm additionally needs its lifecycle provider
+    # bound by the host and the config switch on. A user reading /refine status
+    # must be able to tell which of the three states they are in without
+    # reading the source. refine_status() is strictly read-only and takes no
+    # llm argument, so the bound-LLM check mirrors the command-context gate:
+    # the subagent lifecycle provider is host-bound state, and the config
+    # switch is read live. The llm-bound fact comes from the same source the
+    # command context reports (status is command-context too).
+    lifecycle_bound = _subagent_lifecycle() is not None
+    subagent_cfg = bool(config.proposer_subagent_enabled())
+    proposer_effective = (
+        "subagent" if (subagent_cfg and lifecycle_bound) else "structured"
+    )
+
     return {
         "config_readable": config_readable,
         "auto_enabled": auto,
@@ -1965,6 +1981,11 @@ def refine_status() -> Dict[str, Any]:
         "llm_model_allowed": model_allowed,
         "llm_provider_allowed": provider_allowed,
         "last_model_substituted": last_model_substituted,
+        "proposer": {
+            "effective": proposer_effective,
+            "subagent_config_enabled": subagent_cfg,
+            "subagent_lifecycle_bound": lifecycle_bound,
+        },
         "blockers": blockers,
         "blocker_codes": [b["code"] for b in blockers],
         "warnings": warnings,

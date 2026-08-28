@@ -763,6 +763,20 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             f"model: {status['llm_model'] or '(host default)'}"
             + (f" @ {status['llm_provider']}" if status["llm_provider"] else "")
             + f" (source: {status['llm_target_source']})",
+            # The DoD line: which proposer serves a proposal run and why.
+            (
+                "proposer: subagent (host lifecycle bound, config enabled)"
+                if status["proposer"]["effective"] == "subagent"
+                else (
+                    "proposer: structured (subagent arm unavailable: "
+                    + (
+                        "disabled in config"
+                        if not status["proposer"]["subagent_config_enabled"]
+                        else "host lifecycle not bound"
+                    )
+                    + ")"
+                )
+            ),
             (
                 "last model substitution: yes (reviewer verdict not trustworthy)"
                 if status.get("last_model_substituted")
