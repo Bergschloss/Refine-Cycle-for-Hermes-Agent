@@ -7,12 +7,61 @@ Standard library only."""
 
 import hashlib
 import logging
+import logging.handlers
+import pathlib
 import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# Plugin-owned trace log. The host's agent.log handler runs at INFO (the
+# config default), so a logger.debug() record is dropped at the handler and
+# every trace is silently lost. A dedicated handler on THIS logger — with
+# propagate disabled — captures traces in ~/.hermes/logs/refine-trace.log
+# without touching the host's log levels, handlers, or agent.log.
+_TRACE_LOGGER_NAME = __name__
+_trace_handler = None
+_trace_handler_lock = threading.Lock()
+
+
+def _trace_file() -> Optional[pathlib.Path]:
+    """Trace log location under the plugin's own hermes_home resolution."""
+    try:
+        from config import hermes_home
+        return hermes_home() / "logs" / "refine-trace.log"
+    except Exception:
+        return None
+
+
+def _ensure_trace_handler() -> None:
+    """Attach a DEBUG-level rotating file handler to this module's logger.
+    Idempotent; never raises (a missing log dir falls back to no handler and
+    emit_trace's existing warning path)."""
+    global _trace_handler
+    with _trace_handler_lock:
+        if _trace_handler is not None:
+            return
+        path = _trace_file()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handler = logging.handlers.RotatingFileHandler(
+                path, maxBytes=512 * 1024, backupCount=2,
+                encoding="utf-8")
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+            logger.addHandler(handler)
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False  # keep DEBUG out of the host's INFO handler
+            _trace_handler = handler
+        except Exception:
+            # No trace file this process; emit_trace still logs via its own
+            # warning path on failure. Never raise from logging setup.
+            _trace_handler = None
 
 
 def _safe_client_hash(provider: Optional[str], model: Optional[str]) -> str:
@@ -63,9 +112,11 @@ def finalize_trace(trace: Dict[str, Any], *, result_code: str, output_tokens: Op
 
 
 def emit_trace(trace: Dict[str, Any], *, journal_append=None) -> None:
-    """Emit trace to log only. Never to mutation journal.
-    Failure is visible via warning log, never silently swallowed."""
+    """Emit trace to the plugin-owned trace log (never the host's agent.log,
+    never the mutation journal). Failure is visible via warning log, never
+    silently swallowed."""
     try:
+        _ensure_trace_handler()
         logger.debug(
             "refine_trace trace_id=%s route_state=%s result=%s session=%s",
             (trace.get("trace_id") or "?")[:8],

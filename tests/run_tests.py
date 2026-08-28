@@ -15865,6 +15865,91 @@ class SuiteDiscoveryContractTests(unittest.TestCase):
         self.assertGreaterEqual(len(discovered), 2)
 
 
+class TraceFileSinkTests(unittest.TestCase):
+    """Traces land in the plugin-owned refine-trace.log; the host's root
+    logger gains no handler and keeps its levels (A3 finding)."""
+
+    def test_emit_trace_writes_the_plugin_owned_trace_log(self):
+        import logging as _logging
+        import tempfile as _tempfile
+        import trace as _trace_mod
+
+        root = _logging.getLogger()
+        handlers_before = list(root.handlers)
+        td = Path(tempfile.mkdtemp(prefix="a3trace"))
+        old_root = FakeHost.root
+        # SuiteDiscoveryContractTests re-imports this module as
+        # tests.run_tests, whose install_fake_host REPLACES
+        # sys.modules['hermes_constants'] with a copy whose lambda reads a
+        # fresh FakeHost rooted at Path('.'). Rebind get_hermes_home to OUR
+        # temp root for the duration, then restore.
+        import sys as _sys
+        _hc = _sys.modules.get("hermes_constants")
+        _old_get = getattr(_hc, "get_hermes_home", None)
+        FakeHost.reset(td)
+        if _hc is not None:
+            _hc.get_hermes_home = lambda: str(td)
+        try:
+            t = _trace_mod.build_trace(
+                session_id="a3testsess12345",
+                source="tool",
+                operation="refine_run",
+                route_state="invocation_bound",
+                provider="probe", model="probe-model",
+            )
+            _trace_mod.finalize_trace(t, result_code="ok", output_tokens=7)
+            _trace_mod.emit_trace(t)
+            log_file = td / "logs" / "refine-trace.log"
+            self.assertTrue(log_file.exists())
+            content = log_file.read_text(encoding="utf-8")
+        finally:
+            if _hc is not None and _old_get is not None:
+                _hc.get_hermes_home = _old_get
+            FakeHost.reset(old_root)
+            for h in list(_trace_mod.logger.handlers):
+                h.close()
+                _trace_mod.logger.removeHandler(h)
+            _trace_mod._trace_handler = None
+            _trace_mod.logger.setLevel(_logging.NOTSET)
+            _trace_mod.logger.propagate = True
+        self.assertIn("refine_trace", content)
+        self.assertIn("invocation_bound", content)
+        self.assertEqual(
+            [id(h) for h in root.handlers], [id(h) for h in handlers_before])
+
+    def test_emit_trace_leaves_host_root_levels_untouched(self):
+        import logging as _logging
+        import tempfile as _tempfile
+        import trace as _trace_mod
+
+        root = _logging.getLogger()
+        levels_before = {id(h): h.level for h in root.handlers}
+        td = Path(tempfile.mkdtemp())
+        old_root = FakeHost.root
+        FakeHost.reset(td)
+        try:
+            t = _trace_mod.build_trace(
+                session_id="a3testsess5678",
+                source="tool", operation="op", route_state="s")
+            _trace_mod.finalize_trace(t, result_code="ok")
+            _trace_mod.emit_trace(t)
+            # while the plugin handler is attached: propagation is off, so a
+            # DEBUG record never reaches the host's root handlers
+            self.assertFalse(_trace_mod.logger.propagate)
+            for h in list(_trace_mod.logger.handlers):
+                h.close()
+        finally:
+            FakeHost.reset(old_root)
+            for h in list(_trace_mod.logger.handlers):
+                h.close()
+                _trace_mod.logger.removeHandler(h)
+            _trace_mod._trace_handler = None
+            _trace_mod.logger.setLevel(_logging.NOTSET)
+            _trace_mod.logger.propagate = True
+        self.assertEqual(
+            {id(h): h.level for h in root.handlers}, levels_before)
+
+
 class TraceContractTests(unittest.TestCase):
     """Characterization: trace contract invariants verified against real trace.py."""
 
