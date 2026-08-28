@@ -2978,6 +2978,14 @@ def _render_proposer_context(
     )
 
 
+# Sentinel returned by _propose_with_subagent under strict mode: the subagent
+# arm failed and the caller must NOT silently downgrade to the structured
+# path — a measurement that does is contaminated (structured runs counted as
+# subagent). The caller converts this into an explicit error outcome with the
+# fallback reason preserved in the journal.
+_PROPose_STRICT_ERROR = "__subagent_strict_error__"
+
+
 def _propose_with_subagent(
     llm: PluginLlm,
     evidence_text: str,
@@ -2996,16 +3004,26 @@ def _propose_with_subagent(
 
     Returns ``(proposal, meta)``. ``proposal`` is None on ANY failure (no
     bound lifecycle, launch refused, wait timeout, unparsable answer) — the
-    caller then falls back to the structured path. ``meta`` always describes
+    caller then falls back to the structured path, UNLESS strict mode is on
+    (``proposer_subagent_strict``): then a failure returns the
+    ``_PROPose_STRICT_ERROR`` sentinel and the caller reports an error with
+    the fallback reason instead of downgrading. ``meta`` always describes
     what happened for the journal (``proposal_source``, fallback reason,
     ``subagent_api_calls``).
     """
+    try:
+        strict = bool(config.proposer_subagent_strict())
+    except Exception:
+        strict = False
     lifecycle = _subagent_lifecycle()
     if lifecycle is None:
-        return None, {
+        meta = {
             "proposal_source": "structured",
             "subagent_fallback_reason": "no_lifecycle",
         }
+        if strict:
+            return _PROPose_STRICT_ERROR, meta
+        return None, meta
     try:
         from agent.subagent_lifecycle import SubagentLaunchRequest
     except Exception as exc:
@@ -3055,10 +3073,13 @@ def _propose_with_subagent(
         )
     except Exception as exc:
         logger.warning("Proposer subagent launch failed: %s", scrub_text(str(exc)))
-        return None, {
+        meta = {
             "proposal_source": "structured",
             "subagent_fallback_reason": "launch_failed",
         }
+        if strict:
+            return _PROPose_STRICT_ERROR, meta
+        return None, meta
     _PROPOSER_SUBAGENT_IDS.add(str(handle.subagent_id))
     try:
         timeout_seconds = max(5, int(config.proposer_subagent_timeout_seconds()))
@@ -3078,10 +3099,14 @@ def _propose_with_subagent(
         result = lifecycle.result(handle)
     except Exception as exc:
         logger.warning("Proposer subagent result unavailable: %s", scrub_text(str(exc)))
-        return None, {
+        meta = {
             "proposal_source": "structured",
             "subagent_fallback_reason": "result_unavailable",
+            "subagent_state": "",
         }
+        if strict:
+            return _PROPose_STRICT_ERROR, meta
+        return None, meta
     # Live host shape: result.terminal_state is a SubagentTerminalState whose
     # .state is a SubagentState enum — str() of it is "SubagentState.SUCCEEDED",
     # the bare name lives on .name.
@@ -3112,14 +3137,19 @@ def _propose_with_subagent(
             proposal_source="structured",
             subagent_fallback_reason=f"subagent_failed_{state.lower() or 'unknown'}",
         )
+        if strict:
+            return _PROPose_STRICT_ERROR, meta
         return None, meta
     parsed = _llm._ensure_dict(_llm._extract_first_json_object(summary))
     if parsed is None:
-        return None, dict(
+        meta = dict(
             meta,
             proposal_source="structured",
             subagent_fallback_reason="subagent_unparsable_output",
         )
+        if strict:
+            return _PROPose_STRICT_ERROR, meta
+        return None, meta
     try:
         proposal = _llm.finalize_proposal(
             llm,
@@ -3132,11 +3162,14 @@ def _propose_with_subagent(
         )
     except Exception as exc:
         logger.warning("Proposer subagent finalize failed: %s", scrub_text(str(exc)))
-        return None, dict(
+        meta = dict(
             meta,
             proposal_source="structured",
             subagent_fallback_reason="finalize_failed",
         )
+        if strict:
+            return _PROPose_STRICT_ERROR, meta
+        return None, meta
     return proposal, meta
 
 
@@ -3505,6 +3538,57 @@ def _refine_once(
                 reviewer_context=reviewer_context,
                 target=_run_target,
             )
+            if isinstance(proposal, str) and proposal == _PROPose_STRICT_ERROR:
+                # Strict mode: the subagent arm failed; the pass is lost, not
+                # silently downgraded to the structured path. Report an error
+                # outcome with the fallback reason preserved in the journal.
+                # evidence_summary/_run_llm_meta do not exist yet at this point
+                # (they are built after the primary loop), so this response
+                # carries only what is known here.
+                _fallback_reason = str(
+                    _subagent_meta.get("subagent_fallback_reason", "") or "unknown"
+                )
+                failure_message = (
+                    "Proposer subagent failed under proposer_subagent_strict; "
+                    f"no structured fallback was made ({_fallback_reason})."
+                )
+                entry_id = _journal_nonmutation(
+                    trigger=trigger,
+                    reason=safe_reason or failure_message,
+                    session_id=session,
+                    proposal={
+                        "action": "no_op",
+                        "reason": failure_message,
+                        "expected_outcome": "",
+                    },
+                    outcome="subagent_strict_error",
+                    error=failure_message,
+                    llm_meta=dict(_subagent_meta),
+                )
+                response = {
+                    "success": False,
+                    "outcome": "subagent_strict_error",
+                    "failure": "subagent_strict",
+                    "message": failure_message,
+                    "llm_called": False,
+                    "proposal": {
+                        "action": "no_op",
+                        "reason": failure_message,
+                        "expected_outcome": "",
+                    },
+                    "evidence": {
+                        "session_id": session,
+                        "session_id_source": session_source,
+                        "session_source": session_db_source,
+                        "messages": len(evidence.get("messages", [])),
+                        "errors": evidence.get("error_count", 0),
+                    },
+                    "llm_meta": dict(_subagent_meta),
+                    "reversible": False,
+                }
+                if entry_id:
+                    response["journal_id"] = entry_id
+                return response
         if proposal is None:
             proposal = _llm.propose(
                 llm=llm,

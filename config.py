@@ -682,6 +682,21 @@ def proposer_subagent_timeout_seconds() -> int:
     return get_int("proposer_subagent_timeout_seconds", 180, min_val=5)
 
 
+def proposer_subagent_strict() -> bool:
+    """Whether a subagent launch failure may fall back to the structured path.
+
+    Default ``false``: in production a quiet fall back to the working path is
+    correct — the subagent is the preferred arm, not an availability gate.
+    When ``true`` (measurement mode), any subagent failure — no bound
+    lifecycle, launch refused, timeout, unparsable answer — becomes an error
+    outcome instead of a silent structured run. A measurement that quietly
+    downgrades its subagent arm to the structured path is contaminated: the
+    twelve local Phase 0 slices were structured while labelled subagent for
+    exactly this reason.
+    """
+    return _get_fail_closed_bool("proposer_subagent_strict", default=False)
+
+
 def prompt_notes_default_scope() -> str:
     """Default lifetime for new prompt notes; invalid values fail closed to global."""
     scope = get_str("prompt_notes_default_scope", "global").strip().lower()

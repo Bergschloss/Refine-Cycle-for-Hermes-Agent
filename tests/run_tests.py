@@ -16055,6 +16055,120 @@ class SubagentProposerTests(unittest.TestCase):
         self.assertEqual(meta["proposal_source"], "structured")
         self.assertEqual(meta["subagent_fallback_reason"], "launch_failed")
 
+    # --- proposer_subagent_strict: measurement mode, no silent downgrade ---
+
+    _STRICT_ON = {"proposer_subagent_strict": True}
+
+    def _propose_strict(self, lifecycle, **overrides):
+        """Run _propose_with_subagent with proposer_subagent_strict: true."""
+        entry = FakeHost.entry_config()
+        saved = {k: entry.get(k) for k in self._STRICT_ON}
+        entry.update(self._STRICT_ON)
+        try:
+            return self._propose(lifecycle, **overrides)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    entry.pop(k, None)
+                else:
+                    entry[k] = v
+
+    def test_strict_off_launch_failure_keeps_structured_fallback(self):
+        """Strict off (default) + launch failure: structured fallback runs."""
+        lifecycle = self._FakeLifecycle(launch_error=RuntimeError("no parent"))
+        proposal, meta = self._propose(lifecycle)
+        self.assertIsNone(proposal)
+        self.assertEqual(meta["proposal_source"], "structured")
+        self.assertEqual(meta["subagent_fallback_reason"], "launch_failed")
+
+    def test_strict_on_launch_failure_errors_without_structured_call(self):
+        """Strict on + launch failure: sentinel error, reason preserved.
+
+        The structured propose() must never run: the caller (refine_once)
+        converts the sentinel into a subagent_strict_error outcome instead
+        of letting proposal=None silently downgrade the arm.
+        """
+        lifecycle = self._FakeLifecycle(launch_error=RuntimeError("no parent"))
+        proposal, meta = self._propose_strict(lifecycle)
+        self.assertEqual(proposal, core._PROPose_STRICT_ERROR)
+        self.assertEqual(meta["proposal_source"], "structured")
+        self.assertEqual(meta["subagent_fallback_reason"], "launch_failed")
+
+    def test_strict_on_no_lifecycle_errors(self):
+        """Strict on + no lifecycle: sentinel, not a quiet structured run."""
+        proposal, meta = self._propose_strict(None)
+        self.assertEqual(proposal, core._PROPose_STRICT_ERROR)
+        self.assertEqual(meta["subagent_fallback_reason"], "no_lifecycle")
+
+    def test_strict_on_successful_launch_unchanged(self):
+        """Strict on + successful launch: identical to today's behaviour."""
+        lifecycle = self._FakeLifecycle(
+            result=self._result(
+                summary=json.dumps(
+                    {
+                        "action": "create",
+                        "kind": "memory",
+                        "name": "endpoint-rule",
+                        "content": "Use the fallback endpoint.",
+                        "reason": "repeated 403",
+                        "expected_outcome": "no more retries",
+                    }
+                )
+            )
+        )
+        proposal, meta = self._propose_strict(lifecycle)
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal["action"], "create")
+        self.assertEqual(meta["proposal_source"], "subagent")
+        self.assertEqual(meta["subagent_api_calls"], 3)
+
+    def test_strict_on_refine_once_reports_error_not_downgrade(self):
+        """Full pass: strict + launch failure yields subagent_strict_error.
+
+        End-to-end through _refine_once: the structured path must never be
+        called (MockLlm would raise if propose() ran with no scripted
+        answer), the outcome is subagent_strict_error, and the fallback
+        reason lands in the journal.
+        """
+        lifecycle = self._FakeLifecycle(launch_error=RuntimeError("no parent"))
+        core._set_subagent_lifecycle_provider(lambda: lifecycle)
+        entry = FakeHost.entry_config()
+        entry["proposer_subagent_strict"] = True
+        entry["proposer_subagent_enabled"] = True
+        try:
+            llm = MockLlm()  # no scripted reply: any structured call fails loudly
+            result = core.refine_run(
+                llm, reason="strict probe", session_id="session"
+            )
+        finally:
+            entry.pop("proposer_subagent_strict", None)
+            entry.pop("proposer_subagent_enabled", None)
+            core._set_subagent_lifecycle_provider(None)
+        self.assertEqual(result["outcome"], "subagent_strict_error")
+        self.assertEqual(result["failure"], "subagent_strict")
+        self.assertIn("launch_failed", result["message"])
+        self.assertIn("launch_failed", result["llm_meta"].get("subagent_fallback_reason", ""))
+        self.assertFalse(result["llm_called"], "no structured LLM call may be made")
+
+    def test_strict_off_refine_once_keeps_fallback(self):
+        """Strict off: same failure still falls back to the structured path."""
+        lifecycle = self._FakeLifecycle(launch_error=RuntimeError("no parent"))
+        core._set_subagent_lifecycle_provider(lambda: lifecycle)
+        entry = FakeHost.entry_config()
+        entry["proposer_subagent_strict"] = False
+        entry["proposer_subagent_enabled"] = True
+        try:
+            llm = MockLlm({"action": "no_op", "reason": "structured fallback answer"})
+            result = core.refine_run(
+                llm, reason="fallback probe", session_id="session"
+            )
+        finally:
+            entry.pop("proposer_subagent_strict", None)
+            entry.pop("proposer_subagent_enabled", None)
+            core._set_subagent_lifecycle_provider(None)
+        self.assertEqual(result["llm_meta"].get("subagent_fallback_reason"), "launch_failed")
+        self.assertNotEqual(result.get("outcome"), "subagent_strict_error")
+
     def test_wait_timeout_cancels_and_falls_back(self):
         lifecycle = self._FakeLifecycle(timed_out=True)
         proposal, meta = self._propose(lifecycle)
