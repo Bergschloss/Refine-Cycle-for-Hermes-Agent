@@ -16073,7 +16073,7 @@ class SubagentProposerTests(unittest.TestCase):
         self.assertEqual(len(lifecycle.launch_calls), 1)
         request = lifecycle.launch_calls[0]
         self.assertEqual(request.allowed_toolsets, ("skills",))
-        self.assertIn("skill_manage", request.blocked_tools)
+        self.assertEqual(getattr(request, "blocked_tools", ()), ())
         self.assertEqual(request.role, "leaf")
         self.assertTrue(
             request.correlation_id.startswith(core._PROPOSER_CORRELATION_PREFIX)

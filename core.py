@@ -3017,8 +3017,7 @@ def _propose_with_subagent(
         class SubagentLaunchRequest:  # noqa: N801 - contract mirror
             __slots__ = (
                 "goal", "context", "role", "allowed_toolsets",
-                "blocked_tools", "correlation_id", "timeout_seconds",
-                "model", "model_provider",
+                "correlation_id", "timeout_seconds", "model", "model_provider",
             )
             def __init__(self, **kwargs):
                 for field in self.__slots__:
@@ -3047,8 +3046,10 @@ def _propose_with_subagent(
                 context=context,
                 role="leaf",
                 allowed_toolsets=("skills",),
-                blocked_tools=("skill_manage", "write_file", "edit", "patch",
-                               "terminal", "delegate_task"),
+                # blocked_tools must stay EMPTY: the host validator rejects
+                # per-tool blocking ("use allowed_toolsets. Hermes always
+                # blocks unsafe child tools."). skill_manage is denied to the
+                # child by the plugin-side pre_tool_call session guard.
                 correlation_id=_PROPOSER_CORRELATION_PREFIX + uuid.uuid4().hex[:12],
             )
         )
