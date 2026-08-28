@@ -16338,6 +16338,115 @@ class SubagentProposerTests(unittest.TestCase):
         self.assertEqual(len(FakeHost.actions), 0)
         self.assertEqual(journal.count_today_applied(), 0)
 
+    # --- Fix 1: applied prompt notes reach the proposer in BOTH arms ---
+
+    def test_notes_block_rendering_bounded_and_empty_safe(self):
+        """No notes -> empty block (byte-identical prompts); notes -> bounded."""
+        self.assertEqual(llm._render_notes_block([]), "")
+        notes = [
+            {"id": "a" * 12, "content": "When X happens, do Y instead."},
+            {"id": "b" * 12, "content": "When Z happens, skip the retry."},
+        ]
+        block = llm._render_notes_block(notes)
+        self.assertIn("APPLIED PROMPT NOTES", block)
+        self.assertIn("do Y instead", block)
+        # Bounded by prompt_notes_max_chars for the note lines themselves.
+        budget = config.prompt_notes_max_chars()
+        body = block.split("\n", 2)[2]
+        self.assertLessEqual(
+            sum(len(l) for l in body.strip().splitlines()), budget + 100
+        )
+        # Oversized lists clip instead of growing the block unboundedly.
+        many = [{"id": str(i) * 12, "content": f"When case {i} happens, act {i}."} for i in range(50)]
+        clipped = llm._render_notes_block(many)
+        self.assertIn("APPLIED PROMPT NOTES", clipped)
+        self.assertLess(len(clipped), budget * 3)
+
+    def test_active_prompt_notes_safe_applies_policy_and_caps(self):
+        """Only valid, enabled, in-scope notes reach the proposer context."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # journal.py binds journal_dir at import time (from config import
+            # journal_dir), so patch journal's own binding, not config's.
+            with patch.object(
+                journal, "journal_dir", lambda: Path(tmp), create=True
+            ):
+                # Empty store -> empty list.
+                self.assertEqual(core._active_prompt_notes_safe(), [])
+                # A valid global note and a session-scoped note for another
+                # session: only the in-scope one passes. (The loader treats an
+                # unsafe note as a poisoned store and returns None — policy is
+                # fail-closed at write time, so a bad note never lands there.)
+                safe_note = {
+                    "id": "aaaa1111bbbb",
+                    "content": "When a tool reports that a session does not exist, ask for clarification.",
+                    "scope": "global",
+                }
+                session_note = {
+                    "id": "cccc2222dddd",
+                    "content": "When the staging slice fails, retry from the journal marker.",
+                    "scope": "session",
+                    "session_id": "other-session-0000",
+                }
+                store_path = Path(tmp) / "prompt_notes.json"
+                store_path.write_text(json.dumps({"notes": [safe_note, session_note]}))
+                active = core._active_prompt_notes_safe()
+                self.assertEqual(len(active), 1)
+                self.assertEqual(active[0]["id"], "aaaa1111bbbb")
+
+    def test_propose_structured_includes_notes_in_instructions(self):
+        """active_notes must appear in the structured proposer prompt."""
+        notes = [{"id": "a" * 12, "content": "When dotnet is missing, prepend the SDK dir."}]
+        result = llm.propose(
+            llm=MockLlm(),
+            evidence_text="[tool] ERROR: dotnet not found",
+            existing_skills=[],
+            existing_memories=[],
+            active_notes=notes,
+        )
+        # The notes block renders into the instructions; propose() accepts the
+        # kwarg and keeps the no_op contract.
+        block = llm._render_notes_block(notes)
+        self.assertIn("prepend the SDK dir", block)
+        self.assertIn("APPLIED PROMPT NOTES", block)
+        self.assertEqual(result["action"], "no_op")
+
+    def test_subagent_context_includes_notes_block(self):
+        """The child context must contain the applied notes, like skills/memories."""
+        notes = [{"id": "b" * 12, "content": "When shell fails on G:/ paths, use Git Bash forms."}]
+        lifecycle = self._FakeLifecycle(
+            result=self._result(summary=json.dumps({
+                "action": "no_op", "reason": "note already covers it",
+                "evidence": ["prompt_note"],
+            }))
+        )
+        core._set_subagent_lifecycle_provider(lambda: lifecycle)
+        real_render = core._render_proposer_context
+        with patch.object(
+            core, "_active_prompt_notes_safe", return_value=notes
+        ), patch.object(
+            core, "_render_proposer_context", side_effect=real_render
+        ) as spy_render:
+            proposal, meta = core._propose_with_subagent(
+                MockLlm(),
+                evidence_text="[tool] ERROR: dotnet not recognized",
+                existing_skills=[],
+                existing_memories=[],
+                error_patterns=[{"fingerprint": "fp1", "count": 2, "sample": "x"}],
+                user_corrections=[],
+                unused_skills=[],
+                refinement_history=[],
+                run_context="reason",
+                reviewer_context="",
+                target={"provider": "p", "model": "m"},
+            )
+        # The renderer received the notes and rendered them into the child context.
+        self.assertTrue(spy_render.called)
+        self.assertEqual(spy_render.call_args.kwargs.get("active_notes"), notes)
+        # And the resulting launched context carries the block.
+        request = lifecycle.launch_calls[0]
+        self.assertIn("APPLIED PROMPT NOTES", request.context)
+        self.assertIn("Git Bash forms", request.context)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

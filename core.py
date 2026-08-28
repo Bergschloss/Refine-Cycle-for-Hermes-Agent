@@ -1483,6 +1483,56 @@ def _unused_skills_safe() -> List[str]:
         return []
 
 
+def _active_prompt_notes_safe() -> List[Dict[str, str]]:
+    """Return validated, injection-eligible prompt notes for proposer context.
+
+    Mirrors the host-side injection policy (_on_pre_llm_call): structural
+    safety, semantic injection policy, session scope, and the same config
+    caps. Bounded by design — the block can never exceed
+    ``prompt_notes_max_chars`` (default 600) — so adding it to the proposer
+    prompt cannot blow the context budget.
+    """
+    try:
+        if not config.prompt_notes_enabled():
+            return []
+        notes = journal.load_prompt_notes()
+    except Exception as exc:
+        logger.debug("Cannot read prompt notes for proposer: %s", scrub_text(str(exc)))
+        return []
+    if not notes:
+        return []
+    live_session, _ = resolve_session_id()
+    live_session = journal.normalize_prompt_note_session_id(live_session)
+    selected: List[Dict[str, str]] = []
+    for note in notes:
+        scope = note.get("scope", "global")
+        if scope == "session" and note.get("session_id") != live_session:
+            continue
+        content = scrub_text(note["content"]).strip()
+        if _stored_prompt_note_content_error(content):
+            continue
+        selected.append({"id": note["id"], "content": content})
+    return selected[-config.prompt_notes_max_count():]
+
+
+def _render_notes_overview(notes: List[Dict[str, str]]) -> str:
+    """Render active notes as a bounded untrusted block for the proposer."""
+    if not notes:
+        return "  (none)"
+    budget = config.prompt_notes_max_chars()
+    lines: List[str] = []
+    used = 0
+    for note in notes:
+        line = _llm._untrusted_json_record(
+            "prompt_note", note["content"], escape_tags=True
+        )
+        if used + len(line) > budget and lines:
+            break
+        lines.append("  " + line)
+        used += len(line)
+    return "\n".join(lines)
+
+
 def _reconcile_pending() -> List[Dict[str, Any]]:
     """Reconcile durable approval states and mirror transitions to the ledger."""
     changed = journal.reconcile()
@@ -2907,6 +2957,7 @@ def _render_proposer_context(
     refinement_history: List[Dict[str, Any]],
     run_context: str,
     reviewer_context: str,
+    active_notes: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Render the bounded, scrubbed context handed to the proposer subagent."""
     skills_list = _llm._render_overview(
@@ -2955,8 +3006,11 @@ def _render_proposer_context(
         if reviewer_context.strip()
         else "(none)"
     )
+    notes_block = _llm._render_notes_block(list(active_notes or []))
     return (
         "Ground the proposal in one repeated failure or explicit correction.\n\n"
+        "RULE: Never restate a policy already covered by an applied prompt note.\n"
+        "If a note below already covers the failure, answer no_op and cite the note.\n\n"
         "=== RUN REQUEST / PRIOR PASS CONTEXT (UNTRUSTED JSON) ===\n"
         f"{context_block}\n\n"
         "=== REVIEWER OUTPUT (UNTRUSTED JSON) ===\n"
@@ -2971,6 +3025,7 @@ def _render_proposer_context(
         f"{skills_list}\n\n"
         "=== EXISTING MEMORIES ===\n"
         f"{mems_list}\n"
+        f"{notes_block}"
         f"{unused_block}"
         f"{history_block}\n"
         "=== RECENT TRAJECTORY ===\n"
@@ -3051,6 +3106,7 @@ def _propose_with_subagent(
         refinement_history=refinement_history,
         run_context=run_context,
         reviewer_context=reviewer_context,
+        active_notes=_active_prompt_notes_safe(),
     )
     # The host caps goal at 16k and context at 32k characters. Both are built
     # from already-bounded inputs; clip defensively so a future renderer
@@ -3610,6 +3666,7 @@ def _refine_once(
                 reviewer_context=reviewer_context,
                 skill_content_loader=journal.read_skill_content,
                 target=_run_target,
+                active_notes=_active_prompt_notes_safe(),
             )
         # propose() resets its per-call metadata at the start of every outer
         # attempt. Snapshot immediately so retry costs remain attributable to

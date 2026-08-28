@@ -1163,6 +1163,32 @@ def _untrusted_json_record(
     return record.replace("<", "&lt;").replace(">", "&gt;") if escape_tags else record
 
 
+def _render_notes_block(notes: List[Dict[str, str]]) -> str:
+    """Render active prompt notes as a bounded block for the proposer prompt.
+
+    Empty list renders nothing (no header, zero chars) so a host without
+    notes keeps byte-identical prompts to the pre-notes behavior.
+    """
+    if not notes:
+        return ""
+    budget = config.prompt_notes_max_chars()
+    lines: List[str] = []
+    used = 0
+    for note in notes:
+        line = _untrusted_json_record(
+            "prompt_note", note.get("content", ""), escape_tags=True
+        )
+        if used + len(line) > budget and lines:
+            break
+        lines.append("  " + line)
+        used += len(line)
+    return (
+        "\n=== APPLIED PROMPT NOTES (already in force; do not restate) ===\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
+
 def _semantic_failure(reason: str, failure: str = "malformed") -> Dict[str, Any]:
     """Return an unusable model result without disguising it as a valid no-op."""
     return sanitize({"action": "no_op", "reason": reason, "failure": failure})
@@ -1616,6 +1642,7 @@ def propose(
     reviewer_context: str = "",
     skill_content_loader: Optional[Callable[[str], Optional[str]]] = None,
     target: Optional[Dict[str, str]] = None,
+    active_notes: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Propose one edit; skill patches are regenerated from safe full content."""
     _call_meta.value = {}
@@ -1695,8 +1722,11 @@ def propose(
         if reviewer_context.strip()
         else "(none)"
     )
+    notes_block = _render_notes_block(active_notes or [])
     instructions = (
         "Ground the proposal in one repeated failure or explicit correction.\n\n"
+        "RULE: Never restate a policy already covered by an applied prompt note.\n"
+        "If a note below already covers the failure, propose no_op and cite the note.\n\n"
         "=== RUN REQUEST / PRIOR PASS CONTEXT (UNTRUSTED JSON) ===\n"
         f"{context_block}\n\n"
         "=== REVIEWER OUTPUT (UNTRUSTED JSON) ===\n"
@@ -1711,6 +1741,7 @@ def propose(
         f"{skills_list}\n\n"
         "=== EXISTING MEMORIES ===\n"
         f"{mems_list}\n"
+        f"{notes_block}"
         f"{unused_block}"
         f"{history_block}\n"
         "=== RECENT TRAJECTORY ===\n"
