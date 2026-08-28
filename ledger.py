@@ -12,10 +12,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from . import journal
+    from . import config as _config
     from .config import journal_dir, state_db_path
     from .sanitization import scrub_text
 except ImportError:
     import journal  # type: ignore
+    import config as _config  # type: ignore
     from config import journal_dir, state_db_path  # noqa: F811
     from sanitization import scrub_text  # type: ignore
 
@@ -530,6 +532,7 @@ def audit(
                 # memory/prompt name in conversations is neither authoritative
                 # nor useful evidence, so keep that dimension unavailable.
                 uses, usage_scope = None, "unavailable"
+            horizon_days = _config.audit_recurrence_horizon_days()
             if fingerprint and patterns_available:
                 hit = by_fingerprint.get(fingerprint)
                 # Pattern exists but has no last_ts -> still active (recurred)
@@ -538,7 +541,26 @@ def audit(
                 else:
                     recurred = bool(hit and (hit.get("last_ts") or 0) > created)
 
-            if recurred is True:
+            # An empty observation window (the pattern table carries no
+            # post-edit rows at all, e.g. a restored or freshly rebuilt
+            # state.db) is not evidence of either recurrence or silence.
+            # Folding it into "unclear" hid WHY the verdict was unavailable;
+            # the operator cannot distinguish "too fresh to judge" from
+            # "the window itself is empty". Only matters when the edit's own
+            # fingerprint is the thing that could not be checked: without a
+            # fingerprint recurrence was never computable, so the empty
+            # window changes nothing for that row. Recurrence evidence still
+            # wins when the fingerprint DID reappear in some other window.
+            window_empty = patterns_available and not current_patterns
+            if window_empty:
+                # The False computed above came from an ABSENT table, not from
+                # a post-edit window that stayed quiet: an empty scan has no
+                # rows for any fingerprint, so "absent" means nothing. Treat
+                # recurrence as unmeasured, not as observed-silence.
+                recurred = None
+            if window_empty and recurred is None and bool(fingerprint):
+                verdict = "no recurrence window"
+            elif recurred is True:
                 verdict = "did not help"
             elif uses == 0 and age_days >= 14 and usage_scope == "since_exact":
                 # since_approx cannot prove unused or working: the DB fallback
@@ -551,7 +573,19 @@ def audit(
                 uses
                 and uses > 0
                 and usage_scope == "since_exact"
-                and (recurred is False or not fingerprint)
+                and (
+                    recurred is False
+                    # "No recurrence" only counts as evidence of success after
+                    # the measured quiet-gap horizon; before that, silence is
+                    # indistinguishable from a pause (median gap is minutes,
+                    # p95 is 2.17 days on the reference journal). A skill used
+                    # without its fingerprint returning before the horizon is
+                    # NOT yet "working" — it is too early.
+                    or (
+                        not fingerprint
+                        and age_days >= horizon_days
+                    )
+                )
             ):
                 verdict = "working"
             else:

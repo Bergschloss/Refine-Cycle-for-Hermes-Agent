@@ -660,6 +660,25 @@ def prompt_notes_max_chars() -> int:
     return get_int("prompt_notes_max_chars", 600, min_val=1)
 
 
+def audit_recurrence_horizon_days() -> int:
+    """Days of post-edit silence after which 'no recurrence' means something.
+
+    Measured, not guessed: across the reference install's journal, the median
+    inter-recurrence gap of a chronic error fingerprint is minutes and the 95th
+    percentile is 2.17 days; per-fingerprint maximum quiet gaps exceed 3 days
+    for only ~19% of chronic fingerprints. A failure absent for this long is
+    therefore more likely fixed than paused. Deliberately separate from
+    ``unused_skills``' 14-day age gate: an unused skill for 3 days is normal,
+    a chronic failure silent for 3 days is a signal. Different questions.
+    """
+    return get_int("audit_recurrence_horizon_days", 3, min_val=1)
+
+
+def prompt_notes_max_chars() -> int:
+    """Maximum characters for one complete rendered prompt-note block."""
+    return get_int("prompt_notes_max_chars", 600, min_val=1)
+
+
 def proposer_subagent_enabled() -> bool:
     """Whether refine may produce proposals through a read-only subagent.
 

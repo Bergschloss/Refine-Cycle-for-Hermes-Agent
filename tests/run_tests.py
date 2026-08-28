@@ -2742,7 +2742,12 @@ class RefineTests(unittest.TestCase):
         self.assertIn("unreliable", row["verdict"])
 
     def test_audit_does_not_flag_unchanged_skill_content(self):
-        """R9 §9: unchanged content is not flagged, and the normal verdict stands."""
+        """R9 §9: unchanged content is not flagged, and the verdict is honest.
+
+        "Not externally modified" is one fact; effectiveness is another. With
+        an empty pattern window the edit's recurrence was never measured, so
+        the row must not claim "working" — it names the missing window.
+        """
         name = "unchanged-skill"
         created = self.run_proposal(skill_proposal(name))
         self.assertTrue(created["success"])
@@ -2752,7 +2757,7 @@ class RefineTests(unittest.TestCase):
                 if r["name"] == name
             )
         self.assertFalse(row["externally_modified"])
-        self.assertEqual(row["verdict"], "working")
+        self.assertEqual(row["verdict"], "no recurrence window")
 
     def test_audit_does_not_flag_refines_own_later_patch(self):
         """R9 §9: refine patching its own skill again is not "external"."""
@@ -4275,10 +4280,11 @@ class RefineTests(unittest.TestCase):
             "action": "create", "pattern_fingerprint": "deadbeef1234",
         }
         FakeHost.usage_counts["old-skill"] = 4
-        ledger._save_stats({"old-skill": base})
+        ledger._save_stats({"old-skill": {**base, "updated_ts": created,
+                                          "outcome": "applied", "name": "old-skill"}})
         row = ledger.audit([], journal_entries=journal_entries)[0]
         self.assertEqual(row["usage_scope"], "all_time")
-        self.assertEqual(row["verdict"], "unclear")
+        self.assertEqual(row["verdict"], "no recurrence window")
 
         usage = sys.modules["tools.skill_usage"]
         original = usage.get_usage_count
@@ -4288,7 +4294,47 @@ class RefineTests(unittest.TestCase):
         finally:
             usage.get_usage_count = original
         self.assertEqual(row["usage_scope"], "since_exact")
-        self.assertEqual(row["verdict"], "working")
+        self.assertEqual(row["verdict"], "no recurrence window")
+
+    def test_ledger_post_edit_window_with_rows_yields_working(self):
+        """The supported-evidence path with a NON-empty window: measured."""
+        created = time.time() - 30 * 86400
+        content = skill_content("old-skill", "# Guidance")
+        FakeHost.add_skill("old-skill", content)
+        journal_entries = [{
+            "id": "abcdef123456", "ts": created, "outcome": "applied",
+            "proposal": {
+                "name": "old-skill", "kind": "skill", "action": "create",
+                "content": content,
+            },
+        }]
+        base = {
+            "created_ts": created, "updated_ts": created, "journal_id": "abcdef123456",
+            "kind": "skill", "action": "create", "pattern_fingerprint": "zz88qq77pp22",
+            "outcome": "applied",
+        }
+        ledger._save_stats({"old-skill": base})
+        usage = sys.modules["tools.skill_usage"]
+        original = usage.get_usage_count
+        usage.get_usage_count = lambda name, since_ts=None: 2
+        try:
+            # Non-empty window but the edit's own fingerprint absent from it:
+            # measured silence within a window that saw other patterns.
+            # Age 30d >> horizon -> working.
+            quiet = [{
+                "fingerprint": "zz88qq77pp77", "count": 1,
+                "first_ts": created - 86400, "last_ts": created - 7200,
+            }]
+            row = ledger.audit(quiet, journal_entries=journal_entries)[0]
+            self.assertEqual(row["usage_scope"], "since_exact")
+            self.assertEqual(row["verdict"], "working")
+            # The edit's fingerprint reappears after the edit -> did not help.
+            recurred = [{"fingerprint": "zz88qq77pp22", "count": 2,
+                         "first_ts": created - 86400, "last_ts": created + 3600}]
+            row = ledger.audit(recurred, journal_entries=journal_entries)[0]
+        finally:
+            usage.get_usage_count = original
+        self.assertEqual(row["verdict"], "did not help")
 
     def test_audit_requests_full_post_edit_period(self):
         created = time.time() - 100
@@ -12524,10 +12570,33 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "name": "no-fingerprint", "kind": "skill", "action": "create",
             "pattern_fingerprint": "", "outcome": "applied",
         }})
+        # Fingerprintless usage beyond the recurrence horizon counts as
+        # working: with no fingerprint there is no recurrence signal at all,
+        # so the quiet-gap horizon is the only guard, and 30 days of exact
+        # usage far exceeds the 3-day default.
+        # Fingerprintless usage beyond the recurrence horizon counts as
+        # working: with no fingerprint there is no recurrence signal at all,
+        # so the quiet-gap horizon is the only guard, and 30 days of exact
+        # usage far exceeds the 3-day default.
         with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
             row = ledger.audit([], journal_entries=journal_entries)[0]
         self.assertEqual(row["verdict"], "working")
         self.assertIsNone(row["pattern_recurred"])
+        # Fingerprintless usage INSIDE the horizon stays conservative: a
+        # chronic failure can pause for days (p95 gap 2.17d measured) without
+        # being fixed, so "working" must not fire on a fresh edit.
+        recent_ts = time.time() - 1 * 86400
+        ledger._save_stats({"no-fingerprint": {
+            "created_ts": recent_ts, "updated_ts": recent_ts, "journal_id": "no-fp",
+            "name": "no-fingerprint", "kind": "skill", "action": "create",
+            "pattern_fingerprint": "", "outcome": "applied",
+        }})
+        recent_entries = [{**journal_entries[0], "ts": recent_ts}]
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+            self.assertEqual(
+                ledger.audit([], journal_entries=recent_entries)[0]["verdict"],
+                "too early",
+            )
         with patch.object(ledger, "_count_uses_with_scope", return_value=(0, "since_exact")):
             self.assertNotEqual(
                 ledger.audit([], journal_entries=journal_entries)[0]["verdict"], "working"
@@ -12923,11 +12992,14 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         with patch.object(ledger, "_count_uses_with_scope", return_value=(3, "since_approx")):
             row = ledger.audit([], journal_entries=journal_entries)[0]
         self.assertEqual(row["uses"], 3)
-        self.assertEqual(row["verdict"], "unclear")
+        # since_approx cannot prove usage, and the empty pattern window cannot
+        # prove silence: both dimensions are unmeasurable -> no recurrence window.
+        self.assertEqual(row["verdict"], "no recurrence window")
         with patch.object(ledger, "_count_uses_with_scope", return_value=(0, "since_approx")):
             self.assertNotIn("approx-skill", ledger.unused_skills())
             self.assertEqual(
-                ledger.audit([], journal_entries=journal_entries)[0]["verdict"], "unclear"
+                ledger.audit([], journal_entries=journal_entries)[0]["verdict"],
+                "no recurrence window",
             )
 
     def test_auto_lock_skip_and_cleanup_failure_are_visible_in_status(self):
@@ -16369,6 +16441,71 @@ class SubagentProposerTests(unittest.TestCase):
         # A no_op writes nothing, consumes no budget.
         self.assertEqual(len(FakeHost.actions), 0)
         self.assertEqual(journal.count_today_applied(), 0)
+
+    # --- D1: empty recurrence window is its own verdict; horizon is measured ---
+
+    def test_audit_empty_pattern_window_is_distinct_state_for_fingerprinted_rows(self):
+        """patterns=[] + computable-recurrence row -> 'no recurrence window'.
+
+        A restored or rebuilt state.db leaves the audit with an empty pattern
+        table. That is not evidence the failure stopped, so the row must not
+        read 'working' or 'unclear' — the operator has to see that the
+        recurrence check itself could not run. Rows without a fingerprint are
+        exempt: recurrence was never computable for them, so an empty window
+        changes nothing.
+        """
+        created = time.time() - 10 * 86400
+        content_fp = skill_content("with-fp", "# Guidance")
+        FakeHost.add_skill("with-fp", content_fp)
+        entries = [{
+            "id": "fp-edit", "ts": created, "outcome": "applied",
+            "proposal": {"name": "with-fp", "kind": "skill", "action": "create",
+                         "content": content_fp},
+        }]
+        ledger._save_stats({"with-fp": {
+            "created_ts": created, "updated_ts": created, "journal_id": "fp-edit",
+            "name": "with-fp", "kind": "skill", "action": "create",
+            "pattern_fingerprint": "abc123def456", "outcome": "applied",
+        }})
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(2, "since_exact")):
+            row = ledger.audit([], journal_entries=entries)[0]
+        self.assertEqual(row["verdict"], "no recurrence window")
+        self.assertEqual(row.get("pattern_recurred"), None)
+
+    def test_recurrence_horizon_gates_working_verdict(self):
+        """Fingerprintless usage inside the horizon is NOT 'working' yet."""
+        name = "horizon-gated"
+        content = skill_content(name, "# Guidance")
+        FakeHost.add_skill(name, content)
+        old_ts = time.time() - 30 * 86400
+        recent_ts = time.time() - 1 * 86400
+        stats_old = {name: {
+            "created_ts": old_ts, "updated_ts": old_ts, "journal_id": "hg",
+            "name": name, "kind": "skill", "action": "create",
+            "pattern_fingerprint": "", "outcome": "applied",
+        }}
+        # 30 days old, in-use, no fingerprint -> silence beyond the horizon
+        # is the only evidence, and it has accumulated: working.
+        ledger._save_stats(dict(stats_old))
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+            row = ledger.audit([], journal_entries=[{
+                "id": "hg", "ts": old_ts, "outcome": "applied",
+                "proposal": {"name": name, "kind": "skill", "action": "create",
+                             "content": content},
+            }])[0]
+        self.assertEqual(row["verdict"], "working")
+        # 1 day old with the same usage: inside the 3-day horizon a chronic
+        # failure's silence is indistinguishable from a pause.
+        ledger._save_stats({name: dict(stats_old[name], created_ts=recent_ts,
+                                       updated_ts=recent_ts)})
+        recent_entries = [{
+            "id": "hg", "ts": recent_ts, "outcome": "applied",
+            "proposal": {"name": name, "kind": "skill", "action": "create",
+                         "content": content},
+        }]
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+            fresh_row = ledger.audit([], journal_entries=recent_entries)[0]
+        self.assertEqual(fresh_row["verdict"], "too early")
 
     # --- Fix 2: dedup history crosses explicit_session boundary safely ---
 

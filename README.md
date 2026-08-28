@@ -43,7 +43,7 @@ checks its own work:
 | **Window** | the current session | many sessions |
 | **Evidence** | the conversation as written | errors normalized to invariant shapes and fingerprinted, so `HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` count as one failure |
 | **Threshold** | qualitative judgement | a mechanical signal gate: recurrence count *and* distinct-session count |
-| **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning` |
+| **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning` — or names honestly why no verdict exists yet (`too early`, `no recurrence window`, `unreliable`) |
 | **Blast radius** | host policy | 3 edits/day, dedup window, cooldown, per-edit journal, per-edit rollback |
 
 The two are complementary, not alternatives. Hermes captures fresh experience;
@@ -570,6 +570,23 @@ alongside its observed result. Later edits of the same entry advance a version;
 version 3 or later is labelled `churning` only when the normal verdict would
 otherwise be `unclear`. Skills that remain unused are fed into later proposals
 as negative examples.
+
+Two honesty rules behind the verdicts:
+
+- **`no recurrence window`** — the pattern table had no post-edit rows at all
+  (typically after a restored or rebuilt `state.db`). An empty scan cannot
+  tell "the failure stopped" from "the evidence was lost", so the row names
+  the gap instead of drifting into `unclear` or claiming `working`.
+- **Recurrence horizon** (`refine.recurrence_horizon_days`, default **3**).
+  On the reference journal, the median gap between recurrences of a chronic
+  failure is minutes and the 95th percentile is 2.17 days — so silence shorter
+  than the horizon is indistinguishable from a pause. Fingerprintless rows
+  (no recurrence signal at all) earn `working` only after `age >= horizon`;
+  edits younger than that stay `too early`. Raise the key only if your
+  failures genuinely pause longer than that; the default is measured, not
+  guessed. This horizon governs recurrence verdicts only — `unused_skills`'
+  separate `min_age_days` (14) answers a different question ("has the skill
+  been left idle") and is unchanged.
 
 ### Agent-invocable tool
 
