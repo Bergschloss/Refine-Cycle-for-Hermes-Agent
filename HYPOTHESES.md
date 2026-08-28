@@ -12,7 +12,7 @@ Ranked by consequence if true.
 (classification reads the raw row) and `0e12ca0` (the session budget is spent on failing
 sessions), suite 756 OK, both measured against a live database before and after. Their
 sections below are kept as written, because the reasoning is the part worth reusing. H3 is
-open and unfixed. H4 and H5 were probed and cleared.
+open; H3 confirmed by probe on this repo and FIXED (4701f36). H4 CLEARED on the desktop host but CONFIRMED on the server (garbage timestamps in the live DB); H5 re-measured on the server: 6 of 316 sessions carry >=1 correction, 3 with no tool error — single-event exposure real but small.
 
 Everything below was measured on a **live desktop install** (`%LOCALAPPDATA%\hermes\state.db`,
 2694 active tool rows, 170 sessions, 58 journal entries, 5 applied edits) using read-only
