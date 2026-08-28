@@ -172,9 +172,9 @@ _HTTP_STATUS_REFERENCE = re.compile(
     \b(\d{3})(?=\s+(?:errors?|RegionError|Unauthorized|Forbidden|NotFound|BadRequest|Timeout|error)\b)
     """
 )
-_OVERRIDE_INTENT = re.compile(
-    r"(?i)\b(?:ignore|disregard|override|bypass|skip|forget|regardless of|instead of)\b"
-)
+# Narrow pattern for skill/memory bodies: matches imperative override phrasing
+# that targets guidance/instructions/prompt (not benign uses like "skip the cache"
+# or "instead of retrying").
 # What makes a mention of guidance a reference to *durable context* rather than to
 # some ordinary document: an authority word, or a position word placed before or
 # after the noun.
@@ -229,7 +229,7 @@ _CONTEXT_PHRASE_GAP = (
 )
 # Narrow pattern for skill/memory bodies: matches imperative override phrasing
 # that targets guidance/instructions/prompt (not benign uses like "skip the cache"
-# or "instead of retrying"). Wider _OVERRIDE_INTENT is too broad for Markdown bodies.
+# or "instead of retrying"). A wide override-intent pattern is too broad for Markdown bodies.
 _CONTEXT_OVERRIDE_INTENT = re.compile(
     r"(?i)(?:"
     r"\b(?:ignore|disregard|override|bypass|forget|neglect|dismiss|supersede"
@@ -627,11 +627,6 @@ def resolve_session_id(explicit: str = "") -> Tuple[str, str]:
     if hook_id:
         return hook_id, "hook"
     return "", "unknown"
-
-
-def scrub_proposal(proposal: Dict[str, Any]) -> Dict[str, Any]:
-    """Compatibility wrapper for recursive shared sanitation."""
-    return sanitize(proposal)
 
 
 # ── trajectory collection ──────────────────────────────────────────────────
@@ -2055,23 +2050,6 @@ def _skill_or_memory_injection_error(content: str) -> Optional[str]:
         if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
             return "Content contains control or non-character codepoints"
     return None
-
-
-def _resource_reference_kind(text: str) -> Optional[str]:
-    """Classify a durable-context resource reference without rewriting it.
-
-    NFKC is inspection-only: persisted memory and prompt-note bytes stay intact,
-    while compatibility forms such as full-width URL punctuation cannot bypass the
-    same resource policy applied to their ASCII equivalents.
-    """
-    inspected = unicodedata.normalize("NFKC", text)
-    if not (_RESOURCE_REFERENCE.search(inspected) or _has_host_reference(inspected)):
-        return None
-    if _RESOURCE_NETWORK_OR_SHELL.search(inspected):
-        return "network_or_shell"
-    if _has_host_reference(inspected):
-        return "host"
-    return "path_or_environment"
 
 
 def _memory_resource_error(content: str) -> Optional[str]:

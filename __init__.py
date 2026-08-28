@@ -220,8 +220,6 @@ def _start_auto_refine(
         logger.exception("refine auto thread could not start")
 
 
-_ACTIVE_BLOCK_RULES: list = []
-
 _BLOCK_RULES: list = []  # list of dicts: {type, target, action, ...}
 
 def _update_block_rules(notes):
