@@ -15,6 +15,11 @@ model_override.json
 backups/
 *.bak
 
+# Trace log + local state: written by emit_trace/tests in the live tree.
+# Trajectory fragments must never ship (Privacy section of AGENTS.md).
+logs/
+state.db
+
 # Secrets / local config
 .env
 .env.*

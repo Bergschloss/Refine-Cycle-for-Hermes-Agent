@@ -14,6 +14,14 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
+try:
+    from .sanitization import scrub_text  # package import (host, suite pkg)
+except ImportError:  # bare-module import (tests, offline runs)
+    try:
+        from sanitization import scrub_text  # type: ignore
+    except ImportError:
+        scrub_text = None  # emission stays up; boundary degrades to identity
+
 logger = logging.getLogger(__name__)
 
 # Plugin-owned trace log. The host's agent.log handler runs at INFO (the
@@ -111,24 +119,49 @@ def finalize_trace(trace: Dict[str, Any], *, result_code: str, output_tokens: Op
     return trace
 
 
+def _boundary(value: Any) -> Any:
+    """Disk-boundary scrub for one emitted trace value.
+
+    Every string interpolated into the trace log line passes through
+    scrub_text here — at emission, the last point before disk — so a future
+    field added to build_trace or to this format string cannot bypass
+    sanitization by construction. scrub_text's own grammar only redacts
+    credential shapes (floor ~6 chars for unquoted values); ordinary short
+    codes like 'ok' / 'none' pass through unchanged. Non-strings (ints,
+    None) pass untouched. When scrub_text is unavailable the value passes
+    through unchanged: the log must come out, not vanish (never-raise
+    logging rule), and the missing boundary is the caller's known state.
+    """
+    if scrub_text is None or not isinstance(value, str):
+        return value
+    try:
+        return scrub_text(value)
+    except Exception:
+        return value
+
+
 def emit_trace(trace: Dict[str, Any], *, journal_append=None) -> None:
     """Emit trace to the plugin-owned trace log (never the host's agent.log,
     never the mutation journal). Failure is visible via warning log, never
-    silently swallowed."""
+    silently swallowed. Every value reaching the log line passes the
+    sanitization boundary HERE — at the last point before disk — so a new
+    field in build_trace or a new argument in this format string inherits
+    the boundary instead of bypassing it."""
     try:
         _ensure_trace_handler()
         logger.debug(
-            "refine_trace trace_id=%s route_state=%s result=%s session=%s",
-            (trace.get("trace_id") or "?")[:8],
-            trace.get("route_state"),
-            trace.get("result_code"),
-            trace.get("session_id", "?")[:8],
+            "refine_trace trace_id=%s route_state=%s result=%s session=%s source=%s",
+            _boundary((trace.get("trace_id") or "?")[:8]),
+            _boundary(trace.get("route_state")),
+            _boundary(trace.get("result_code")),
+            _boundary((trace.get("session_id", "?") or "?")[:8]),
+            _boundary(trace.get("source")),
         )
         # Trace emissions never write to mutation journal (invariant protection)
         if journal_append is not None:
             logger.warning("Trace emission: journal_append ignored (trace stays out of mutation journal)")
     except Exception as exc:
-        logger.warning("Trace emission failure: %s", str(exc)[:200])
+        logger.warning("Trace emission failure: %s", _boundary(str(exc)[:200]) if scrub_text else str(exc)[:200])
 
 
 def validate_trace_invariants(events: list) -> str:

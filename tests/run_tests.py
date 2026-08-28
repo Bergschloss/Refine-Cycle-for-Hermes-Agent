@@ -16122,6 +16122,114 @@ class TraceContractTests(unittest.TestCase):
                 self.fail(f"Potential credential in trace field {k}: {v[:30]}")
 
 
+class TraceBoundaryScrubTests(unittest.TestCase):
+    """The disk-boundary scrub (MEDIUM-LOW, second-pass finding): every value
+    interpolated into the trace log line passes scrub_text at emit_trace —
+    the last point before disk — so a future field cannot bypass it. Both
+    directions verified: credential-shaped values are redacted; ordinary
+    short codes survive untouched. Emission degrades to identity (log still
+    comes out) when scrub_text is unavailable."""
+
+    @staticmethod
+    def _isolated_trace():
+        """Fresh trace module + temp hermes_home; restores handlers after.
+
+        Like TraceFileSinkTests: the SuiteDiscoveryContractTests re-import
+        replaces sys.modules['hermes_constants'] with a copy rooted at
+        Path('.'), so get_hermes_home must be rebound to OUR temp root for
+        the duration and restored afterwards."""
+        import logging as _logging
+        import sys as _sys
+        import tempfile as _tempfile
+        import trace as _trace_mod
+
+        td = Path(tempfile.mkdtemp(prefix="tracebnd"))
+        old_root = FakeHost.root
+        FakeHost.reset(td)
+        _hc = _sys.modules.get("hermes_constants")
+        _old_get = getattr(_hc, "get_hermes_home", None)
+        if _hc is not None:
+            _hc.get_hermes_home = lambda: str(td)
+        return _trace_mod, td, old_root, _hc, _old_get
+
+    @staticmethod
+    def _cleanup(_trace_mod, old_root, _hc=None, _old_get=None):
+        import logging as _logging
+        if _hc is not None and _old_get is not None:
+            _hc.get_hermes_home = _old_get
+        FakeHost.reset(old_root)
+        for h in list(_trace_mod.logger.handlers):
+            h.close()
+            _trace_mod.logger.removeHandler(h)
+        _trace_mod._trace_handler = None
+        _trace_mod.logger.setLevel(_logging.NOTSET)
+        _trace_mod.logger.propagate = True
+
+    def _last_line(self, td: Path) -> str:
+        log_file = td / "logs" / "refine-trace.log"
+        self.assertTrue(log_file.exists())
+        lines = [l for l in log_file.read_text(encoding="utf-8").splitlines()
+                 if "refine_trace" in l]
+        self.assertTrue(lines)
+        return lines[-1]
+
+    def test_secret_shaped_field_values_never_reach_the_log_raw(self):
+        """Caller-smuggled credentials in route_state/result_code/source are
+        redacted at the emission boundary; the raw shapes stay off disk."""
+        import trace as _trace_mod
+        mod, td, old_root, _hc, _old_get = self._isolated_trace()
+        try:
+            t = mod.build_trace(
+                session_id="sess_9876543210",
+                source="api_key=AKIAIOSFODNN7EXAMPLE",
+                operation="op",
+                route_state="sk-probe0001112223334444555",
+            )
+            mod.finalize_trace(t, result_code="token=ghp_ABCDEFGHIJKLMNOP12345678")
+            mod.emit_trace(t)
+            line = self._last_line(td)
+        finally:
+            self._cleanup(mod, old_root)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", line)
+        self.assertNotIn("ghp_ABCDEFGHIJKLMNOP12345678", line)
+        self.assertNotIn("sk-probe0001112223334444555", line)
+        self.assertIn("[REDACTED]", line)
+
+    def test_clean_values_and_short_codes_pass_through_unmangled(self):
+        """route_state/result/source telemetry must survive the boundary."""
+        import trace as _trace_mod
+        mod, td, old_root, _hc, _old_get = self._isolated_trace()
+        try:
+            t = mod.build_trace(
+                session_id="s12345678", source="tool",
+                operation="refine_run", route_state="invocation_bound")
+            mod.finalize_trace(t, result_code="ok")
+            mod.emit_trace(t)
+            line = self._last_line(td)
+        finally:
+            self._cleanup(mod, old_root, _hc, _old_get)
+        self.assertIn("route_state=invocation_bound", line)
+        self.assertIn("result=ok", line)
+        self.assertIn("source=tool", line)
+
+    def test_emission_survives_scrub_text_being_unavailable(self):
+        """The log must come out even when the boundary cannot scrub."""
+        import trace as _trace_mod
+        mod, td, old_root, _hc, _old_get = self._isolated_trace()
+        try:
+            with patch.object(mod, "scrub_text", None):
+                t = mod.build_trace(
+                    session_id="s99999999", source="tool",
+                    operation="op", route_state="bound")
+                mod.finalize_trace(t, result_code="ok")
+                mod.emit_trace(t)
+            line = self._last_line(td)
+        finally:
+            self._cleanup(mod, old_root, _hc, _old_get)
+        self.assertIn("route_state=bound", line)
+        self.assertIn("result=ok", line)
+
+
 def _working_bash() -> str:
     """Return a bash that actually runs, or "" so these tests skip.
 
