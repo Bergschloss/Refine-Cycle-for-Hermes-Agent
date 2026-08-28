@@ -1239,9 +1239,23 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         corrections: List[Dict[str, Any]] = []
         error_items: List[Dict[str, Any]] = []
         for row in failure_rows:
-            content = scrub_text(str(row["content"] or ""))
+            # Classify the raw row, scrub everything that is kept. scrub_text is
+            # not JSON-transparent: it replaces an unquoted value with the bare
+            # token ``[REDACTED]``, which is not a JSON scalar, so a payload
+            # carrying a numeric credential-shaped field (``"session_id": 918273645``)
+            # stops parsing and ``_structured_error_status`` loses its verdict --
+            # leaving the decision to the head/tail markers, which is the
+            # mechanism that once counted 479 successes as failures. Measured on a
+            # live install: 27 of 305 JSON tool rows stop parsing after scrubbing,
+            # 29 lose their structured verdict, and a ``{"success": false}`` row
+            # then reads as a success. Only the bool leaves this boundary, so
+            # invariant 4 is unchanged -- no raw string is stored, rendered or
+            # sent. Verified on the same corpus: classifying raw instead of
+            # scrubbed flipped 0 of 2694 rows in either direction.
+            raw_content = str(row["content"] or "")
+            content = scrub_text(raw_content)
             tool_name = _one_line(scrub_text(str(row["tool_name"] or "")))[:120]
-            if not _is_error_content(content, tool_name=tool_name):
+            if not _is_error_content(raw_content, tool_name=tool_name):
                 continue
             bounded = (
                 content
@@ -1357,7 +1371,11 @@ def collect_cross_session_patterns(
             nonlocal rows_seen, cap_reached
             for row in cursor:
                 rows_seen += 1
-                content = scrub_text(str(row["content"] or ""))
+                # Classified raw, kept scrubbed -- see the same boundary in
+                # ``collect_evidence`` for why the scrubber cannot be trusted to
+                # leave a JSON payload parseable. Only the bool leaves here.
+                raw_content = str(row["content"] or "")
+                content = scrub_text(raw_content)
                 # The session budget is spent on sessions that carry a failure, not
                 # on the newest sessions. Rows arrive newest-first, so admitting a
                 # session on its first row of ANY kind gave all 25 slots to recent
@@ -1371,7 +1389,7 @@ def collect_cross_session_patterns(
                 # `_is_error_content` per scanned row once the cap is full; the
                 # audit path (max_sessions=None) already pays that on every row.
                 if not _is_error_content(
-                    content, tool_name=str(row["tool_name"] or "")
+                    raw_content, tool_name=str(row["tool_name"] or "")
                 ):
                     continue
                 sid = scrub_text(str(row["session_id"] or ""))

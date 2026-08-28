@@ -12770,6 +12770,43 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             core.collect_cross_session_patterns()
         self.assertIn("row limit reached", "\n".join(logs.output).lower())
 
+    def test_error_classification_survives_a_scrub_that_breaks_json(self):
+        """A real failure must stay a failure when the scrubber invalidates it.
+
+        ``scrub_text`` replaces an unquoted value with the bare token
+        ``[REDACTED]``, which is not a JSON scalar, so the scrubbed payload no
+        longer parses and ``_structured_error_status`` returns None. Measured on
+        a live install: 27 of 305 JSON tool rows stop parsing after scrubbing.
+        """
+        payload = '{"success": false, "session_id": 918273645, "detail": "upstream refused"}'
+        self.assertIsNotNone(core._structured_error_status(payload))
+        self.assertIsNone(core._structured_error_status(sanitization.scrub_text(payload)))
+
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", payload, "http", now - 2, 1),
+            ("session", "tool", payload, "http", now - 1, 1),
+        ])
+        evidence = core.collect_evidence("session")
+        self.assertEqual(evidence["error_count"], 2)
+        # Classified raw, kept scrubbed: the digits must not survive anywhere.
+        rendered = json.dumps(evidence)
+        self.assertNotIn("918273645", rendered)
+        self.assertIn("[REDACTED]", rendered)
+
+        found = core.collect_cross_session_patterns(days=7)
+        self.assertEqual(sum(item["count"] for item in found), 2)
+        self.assertNotIn("918273645", json.dumps(found))
+
+    def test_scrub_broken_json_success_is_still_not_an_error(self):
+        """The other direction: a success carrying error words stays a success."""
+        payload = '{"success": true, "tokens": 132455, "matches": ["def handle_error(x):"]}'
+        self.assertIsNone(core._structured_error_status(sanitization.scrub_text(payload)))
+        now = time.time()
+        FakeHost.make_db([("session", "tool", payload, "grep", now - 1, 1)])
+        self.assertEqual(core.collect_evidence("session")["error_count"], 0)
+        self.assertEqual(core.collect_cross_session_patterns(days=7), [])
+
     def test_cross_session_budget_is_spent_on_failing_sessions(self):
         """The newest sessions must not consume the session budget.
 
