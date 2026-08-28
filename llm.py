@@ -412,12 +412,15 @@ PROMPT_NOTE_ACTION_EXAMPLES = (
     "check the relevant tests before acting",
     "always include both ‘path’ and ‘content’ fields",
     "always include both path and content fields",
+    "always include both required fields: path and content",
     "ask before retrying a third time",
     "check timing assumptions before rerunning",
     "mention which sections were skipped",
     "include the required fields",
     "include the required parameters",
     "provide the missing fields",
+    "confirm it's clear, concise, and accurate",
+    "stop retrying and ask for clarification",
 )
 # What the model is shown is exactly what the validator accepts.
 #

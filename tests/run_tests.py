@@ -10639,6 +10639,60 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                     "The prompt teaches an action form the validator rejects.",
                 )
 
+    def test_the_validator_accepts_no_form_the_prompt_never_teaches(self):
+        """Every top-level branch of the validator regex is taught verbatim.
+
+        The closed list lives twice: PROMPT_NOTE_ACTION_EXAMPLES (what the
+        model sees) and _PROMPT_NOTE_SAFE_ACTION (what the validator
+        fullmatches), and neither derives from the other. Mutation testing
+        proved both existing directions blind to one drift: widening the
+        validator with a new branch passed every direction -- the model is
+        then left to invent a form nobody showed it. This test parses the
+        regex source out of core.py, compiles each top-level '|' branch on
+        its own, and requires at least one shown example to match it. A
+        branch with no example is a form the validator accepts that the
+        prompt never teaches.
+        """
+        import pathlib as _pathlib
+        import re as _re
+
+        source = _pathlib.Path(core.__file__).read_text()
+        start = source.index("_PROMPT_NOTE_SAFE_ACTION = re.compile(")
+        opening = source.index('"""', start)
+        finish = source.index('"""', opening + 3)
+        text = source[opening + 3 : finish].strip()
+        text = _re.sub(r"^\(\?ix\)\s*", "", text)
+        text = text.replace("{{", "{").replace("}}", "}")
+        text = text.rstrip()
+        if text.endswith(")\\.?"):
+            text = text[: -len(")\\.?")]
+        text = text.rstrip()
+        while text.count("(") < text.count(")"):
+            text = text[:-1].rstrip()
+        parts = _re.split(r"\n        \| ", text)
+        self.assertGreaterEqual(
+            len(parts), 20, "regex structure changed; re-derive this test")
+        for idx, branch in enumerate(parts):
+            branch = branch.replace(
+                "{_PROMPT_NOTE_SAFE_TARGET}", core._PROMPT_NOTE_SAFE_TARGET
+            ).replace(
+                "{_PROMPT_NOTE_SAFE_SOURCE}", core._PROMPT_NOTE_SAFE_SOURCE
+            )
+            with self.subTest(branch=idx):
+                if idx == 0 and branch.startswith("(?:"):
+                    # the first part still carries the outer-group opener
+                    branch = branch[3:].strip()
+                pat = _re.compile("(?ix)^(?:" + branch + r")\.?$")
+                covered = [
+                    e for e in llm.PROMPT_NOTE_ACTION_EXAMPLES
+                    if pat.fullmatch(e)
+                ]
+                self.assertTrue(
+                    covered,
+                    "Validator branch %d accepts a form the prompt never "
+                    "teaches: %s" % (idx, branch[:60]),
+                )
+
     def test_the_prompt_says_the_action_list_is_closed(self):
         """A closed list described as examples is what produced the live failures.
 
