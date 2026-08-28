@@ -222,19 +222,106 @@ def _start_auto_refine(
 
 _ACTIVE_BLOCK_RULES: list = []
 
+_BLOCK_RULES: list = []  # list of dicts: {type, target, action, ...}
+
 def _update_block_rules(notes):
-    """Parse prompt-note 'When' clauses into active block rules."""
-    global _ACTIVE_BLOCK_RULES
+    """Parse prompt-notes into structured block rules."""
+    global _BLOCK_RULES
     rules = []
     for note in (notes or []):
         content = note.get("content", "")
-        parts = content.split(", ", 1)
-        if len(parts) == 2:
-            cond = parts[0]
-            if cond.lower().startswith("when "):
-                cond = cond[5:]
-            rules.append((cond.lower(), parts[1].rstrip(".")))
-    _ACTIVE_BLOCK_RULES = rules
+        rule = _parse_prompt_note_rule(content)
+        if rule:
+            rules.append(rule)
+    _BLOCK_RULES = rules
+
+
+def _parse_prompt_note_rule(content):
+    """Extract a structured block rule from a prompt-note string."""
+    parts = content.split(", ", 1)
+    if len(parts) < 2:
+        return None
+    action_text = parts[1].rstrip(".")
+    import re
+
+    # --- Reroute directive: "use X instead of Y" / "prefer X over Y" ---
+    m = re.search(
+        r"\b(?:use|try|run|execute|call)\s+(.+?)\s+"
+        r"(?:instead\s+of|rather\s+than|over)\s+(.+?)\s*$",
+        action_text, re.I
+    )
+    if m:
+        alternative = m.group(1).strip()
+        target = m.group(2).strip()
+        # Normalize target: strip "the", trailing dots, parentheticals
+        target = re.sub(r"\s*\(.*?\)", "", target).strip(" .")
+        target = re.sub(r"^(?:the|a|an)\s+", "", target, flags=re.I).lower()
+        return {
+            "type": "block_binary" if _looks_like_cli(target) else "block_tool",
+            "target": target,
+            "action": action_text,
+        }
+
+    # --- "use X instead" (no "of") --- implied target from condition ---
+    m = re.search(r"\buse\s+(.+?)\s+instead\s*\.?\s*$", action_text, re.I)
+    if m:
+        # Target is whatever the condition describes
+        cond = parts[0].lower()
+        if cond.startswith("when "):
+            cond = cond[5:]
+        return _rule_from_condition(cond, action_text)
+
+    # --- Param rule: "always include both 'A' and 'B' fields" ---
+    m = re.search(
+        r"(?:always\s+)?include\s+(?:both\s+)?['\u2018]([^'\u2018\u2019]+)['\u2019]"
+        r"\s+and\s+['\u2018]([^'\u2018\u2019]+)['\u2019]\s+fields?",
+        action_text, re.I
+    )
+    if m:
+        cond = parts[0].lower()
+        if cond.startswith("when "):
+            cond = cond[5:]
+        # Extract tool name from condition
+        tool = cond.split("calling ")[-1].split(",")[0].strip()
+        return {
+            "type": "require_fields",
+            "tool": tool,
+            "fields": [m.group(1), m.group(2)],
+            "action": action_text,
+        }
+
+    # --- Fallback: treat condition words as target keywords ---
+    cond = parts[0].lower()
+    if cond.startswith("when "):
+        cond = cond[5:]
+    return _rule_from_condition(cond, action_text)
+
+
+def _rule_from_condition(cond, action_text):
+    """Build a rule from a descriptive condition string."""
+    import re
+    # Extract distinctive nouns that look like tool/command names
+    words = [w for w in re.findall(r"[a-z][a-z0-9._-]+", cond)]
+    # Filter to words that look like CLI commands or tool names
+    candidates = [w for w in words if _looks_like_cli(w) or _looks_like_tool(w)]
+    if candidates:
+        target = candidates[-1]  # last tool-like word is usually the target
+        return {
+            "type": "block_binary" if _looks_like_cli(target) else "block_tool",
+            "target": target,
+            "action": action_text,
+        }
+    return None
+
+
+def _looks_like_cli(word):
+    """Whether a word looks like a CLI command name."""
+    return bool(re.match(r"^[a-z][a-z0-9_-]*$", word)) and len(word) <= 20
+
+
+def _looks_like_tool(word):
+    """Whether a word looks like a tool/function name."""
+    return bool(re.match(r"^[a-z_][a-z0-9_]+$", word))
 
 
 def _on_pre_tool_call(
@@ -242,47 +329,78 @@ def _on_pre_tool_call(
     args: Any = None,
     **_: Any,
 ) -> Optional[Dict[str, str]]:
-    """Block tool calls that match a persisted prompt-note condition."""
-    if tool_name != "terminal":
-        return None
-    cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
-    for condition, action in _ACTIVE_BLOCK_RULES:
-        if not condition:
+    """Block tool calls that match a persisted prompt-note rule."""
+    import re, shlex
+
+    for rule in _BLOCK_RULES:
+        rt = rule.get("type", "")
+        target = rule.get("target", "")
+
+        # --- Block a specific CLI binary ---
+        if rt == "block_binary" and tool_name == "terminal":
+            cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
+            binary = _extract_binary(cmd)
+            if binary and _binary_matches(binary, target):
+                return {"action": "block", "message": rule["action"]}
+
+        # --- Block a specific tool name ---
+        if rt == "block_tool":
+            if tool_name == target or target in tool_name:
+                return {"action": "block", "message": rule["action"]}
+
+        # --- Require specific fields ---
+        if rt == "require_fields":
+            if tool_name == rule.get("tool", ""):
+                if isinstance(args, dict):
+                    missing = [f for f in rule.get("fields", []) if f not in args]
+                    if missing:
+                        return {
+                            "action": "block",
+                            "message": f"Missing required fields: {', '.join(missing)}. "
+                                       f"{rule['action']}",
+                        }
+
+    return None
+
+
+def _extract_binary(cmd):
+    """Extract the executable name from a shell command string."""
+    import re, shlex
+    # Split on chain operators to get individual commands
+    for segment in re.split(r"[;&|]{1,2}", cmd):
+        segment = segment.strip()
+        if not segment:
             continue
-        # Match condition keywords against the command's executable and first
-        # arguments — not arbitrary text in commit messages or comments.
-        tokens = []
-        for token in cmd.lower().split():
-            token = token.rstrip(";")
-            if token in ("cd", "echo", "export", "set", "unset", "pwd", "ls", "cat"):
-                continue
-            if token.startswith("-"):
-                continue
-            if re.match(r"^[a-z][a-z0-9._-]*$", token):
-                tokens.append(token)
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
         if not tokens:
             continue
-        _STOP = frozenset({"with","the","and","for","from","that","this","your",
-                           "not","but","are","was","has","had","can","will","have","when"})
-        # Extract tool-like words from the condition: non-stop words that are
-        # NOT activity descriptors (ending in -ing). "building with make" →
-        # keep "make", skip "building".
-        words = []
-        for w in condition.split():
-            if w in _STOP or len(w) <= 2 or w.endswith("ing"):
-                continue
-            stem = w.removesuffix("ed").removesuffix("s")
-            if len(stem) >= 2:
-                words.append(stem)
-        if words:
-            matched = True
-            for stem in words:
-                if not any(stem in t for t in tokens):
-                    matched = False
-                    break
-            if matched:
-                return {"action": "block", "message": action}
+        binary = tokens[0]
+        # Strip path, keep basename
+        binary = binary.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        # Strip .exe suffix
+        if binary.lower().endswith(".exe"):
+            binary = binary[:-4]
+        return binary.lower()
     return None
+
+
+def _binary_matches(binary, target):
+    """Check if binary matches a target using word-boundary rules."""
+    # Exact match
+    if binary == target:
+        return True
+    # cmake should NOT match make
+    if binary != target and target in binary:
+        # Only match if target is at a word boundary
+        prefix = binary[:binary.index(target)]
+        suffix = binary[binary.index(target) + len(target):]
+        if prefix and prefix[-1].isalpha():
+            return False  # "cmake" -> "c" is alpha before "make"
+        return True
+    return False
 
 
 def _on_pre_llm_call(**kwargs) -> Optional[dict]:
