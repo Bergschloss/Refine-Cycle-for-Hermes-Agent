@@ -9181,6 +9181,64 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn("No invocation-bound host LLM", text)
         self.assertIn("blockers: none — automatic refinement is active", text)
 
+    def test_status_reports_route_present_and_missing_both_ways(self):
+        """Phase B: /refine status must say whether the invocation-route core
+        patch is on this host. Both directions: a patched host sees
+        'route: present'; an unpatched host sees the MISSING line with the
+        install.sh fix hint; an import failure reports 'unknown', never a
+        guessed present/missing."""
+        fake_host = types.ModuleType("hermes_cli.plugins")
+        fake_host.plugin_invocation_scope = lambda *a, **k: None
+        saved = {k: sys.modules.get(k) for k in ("hermes_cli", "hermes_cli.plugins")}
+        sys.modules["hermes_cli"] = types.SimpleNamespace(plugins=fake_host)
+        sys.modules["hermes_cli.plugins"] = fake_host
+
+        def _fresh_init():
+            spec = importlib.util.spec_from_file_location(
+                "refine_plugin_init", ROOT / "__init__.py")
+            assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            sys.modules["refine_plugin_init"] = module
+            return module
+
+        try:
+            plugin_init = _fresh_init()
+            status = core.refine_status()
+            self.assertIs(status["route_present"], True)
+            text = plugin_init._handle_refine_command("status")
+            self.assertIn("route: present", text)
+            self.assertNotIn("route: MISSING", text)
+
+            # marker removed -> the module no longer HAS the symbol
+            if hasattr(fake_host, "plugin_invocation_scope"):
+                del fake_host.plugin_invocation_scope
+            status = core.refine_status()
+            self.assertIs(status["route_present"], False)
+            text = plugin_init._handle_refine_command("status")
+            self.assertIn("route: MISSING", text)
+            self.assertIn("install.sh", text)
+
+            # import failure -> unknown, honestly
+            # import failure -> unknown, honestly
+            with patch.dict(sys.modules,
+                            {"hermes_cli": None, "hermes_cli.plugins": None}):
+                status = core.refine_status()
+                self.assertIsNone(status["route_present"])
+                text = plugin_init._handle_refine_command("status")
+            self.assertIsNone(status["route_present"])
+            self.assertIn("route: unknown", text)
+        finally:
+            for name in ("hermes_cli", "hermes_cli.plugins"):
+                if saved.get(name) is not None:
+                    sys.modules[name] = saved[name]
+                else:
+                    sys.modules.pop(name, None)
+            plugin_init = _fresh_init()
+        # sanity after restore: the probe sees whatever the real host has
+        status = core.refine_status()
+        self.assertIn(status["route_present"], (True, False, None))
+
     def test_unreadable_config_keeps_auto_off_and_says_so(self):
         # An unreadable config must not resurrect analysis the user turned off.
         FakeHost.entry_config()["auto_enabled"] = False

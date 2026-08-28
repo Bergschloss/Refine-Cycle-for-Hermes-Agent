@@ -760,6 +760,20 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                     + ")"
                 )
             ),
+            # Route presence: without the core patch every proposal run stops
+            # at llm_invocation_unavailable. Say it here, with the fix, instead
+            # of leaving the user to find the registration warning.
+            (
+                "route: present (invocation-bound LLM available)"
+                if status.get("route_present") is True
+                else (
+                    "route: MISSING — Hermes core lacks the invocation-route "
+                    "patch; refine_run will stop with llm_invocation_unavailable. "
+                    "Run install.sh from the plugin directory."
+                    if status.get("route_present") is False
+                    else "route: unknown (host plugin module not importable here)"
+                )
+            ),
             (
                 "last model substitution: yes (reviewer verdict not trustworthy)"
                 if status.get("last_model_substituted")

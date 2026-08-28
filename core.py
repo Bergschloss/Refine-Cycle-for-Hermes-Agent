@@ -1947,6 +1947,20 @@ def refine_status() -> Dict[str, Any]:
         "subagent" if (subagent_cfg and lifecycle_bound) else "structured"
     )
 
+    # Route presence is host state, not config state: without the
+    # invocation-route core patch every proposal-producing run ends
+    # llm_invocation_unavailable, yet nothing in the status output said so —
+    # the user had to read the registration warning or hit the failure.
+    # Report it the way the registration warning does: symbol probe, honest
+    # "unknown" on import failure (command context may lack the host module).
+    route_present: bool | None
+    try:
+        from hermes_cli import plugins as _host_plugins
+
+        route_present = hasattr(_host_plugins, "plugin_invocation_scope")
+    except Exception:
+        route_present = None
+
     return {
         "config_readable": config_readable,
         "auto_enabled": auto,
@@ -1981,6 +1995,7 @@ def refine_status() -> Dict[str, Any]:
         "llm_model_allowed": model_allowed,
         "llm_provider_allowed": provider_allowed,
         "last_model_substituted": last_model_substituted,
+        "route_present": route_present,
         "proposer": {
             "effective": proposer_effective,
             "subagent_config_enabled": subagent_cfg,
