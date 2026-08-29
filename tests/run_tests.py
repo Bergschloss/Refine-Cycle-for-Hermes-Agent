@@ -11694,6 +11694,57 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         meta = journal.get_entry(result["journal_id"])["llm_meta"]
         self.assertEqual(meta["fingerprint_offered"], 0)
         self.assertIs(meta["grounded"], False)
+        # Package 5 (Q3-2): the key is present with an empty list, not
+        # omitted -- omission is exactly what made grounded unfalsifiable
+        # from the journal in the first place.
+        self.assertEqual(meta["offered_fingerprints"], [])
+
+    # --- Package 5 (Q3-2): persist the set grounded was measured against ---
+
+    def test_offered_fingerprints_persisted_and_capped(self):
+        """A wrong fingerprint_rendered flag must be re-derivable from the
+        journal alone: was the cited fingerprint among those actually
+        rendered to the model. Also proves the list is capped at
+        FORMAT_PATTERNS_LIMIT, mirroring fingerprint_offered's count."""
+        synthetic_patterns = [
+            {
+                "fingerprint": f"{index:012x}", "tool": "http",
+                "sample": f"failure {index}", "count": 2, "sessions_seen": 1,
+            }
+            for index in range(patterns.FORMAT_PATTERNS_LIMIT + 1)
+        ]
+        synthetic_evidence = {
+            "messages": [
+                {"role": "user", "content": "one", "tool_name": ""},
+                {"role": "assistant", "content": "two", "tool_name": ""},
+                {"role": "tool", "content": "three", "tool_name": "http"},
+            ],
+            "error_count": len(synthetic_patterns),
+            "error_patterns": synthetic_patterns,
+            "user_corrections": [],
+            "collection_status": "ok",
+        }
+        rendered_fp = synthetic_patterns[0]["fingerprint"]
+        hidden_fp = synthetic_patterns[-1]["fingerprint"]
+        with patch.object(core, "collect_evidence", return_value=synthetic_evidence), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]):
+            proposal = skill_proposal("offered-list-check")
+            proposal["pattern_fingerprint"] = rendered_fp
+            result = core.refine_run(MockLlm(proposal), session_id="session")
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        offered = meta["offered_fingerprints"]
+        self.assertLessEqual(len(offered), patterns.FORMAT_PATTERNS_LIMIT)
+        self.assertEqual(len(offered), meta["fingerprint_offered"])
+        # Now re-derive fingerprint_rendered from the journal alone,
+        # without trusting the bool the pass computed:
+        self.assertIn(rendered_fp, offered)
+        self.assertIs(meta["fingerprint_rendered"], rendered_fp in offered)
+        self.assertIs(meta["fingerprint_rendered"], True)
+        # The observed count includes the pattern that was NOT rendered --
+        # proving grounded is scored against a wider set than this list,
+        # which is exactly why the observed set is a count, not a list.
+        self.assertGreater(meta["observed_fingerprint_count"], len(offered))
+        self.assertNotIn(hidden_fp, offered)
 
     def test_grounding_counts_observed_even_when_not_rendered(self):
         synthetic_patterns = [

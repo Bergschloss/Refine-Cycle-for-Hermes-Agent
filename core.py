@@ -3921,6 +3921,17 @@ def _refine_once(
     _run_llm_meta["fingerprint_rendered"] = bool(
         _proposal_fp and _proposal_fp in _offered_fps
     )
+    # Q3-2: grounded/fingerprint_rendered are derived bools, persisted, and
+    # drive a user-visible verdict -- but the evidence for them was being
+    # discarded at the end of the pass, so a wrong flag was unfalsifiable
+    # after the fact (same defect H3 had, one level deeper: the input to
+    # the verdict survives, its justification does not). offered_fps is
+    # already bounded to FORMAT_PATTERNS_LIMIT (<=8 fingerprints, 96 bytes)
+    # so the full rendered set is stored and fingerprint_rendered can be
+    # re-derived exactly. all_error_patterns is NOT bounded the same way,
+    # so the observed set is stored as a count only, not a full list.
+    _run_llm_meta["offered_fingerprints"] = sorted(_offered_fps)
+    _run_llm_meta["observed_fingerprint_count"] = len(_observed_fps)
     evidence_summary = {
         "session_id": session,
         "session_id_source": session_source,
