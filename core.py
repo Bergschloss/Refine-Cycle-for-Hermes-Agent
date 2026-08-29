@@ -641,6 +641,17 @@ def resolve_session_id(explicit: str = "") -> Tuple[str, str]:
 # ── trajectory collection ──────────────────────────────────────────────────
 
 
+def _row_ts(value: Any, *, now: Optional[float] = None) -> Optional[float]:
+    """Boundary wrapper: validate one host row's timestamp as it is read.
+
+    The pure check lives in ``patterns.believable_ts`` -- shared with
+    ``ledger.py``'s two comparisons against the same untrusted column, so the
+    skew tolerance cannot drift between call sites the way the token/char
+    budgets once did. This wrapper only supplies the clock.
+    """
+    return patterns.believable_ts(value, now=now if now is not None else time.time())
+
+
 def _open_db() -> Optional[sqlite3.Connection]:
     path = config.state_db_path()
     if not path.is_file():
@@ -1268,7 +1279,10 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 "tool": tool_name,
                 "content": pattern_content,
                 "session_id": resolved,
-                "ts": row["timestamp"] or 0,
+                # None (not 0) when the host timestamp cannot be believed --
+                # the occurrence is still real evidence, it just contributes
+                # no first_ts/last_ts. See _row_ts.
+                "ts": _row_ts(row["timestamp"]),
             })
 
         for row in chronological_rows:
@@ -1366,9 +1380,11 @@ def collect_cross_session_patterns(
         seen: set = set()
         rows_seen = 0
         cap_reached = False
+        untimed_dropped = 0
+        scan_now = time.time()
 
         def iter_items():
-            nonlocal rows_seen, cap_reached
+            nonlocal rows_seen, cap_reached, untimed_dropped
             for row in cursor:
                 rows_seen += 1
                 # Classified raw, kept scrubbed -- see the same boundary in
@@ -1392,6 +1408,20 @@ def collect_cross_session_patterns(
                     raw_content, tool_name=str(row["tool_name"] or "")
                 ):
                     continue
+                # SQL's ``timestamp >= since`` cannot express an upper
+                # bound or reject non-finite/non-positive values, so a
+                # row's membership in THIS horizon still has to be
+                # proven here. A row that fails is excluded outright, not
+                # merely stripped of its timestamp: this query's whole
+                # contract is "within the last N days", and admitting a
+                # row we cannot time-place would assert something
+                # unverifiable. Contrast collect_evidence's current-
+                # session evidence, which has no horizon to be inside or
+                # outside of, so it keeps such rows with ts=None instead.
+                row_ts = _row_ts(row["timestamp"], now=scan_now)
+                if row_ts is None:
+                    untimed_dropped += 1
+                    continue
                 sid = scrub_text(str(row["session_id"] or ""))
                 if sid and sid not in seen:
                     if session_cap is not None and len(seen) >= session_cap:
@@ -1409,7 +1439,7 @@ def collect_cross_session_patterns(
                     )[:120],
                     "content": _strip_untrusted_tags(bounded),
                     "session_id": sid,
-                    "ts": row["timestamp"] or 0,
+                    "ts": row_ts,
                 }
 
         # Signal gating must see every observed pattern. Prompt construction applies
@@ -1428,6 +1458,15 @@ def collect_cross_session_patterns(
                 "Cross-session session limit reached (%d); failures in older "
                 "sessions were not counted",
                 session_cap,
+            )
+        # Count only, never content: a row's timestamp failing believable_ts
+        # says nothing trustworthy about what the row contained.
+        if untimed_dropped:
+            logger.warning(
+                "Cross-session scan dropped %d row(s) with an unbelievable "
+                "timestamp (future-dated or non-positive); their evidence "
+                "was not counted",
+                untimed_dropped,
             )
         return result
     except Exception as exc:

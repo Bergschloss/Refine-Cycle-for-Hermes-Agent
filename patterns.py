@@ -12,6 +12,7 @@ without a Hermes host.
 """
 
 import hashlib
+import math
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -213,6 +214,39 @@ def fingerprint(tool_name: str, content: str) -> str:
     return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:12]
 
 
+# NTP drift between two real machines is seconds, not hours: 300s tolerates a
+# desktop and a server clock disagreeing without admitting the garbage this
+# exists to catch -- a live server carried rows at 1.06e305 and -7.56e166.
+MAX_CLOCK_SKEW_SECONDS = 300
+
+
+def believable_ts(value: Any, *, now: float) -> Optional[float]:
+    """A host-owned timestamp, or ``None`` when it cannot be believed.
+
+    ``messages.timestamp`` is untrusted host input, compared against a
+    plugin-owned clock at three sites with no validation: the cross-session
+    horizon, a usage-count fallback query, and the audit recurrence test. A
+    future-dated row is inside every horizon forever; a non-positive row is
+    invisible to every horizon forever -- and callers historically read a
+    missing value as ``0``, which is itself outside every horizon and so
+    reports confident silence instead of "unmeasured". ``None`` means exactly
+    that: no time. Callers must not fold it back into ``0``.
+
+    ``now`` is a required, explicit parameter rather than an internal
+    ``time.time()`` call so this stays a pure function: the same input always
+    produces the same output, and callers control the clock in tests.
+    """
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ts) or ts <= 0:
+        return None
+    if ts > now + MAX_CLOCK_SKEW_SECONDS:
+        return None
+    return ts
+
+
 FORMAT_PATTERNS_LIMIT = 8
 
 
@@ -232,7 +266,11 @@ def extract_patterns(
             continue
         tool = str(item.get("tool") or "")
         fp = fingerprint(tool, content)
-        ts = item.get("ts") or 0
+        # A row whose host timestamp could not be believed arrives as None
+        # (see believable_ts). ``or 0`` here would fold that back into a
+        # value every horizon excludes -- the same confident-silence defect
+        # this module exists downstream of. None must stay None.
+        ts = item.get("ts")
         sid = str(item.get("session_id") or "")
 
         entry = grouped.get(fp)
@@ -282,13 +320,20 @@ def merge_patterns(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             current["sessions_seen"] = max(
                 current.get("sessions_seen", 1), entry.get("sessions_seen", 1)
             )
-            current["first_ts"] = min(
-                current.get("first_ts") or entry.get("first_ts") or 0,
-                entry.get("first_ts") or current.get("first_ts") or 0,
-            )
-            current["last_ts"] = max(
-                current.get("last_ts") or 0, entry.get("last_ts") or 0
-            )
+            # None means "no believable time was ever observed", not 0 --
+            # folding it into 0 would read as ancient/ended-silence. Only
+            # take a real value from a side that has one; stay None when
+            # neither side does.
+            current_first, entry_first = current.get("first_ts"), entry.get("first_ts")
+            if current_first is None:
+                current["first_ts"] = entry_first
+            elif entry_first is not None:
+                current["first_ts"] = min(current_first, entry_first)
+            current_last, entry_last = current.get("last_ts"), entry.get("last_ts")
+            if current_last is None:
+                current["last_ts"] = entry_last
+            elif entry_last is not None:
+                current["last_ts"] = max(current_last, entry_last)
 
     out = list(merged.values())
     out.sort(key=lambda entry: (entry.get("sessions_seen", 1), entry.get("count", 0)), reverse=True)

@@ -15995,6 +15995,129 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn(name, FakeHost.skills)
         self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "rolled_back")
 
+    # --- Package 1 (HYPOTHESES Q1): messages.timestamp is untrusted host input ---
+
+    def test_horizon_rejects_a_future_dated_row(self):
+        """A row whose timestamp is nowhere near believable does not enter
+        cross-session evidence at all -- the whole point of this query is a
+        days-bounded window, and admitting a row we cannot time-place would
+        assert membership in that window we cannot verify."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", "ERROR: sane row within the window", "http", now - 60, 1),
+            ("session", "tool", "ERROR: poisoned far-future row", "http", 1.06e305, 1),
+        ])
+        result = core.collect_cross_session_patterns(days=1, max_rows=None)
+        fingerprints = {row["fingerprint"] for row in result}
+        self.assertIn(patterns.fingerprint("http", "ERROR: sane row within the window"), fingerprints)
+        self.assertNotIn(patterns.fingerprint("http", "ERROR: poisoned far-future row"), fingerprints)
+
+    def test_horizon_keeps_a_row_at_the_edge_of_the_window(self):
+        """A row just inside the days-window still counts -- proving the fix
+        rejects garbage without becoming eager and eating valid boundary rows."""
+        now = time.time()
+        edge_ts = now - 1 * 86400 + 60
+        FakeHost.make_db([
+            ("session", "tool", "ERROR: edge of the window", "http", edge_ts, 1),
+        ])
+        result = core.collect_cross_session_patterns(days=1, max_rows=None)
+        fingerprints = {row["fingerprint"] for row in result}
+        self.assertIn(patterns.fingerprint("http", "ERROR: edge of the window"), fingerprints)
+
+    def test_null_and_zero_timestamps_do_not_report_silence(self):
+        """ledger.audit's own recurrence check: a fingerprint that WAS observed
+        post-edit, but whose only occurrence carried no believable timestamp,
+        must read as unmeasured (None) -- never as confident silence (False)."""
+        name = "null-ts-skill"
+        content = skill_content(name, "# Guidance")
+        FakeHost.add_skill(name, content)
+        created = time.time() - 30 * 86400
+        entries = [{
+            "id": "nullts", "ts": created, "outcome": "applied",
+            "proposal": {"name": name, "kind": "skill", "action": "create",
+                         "content": content, "pattern_fingerprint": "1234567890ab"},
+        }]
+        ledger._save_stats({name: {
+            "created_ts": created, "updated_ts": created, "journal_id": "nullts",
+            "name": name, "kind": "skill", "action": "create",
+            "pattern_fingerprint": "1234567890ab", "outcome": "applied",
+        }})
+        for poisoned_last_ts in (None, 0):
+            with self.subTest(last_ts=poisoned_last_ts):
+                with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+                    row = ledger.audit(
+                        [{"fingerprint": "1234567890ab", "tool": "http", "count": 1,
+                          "sessions_seen": 1, "last_ts": poisoned_last_ts}],
+                        journal_entries=entries,
+                    )[0]
+                self.assertIsNone(row["pattern_recurred"])
+
+    def test_recurrence_ignores_an_unbelievable_last_ts(self):
+        """A future-dated last_ts must not read as 'did not help' -- ledger
+        validates the host-owned column itself, regardless of upstream."""
+        name = "future-ts-skill"
+        content = skill_content(name, "# Guidance")
+        FakeHost.add_skill(name, content)
+        created = time.time() - 30 * 86400
+        entries = [{
+            "id": "futurets", "ts": created, "outcome": "applied",
+            "proposal": {"name": name, "kind": "skill", "action": "create",
+                         "content": content, "pattern_fingerprint": "abcdefabcdef"},
+        }]
+        ledger._save_stats({name: {
+            "created_ts": created, "updated_ts": created, "journal_id": "futurets",
+            "name": name, "kind": "skill", "action": "create",
+            "pattern_fingerprint": "abcdefabcdef", "outcome": "applied",
+        }})
+        with patch.object(ledger, "_count_uses_with_scope", return_value=(5, "since_exact")):
+            row = ledger.audit(
+                [{"fingerprint": "abcdefabcdef", "tool": "http", "count": 1,
+                  "sessions_seen": 1, "last_ts": 1.06e305}],
+                journal_entries=entries,
+            )[0]
+        self.assertIsNone(row["pattern_recurred"])
+        self.assertNotEqual(row["verdict"], "did not help")
+
+    def test_small_clock_skew_is_tolerated(self):
+        """A desktop and a server clock disagree by seconds routinely; that
+        must still be believable evidence, not treated as poisoned."""
+        now = time.time()
+        self.assertEqual(patterns.believable_ts(now + 5, now=now), now + 5)
+        self.assertIsNone(patterns.believable_ts(now + 400, now=now))
+
+    def test_count_uses_with_scope_ignores_a_poisoned_future_timestamp(self):
+        """Call site 2: the since_approx SQL fallback must not let a garbage
+        timestamp inflate a usage count that never really happened after
+        since_ts."""
+        usage = sys.modules["tools.skill_usage"]
+        original = usage.get_usage_count
+
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("host usage unavailable")
+
+        usage.get_usage_count = unavailable
+        try:
+            since_ts = time.time() - 3600
+            sane_ts = time.time() - 60
+            connection = sqlite3.connect(self.root / "state.db")
+            connection.executemany(
+                "INSERT INTO messages VALUES (?,?,?,?,?,?)",
+                [
+                    ("session", "assistant", "Called /probe-skill successfully", "", sane_ts, 1),
+                    ("session", "assistant", "Called /probe-skill successfully", "", 1.06e305, 1),
+                ],
+            )
+            connection.commit()
+            connection.close()
+            count, scope = ledger._count_uses_with_scope("probe-skill", since_ts)
+            self.assertEqual(scope, "since_approx")
+            # Only the sane row counts; the poisoned future row does not
+            # inflate the count even though it trivially satisfies "> since_ts"
+            # as a raw number.
+            self.assertEqual(count, 1)
+        finally:
+            usage.get_usage_count = original
+
 
 class SuiteDiscoveryContractTests(unittest.TestCase):
     """Guard against the 08-24 class of failure: a suite that runs ZERO tests.

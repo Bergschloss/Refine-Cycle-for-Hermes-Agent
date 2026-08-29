@@ -13,11 +13,13 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from . import journal
     from . import config as _config
+    from . import patterns
     from .config import journal_dir, state_db_path
     from .sanitization import scrub_text
 except ImportError:
     import journal  # type: ignore
     import config as _config  # type: ignore
+    import patterns  # type: ignore
     from config import journal_dir, state_db_path  # noqa: F811
     from sanitization import scrub_text  # type: ignore
 
@@ -276,20 +278,34 @@ def _count_uses_with_scope(name: str, since_ts: float) -> Tuple[Optional[int], s
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             escaped_name = (
-                name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                name.replace("\\", "\\\\").replace("%", "\%").replace("_", "\_")
             )
-            row = connection.execute(
-                "SELECT COUNT(*) FROM messages WHERE active = 1 "
-                "AND timestamp > ? AND (tool_name = ? OR content LIKE ? ESCAPE '\\')",
-                (since_ts, name, f"%/{escaped_name}%"),
-            ).fetchone()
-            return (int(row[0]) if row else 0), "since_approx"
+            # COUNT(*) WHERE timestamp > ? trusts messages.timestamp -- the
+            # same untrusted host column validated at the other two sites. A
+            # future-dated row would satisfy ">" forever and inflate this
+            # count; a non-positive one would silently never satisfy it. The
+            # since_approx scope is already a fallback the caller cannot
+            # treat as authoritative, so filtering matched rows in Python
+            # (this is a fallback path, not a hot loop) is the honest fix.
+            rows = connection.execute(
+                "SELECT timestamp FROM messages WHERE active = 1 "
+                "AND (tool_name = ? OR content LIKE ? ESCAPE '\\')",
+                (name, f"%/{escaped_name}%"),
+            ).fetchall()
+            now = time.time()
+            count = sum(
+                1
+                for candidate in rows
+                if (believable := patterns.believable_ts(candidate[0], now=now))
+                is not None
+                and believable > since_ts
+            )
+            return count, "since_approx"
         finally:
             connection.close()
     except Exception as exc:
         logger.debug("Usage fallback failed for %s: %s", name, exc)
         return None, "unavailable"
-
 
 def count_uses(name: str, since_ts: float) -> Optional[int]:
     """Compatibility API returning the best available count."""
@@ -604,11 +620,27 @@ def audit(
             horizon_days = _config.audit_recurrence_horizon_days()
             if fingerprint and patterns_available:
                 hit = by_fingerprint.get(fingerprint)
-                # Pattern exists but has no last_ts -> still active (recurred)
-                if hit is not None and not (hit.get("last_ts") or 0) > created:
-                    recurred = True if hit.get("last_ts") is None else False
+                if hit is None:
+                    # The fingerprint genuinely was not observed anywhere
+                    # in a non-empty window -- real absence evidence.
+                    recurred = False
                 else:
-                    recurred = bool(hit and (hit.get("last_ts") or 0) > created)
+                    # last_ts is host-owned and untrusted regardless of
+                    # where the caller's pattern dict came from -- this
+                    # function does not trust its own upstream to have
+                    # already cleaned it (several tests, and any direct
+                    # caller, construct current_patterns by hand).
+                    hit_last_ts = patterns.believable_ts(
+                        hit.get("last_ts"), now=now
+                    )
+                    if hit_last_ts is None:
+                        # Observed, but no post-edit occurrence carried a
+                        # believable timestamp -- unmeasured, never True
+                        # and never False. Same shape H3 introduced for
+                        # an ungrounded fingerprint.
+                        recurred = None
+                    else:
+                        recurred = hit_last_ts > created
 
             # An empty observation window (the pattern table carries no
             # post-edit rows at all, e.g. a restored or freshly rebuilt
