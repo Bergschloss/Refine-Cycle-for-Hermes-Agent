@@ -17507,6 +17507,94 @@ class SubagentProposerTests(unittest.TestCase):
         # verdict chain treated it as grounded (missing = grounded).
         self.assertIsNone(row["fingerprint_grounded"])
 
+    # --- A kind with no usage counter must still be able to reach "working" ---
+
+    def _audit_row_for(self, kind, *, age_days, fingerprint, recurred_ts=None,
+                       uses_return=(9, "since_exact"), name="verdict-probe"):
+        """One applied edit of `kind`, audited against a window that always
+        holds an unrelated pattern (so the window is never empty)."""
+        created = time.time() - age_days * 86400
+        content = f"Durable lesson for {name}." if kind != "skill" else skill_content(name, "# G")
+        if kind == "skill":
+            FakeHost.add_skill(name, content)
+        elif kind == "memory":
+            # The memory-baseline check (D2) verifies the exact applied
+            # content is still present; without this the row would
+            # correctly report "no longer present as applied" and never
+            # reach the verdict branch under test.
+            FakeHost.memory_entries.append(content)
+        key = name if kind == "skill" else f"{kind}:{name}"
+        ledger._save_stats({key: {
+            "created_ts": created, "updated_ts": created, "journal_id": "j1",
+            "name": name, "kind": kind, "action": "create",
+            "pattern_fingerprint": fingerprint, "outcome": "applied",
+            "fingerprint_grounded": True,
+        }})
+        entries = [{
+            "id": "j1", "ts": created, "outcome": "applied",
+            "proposal": {"name": name, "kind": kind, "action": "create",
+                         "content": content, "pattern_fingerprint": fingerprint},
+        }]
+        window = [{"fingerprint": "zzzzzzzzzzzz", "tool": "x", "count": 1,
+                   "sessions_seen": 1, "last_ts": time.time() - 3600}]
+        if recurred_ts is not None:
+            window.append({"fingerprint": fingerprint, "tool": "x", "count": 2,
+                           "sessions_seen": 1, "last_ts": recurred_ts})
+        with patch.object(ledger, "_count_uses_with_scope", return_value=uses_return):
+            rows = ledger.audit(window, journal_entries=entries)
+        return next(row for row in rows if row["name"] == name)
+
+    def test_prompt_note_reaches_working_on_recurrence_evidence_alone(self):
+        """The host keeps no usage counter for prompt notes or memory, so the
+        usage-based 'working' branch could never fire for them -- the edit kind
+        refine makes most often was structurally unable to be reported as
+        working, however long it held. Recurrence is the only dimension that
+        exists for these kinds, so it carries the verdict alone."""
+        for kind in ("prompt", "memory"):
+            with self.subTest(kind=kind):
+                row = self._audit_row_for(
+                    kind, age_days=60, fingerprint="aaaaaaaaaaaa",
+                    name=f"holds-{kind}",
+                )
+                self.assertEqual(row["verdict"], "working")
+                # The row still says the usage dimension was never measured,
+                # so an operator can see which evidence carried the verdict.
+                self.assertIsNone(row["uses"])
+                self.assertEqual(row["usage_scope"], "unavailable")
+                self.assertIs(row["pattern_recurred"], False)
+
+    def test_prompt_note_working_requires_the_same_evidence_bar(self):
+        """Three ways the recurrence-only path must NOT claim success."""
+        # Inside the quiet-gap horizon, silence is a pause, not a result.
+        row = self._audit_row_for(
+            "prompt", age_days=1, fingerprint="aaaaaaaaaaaa", name="too-fresh")
+        self.assertEqual(row["verdict"], "too early")
+
+        # No fingerprint AND no usage counter is zero evidence, not success.
+        row = self._audit_row_for(
+            "prompt", age_days=60, fingerprint="", name="no-signal-at-all")
+        self.assertEqual(row["verdict"], "unclear")
+
+        # An observed recurrence still wins over silence elsewhere.
+        row = self._audit_row_for(
+            "prompt", age_days=60, fingerprint="aaaaaaaaaaaa",
+            recurred_ts=time.time(), name="came-back")
+        self.assertEqual(row["verdict"], "did not help")
+
+    def test_skill_with_failed_usage_lookup_does_not_borrow_the_new_branch(self):
+        """usage_scope == 'unavailable' means two different things: a kind that
+        HAS no counter, and a skill whose lookup FAILED. Only the first is an
+        absent dimension; the second is an unmeasured one, and treating it as
+        evidence would be exactly the confident-silence defect. The gate is on
+        kind, not on scope."""
+        row = self._audit_row_for(
+            "skill", age_days=60, fingerprint="aaaaaaaaaaaa",
+            uses_return=(None, "unavailable"), name="lookup-failed")
+        self.assertEqual(row["usage_scope"], "unavailable")
+        self.assertIs(row["pattern_recurred"], False)
+        self.assertNotEqual(row["verdict"], "working")
+        self.assertEqual(row["verdict"], "unclear")
+
     def test_ledger_record_edit_stores_fingerprint_grounded(self):
         """record_edit keeps the grounded flag; absence keeps rows legacy."""
         proposal = {"name": "gr-store", "kind": "skill", "action": "create",

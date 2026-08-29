@@ -610,7 +610,14 @@ def audit(
             uses, usage_scope = None, "unavailable"
             verdict = "no edit landed"
         else:
-            if meta.get("kind", "skill") == "skill":
+            # Whether a usage count is even askable for this kind. This is
+            # NOT the same as usage_scope == "unavailable": a skill whose
+            # lookup failed also reports "unavailable", and there the
+            # silence means "could not measure", not "nothing to measure".
+            # Only the second may be treated as an absent dimension rather
+            # than a failed one.
+            usage_is_measurable = meta.get("kind", "skill") == "skill"
+            if usage_is_measurable:
                 uses, usage_scope = _count_uses_with_scope(name, created)
             else:
                 # The host exposes a usage counter only for skills. Counting a
@@ -710,6 +717,32 @@ def audit(
                         and age_days >= horizon_days
                     )
                 )
+            ):
+                verdict = "working"
+            elif (
+                # A kind the host keeps no usage counter for (memory,
+                # prompt note) could never reach the branch above, because
+                # it requires uses > 0 and uses is structurally None here.
+                # The consequence was that the edit kind refine makes most
+                # often could never be reported as working, however long it
+                # held: 5 of 6 applied edits on the reference install are
+                # prompt notes, and every one of them read "unclear"
+                # forever. Recurrence is the only dimension that exists for
+                # them, so it has to carry the verdict alone -- but only
+                # under the same evidence bar the branch above applies.
+                not usage_is_measurable
+                # Measured silence, never unmeasured: recurred is None for
+                # an empty window or an ungrounded fingerprint, and both
+                # already have their own verdicts earlier in this chain.
+                and recurred is False
+                # Without a fingerprint there is no recurrence signal at
+                # all, and no usage counter either -- that is zero
+                # evidence, which must stay "unclear" rather than become a
+                # success claim built on nothing observed.
+                and bool(fingerprint)
+                # Same quiet-gap horizon the skill path uses: before it,
+                # silence is indistinguishable from an ordinary pause.
+                and age_days >= horizon_days
             ):
                 verdict = "working"
             else:
