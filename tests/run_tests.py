@@ -17689,7 +17689,15 @@ class SubagentProposerTests(unittest.TestCase):
         """One applied edit of `kind`, audited against a window that always
         holds an unrelated pattern (so the window is never empty)."""
         created = time.time() - age_days * 86400
-        content = f"Durable lesson for {name}." if kind != "skill" else skill_content(name, "# G")
+        if kind == "skill":
+            content = skill_content(name, "# G")
+        elif kind == "prompt":
+            # Must satisfy the "When <condition>, <approved action>." shape
+            # and the action allowlist -- a templated free-text lesson (fine
+            # for memory) would not validate as a prompt note at all.
+            content = "When calling curl, use wget instead of curl."
+        else:
+            content = f"Durable lesson for {name}."
         if kind == "skill":
             FakeHost.add_skill(name, content)
         elif kind == "memory":
@@ -17698,6 +17706,14 @@ class SubagentProposerTests(unittest.TestCase):
             # correctly report "no longer present as applied" and never
             # reach the verdict branch under test.
             FakeHost.memory_entries.append(content)
+        elif kind == "prompt":
+            # H3: the prompt-note presence check verifies the note's own
+            # store id is still there; without this the row would correctly
+            # report "no longer present as applied". `name` must be a valid
+            # 12-hex id here (the note's own identity, not a display name).
+            journal._write_prompt_notes([{
+                "id": name, "content": content, "scope": "global", "session_id": "",
+            }])
         key = name if kind == "skill" else f"{kind}:{name}"
         ledger._save_stats({key: {
             "created_ts": created, "updated_ts": created, "journal_id": "j1",
@@ -17725,11 +17741,16 @@ class SubagentProposerTests(unittest.TestCase):
         refine makes most often was structurally unable to be reported as
         working, however long it held. Recurrence is the only dimension that
         exists for these kinds, so it carries the verdict alone."""
+        # A prompt-kind row's name IS the note's own store id in real life
+        # (core.py stamps journal.new_prompt_note's id onto the proposal),
+        # so it must be a valid 12-hex identity here too, not a display name
+        # -- memory has no such constraint and keeps a readable one.
+        names = {"prompt": "111111111111", "memory": "holds-memory"}
         for kind in ("prompt", "memory"):
             with self.subTest(kind=kind):
                 row = self._audit_row_for(
                     kind, age_days=60, fingerprint="aaaaaaaaaaaa",
-                    name=f"holds-{kind}",
+                    name=names[kind],
                 )
                 self.assertEqual(row["verdict"], "working")
                 # The row still says the usage dimension was never measured,
@@ -17740,20 +17761,23 @@ class SubagentProposerTests(unittest.TestCase):
 
     def test_prompt_note_working_requires_the_same_evidence_bar(self):
         """Three ways the recurrence-only path must NOT claim success."""
+        # A prompt-kind row's name is the note's own store id in real life,
+        # so each case below uses a valid, distinct 12-hex identity.
+
         # Inside the quiet-gap horizon, silence is a pause, not a result.
         row = self._audit_row_for(
-            "prompt", age_days=1, fingerprint="aaaaaaaaaaaa", name="too-fresh")
+            "prompt", age_days=1, fingerprint="aaaaaaaaaaaa", name="222222222222")
         self.assertEqual(row["verdict"], "too early")
 
         # No fingerprint AND no usage counter is zero evidence, not success.
         row = self._audit_row_for(
-            "prompt", age_days=60, fingerprint="", name="no-signal-at-all")
+            "prompt", age_days=60, fingerprint="", name="333333333333")
         self.assertEqual(row["verdict"], "unclear")
 
         # An observed recurrence still wins over silence elsewhere.
         row = self._audit_row_for(
             "prompt", age_days=60, fingerprint="aaaaaaaaaaaa",
-            recurred_ts=time.time(), name="came-back")
+            recurred_ts=time.time(), name="444444444444")
         self.assertEqual(row["verdict"], "did not help")
 
     def test_skill_with_failed_usage_lookup_does_not_borrow_the_new_branch(self):
@@ -17769,6 +17793,75 @@ class SubagentProposerTests(unittest.TestCase):
         self.assertIs(row["pattern_recurred"], False)
         self.assertNotEqual(row["verdict"], "working")
         self.assertEqual(row["verdict"], "unclear")
+
+    # --- H3 (independent review): prompt notes had no presence check at all ---
+
+    def test_prompt_note_verdict_checks_presence_like_memory_does(self):
+        """Before this, neither the skill digest compare nor memory's
+        exact-content membership had an equivalent for kind='prompt': an
+        applied note that was cleared, expired, or removed from the store
+        still read 'working' forever. Both directions, mirroring the memory
+        presence test exactly."""
+        # Present: an intact note with strong recurrence evidence reaches
+        # working, same as before -- the new check must not regress this.
+        row = self._audit_row_for(
+            "prompt", age_days=60, fingerprint="aaaaaaaaaaaa",
+            name="aaaaaaaaaaaa")
+        self.assertEqual(row["verdict"], "working")
+        self.assertFalse(row["externally_modified"])
+
+        # Removed: the exact same setup, but the note is gone from the store
+        # by the time audit runs (cleared, expired, or host-consolidated).
+        journal._write_prompt_notes([])
+        rows = ledger.audit(
+            [{"fingerprint": "zzzzzzzzzzzz", "tool": "x", "count": 1,
+              "sessions_seen": 1, "last_ts": time.time() - 3600}],
+            journal_entries=[{
+                "id": "j1", "ts": time.time() - 60 * 86400, "outcome": "applied",
+                "proposal": {"name": "aaaaaaaaaaaa", "kind": "prompt",
+                             "action": "create",
+                             "content": "When calling curl, use wget instead of curl.",
+                             "pattern_fingerprint": "aaaaaaaaaaaa"},
+            }],
+        )
+        removed = next(r for r in rows if r["name"] == "aaaaaaaaaaaa")
+        self.assertEqual(removed["verdict"], "unreliable — no longer present as applied")
+        self.assertTrue(removed["externally_modified"])
+
+    def test_prompt_note_baseline_snapshot_matches_live_lookup(self):
+        """snapshot_prompt_note_baselines (the fast path core.refine_audit
+        actually uses) must agree with the per-call fallback lookup -- a
+        caller passing the snapshot and one that does not must reach the
+        identical verdict for the identical state."""
+        entries = [{
+            "id": "j1", "ts": time.time() - 60 * 86400, "outcome": "applied",
+            "proposal": {"name": "bbbbbbbbbbbb", "kind": "prompt",
+                         "action": "create",
+                         "content": "When calling curl, use wget instead of curl.",
+                         "pattern_fingerprint": "aaaaaaaaaaaa"},
+        }]
+        ledger._save_stats({"prompt:bbbbbbbbbbbb": {
+            "created_ts": time.time() - 60 * 86400,
+            "updated_ts": time.time() - 60 * 86400,
+            "journal_id": "j1", "name": "bbbbbbbbbbbb", "kind": "prompt",
+            "action": "create", "pattern_fingerprint": "aaaaaaaaaaaa",
+            "outcome": "applied", "fingerprint_grounded": True,
+        }})
+        journal._write_prompt_notes([])  # removed
+        window = [{"fingerprint": "zzzzzzzzzzzz", "tool": "x", "count": 1,
+                   "sessions_seen": 1, "last_ts": time.time() - 3600}]
+
+        snapshot = ledger.snapshot_prompt_note_baselines(entries)
+        self.assertEqual(snapshot, {"prompt:bbbbbbbbbbbb": {"present": False}})
+
+        with_snapshot = ledger.audit(
+            window, journal_entries=entries, prompt_note_baselines=snapshot,
+        )
+        without_snapshot = ledger.audit(window, journal_entries=entries)
+        row_a = next(r for r in with_snapshot if r["name"] == "bbbbbbbbbbbb")
+        row_b = next(r for r in without_snapshot if r["name"] == "bbbbbbbbbbbb")
+        self.assertEqual(row_a["verdict"], row_b["verdict"])
+        self.assertEqual(row_a["verdict"], "unreliable — no longer present as applied")
 
     def test_ledger_record_edit_stores_fingerprint_grounded(self):
         """record_edit keeps the grounded flag; absence keeps rows legacy."""

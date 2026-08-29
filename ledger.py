@@ -497,6 +497,75 @@ def snapshot_memory_baselines(
     return baselines
 
 
+def _latest_applied_prompt_note_ids(
+    journal_entries: Optional[List[Dict[str, Any]]],
+) -> set:
+    """The set of refine's own prompt-note ids that are still recorded applied.
+
+    Third of this trio, and the simplest: a prompt note's identity is exact
+    rather than inferred. core.py stamps the store's own id onto the
+    proposal as ``name``/``note_id`` at the moment it is created
+    (``journal.new_prompt_note`` -> ``proposal["name"] = prompt_note["id"]``),
+    so there is no digest to compare (skill) and no ambiguous exact-content
+    match that cannot tell an edit from a removal (memory) -- only a direct
+    lookup of whether that id is still in the store.
+    """
+    ids: set = set()
+    for entry in journal_entries or []:
+        if not isinstance(entry, dict) or entry.get("outcome") != "applied":
+            continue
+        proposal = entry.get("proposal")
+        if not isinstance(proposal, dict) or proposal.get("kind") != "prompt":
+            continue
+        note_id = str(proposal.get("note_id") or proposal.get("name") or "").strip()
+        if note_id:
+            ids.add(note_id)
+    return ids
+
+
+def _prompt_note_present(note_id: str) -> Optional[Dict[str, Any]]:
+    """Fallback single-id lookup for a direct caller that skipped the snapshot."""
+    try:
+        notes = journal.load_prompt_notes()
+    except Exception:
+        notes = None
+    if notes is None:
+        return None
+    present_ids = {str(note.get("id", "")) for note in notes if isinstance(note, dict)}
+    return {"present": note_id in present_ids}
+
+
+def snapshot_prompt_note_baselines(
+    journal_entries: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Capture which of refine's own applied prompt notes still exist.
+
+    Before this, nothing checked presence for kind="prompt" at all -- unlike
+    skill (digest compare) and memory (exact-content membership), an applied
+    prompt note that was cleared, expired, or removed from the store still
+    read "working" forever. On the reference server, prompt notes are 19 of
+    24 applied edits: the edit kind refine makes most often had zero
+    attribution coverage.
+    """
+    ids = _latest_applied_prompt_note_ids(journal_entries)
+    if not ids:
+        return {}
+    try:
+        notes = journal.load_prompt_notes()
+    except Exception:
+        notes = None
+    if notes is None:
+        # Unreadable store: cannot confirm or deny presence for any of them.
+        return {f"prompt:{note_id}": None for note_id in ids}
+    present_ids = {
+        str(note.get("id", "")) for note in notes if isinstance(note, dict)
+    }
+    return {
+        f"prompt:{note_id}": {"present": note_id in present_ids}
+        for note_id in ids
+    }
+
+
 def _latest_applied_skill_digests(
     journal_entries: Optional[List[Dict[str, Any]]],
 ) -> Dict[str, str]:
@@ -548,6 +617,7 @@ def audit(
     stats_snapshot: Optional[Dict[str, Any]] = None,
     skill_baselines: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
     memory_baselines: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    prompt_note_baselines: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     patterns_available = current_patterns is not None
     by_fingerprint = {
@@ -559,6 +629,7 @@ def audit(
     merged_stats = _merge_journal_stats(stats, journal_entries)
     intended_skill_digests = _latest_applied_skill_digests(journal_entries)
     intended_memory_contents = _latest_applied_memory_contents(journal_entries)
+    intended_prompt_note_ids = _latest_applied_prompt_note_ids(journal_entries)
     for key, meta in sorted(merged_stats.items()):
         if not isinstance(meta, dict):
             logger.warning("Ignoring malformed ledger row for %s", scrub_text(str(key)))
@@ -812,6 +883,32 @@ def audit(
                     # through exact membership, so the state is named for what
                     # is KNOWN (no longer present as applied), not for a
                     # guessed cause.
+                    externally_modified = True
+                    verdict = "unreliable — no longer present as applied"
+            else:
+                attribution_unknown = True
+                verdict = "unreliable — intended state unknown"
+
+        # Prompt notes had NO presence check at all before this: neither the
+        # skill digest compare nor memory's exact-content membership has an
+        # equivalent for kind="prompt", so a note that was cleared, expired,
+        # or removed from the store still read "working" forever -- for the
+        # edit kind refine makes most often (19 of 24 applied edits on the
+        # reference server). Identity here is exact rather than inferred: the
+        # note's own store id is stamped onto the proposal as `name` at apply
+        # time, so this is a direct lookup, not a content match -- no
+        # edit-vs-removal ambiguity the way memory's check has.
+        if meta.get("kind", "skill") == "prompt" and outcome == "applied":
+            if name in intended_prompt_note_ids:
+                baseline = (
+                    prompt_note_baselines.get(f"prompt:{name}")
+                    if prompt_note_baselines is not None
+                    else _prompt_note_present(name)
+                )
+                if baseline is None:
+                    attribution_unknown = True
+                    verdict = "unreliable — target state unavailable"
+                elif baseline.get("present") is False:
                     externally_modified = True
                     verdict = "unreliable — no longer present as applied"
             else:
