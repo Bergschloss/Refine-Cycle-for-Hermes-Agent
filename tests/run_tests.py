@@ -11572,12 +11572,15 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIs(meta["grounded"], False)
 
     def test_grounding_is_false_for_unoffered_fingerprint(self):
+        """A fingerprint present in neither the rendered nor the observed
+        set is ungrounded and unrendered -- both, not just one."""
         proposal = skill_proposal("grounded-miss")
         proposal["pattern_fingerprint"] = "ffffffffffff"
         result = core.refine_run(MockLlm(proposal), session_id="session")
         meta = journal.get_entry(result["journal_id"])["llm_meta"]
         self.assertGreaterEqual(meta["fingerprint_offered"], 1)
         self.assertIs(meta["grounded"], False)
+        self.assertIs(meta["fingerprint_rendered"], False)
 
     def test_grounding_records_zero_when_no_fingerprint_was_offered(self):
         now = time.time()
@@ -11593,7 +11596,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(meta["fingerprint_offered"], 0)
         self.assertIs(meta["grounded"], False)
 
-    def test_grounding_excludes_fingerprints_beyond_rendered_prompt_limit(self):
+    def test_grounding_counts_observed_even_when_not_rendered(self):
         synthetic_patterns = [
             {
                 "fingerprint": f"{index:012x}",
@@ -11625,7 +11628,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(
             meta["fingerprint_offered"], patterns.FORMAT_PATTERNS_LIMIT
         )
-        self.assertIs(meta["grounded"], False)
+        # Package 2 (Q2b): grounded asks "was this observed", not "was this
+        # in the top FORMAT_PATTERNS_LIMIT shown to the model". The ninth
+        # pattern is real and was seen this pass -- it just was not one of
+        # the eight rendered into the prompt, which is a separate fact.
+        self.assertIs(meta["grounded"], True)
+        self.assertIs(meta["fingerprint_rendered"], False)
 
     # ── Dry-run (Part E) ──────────────────────────────────────────────────────
 

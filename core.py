@@ -3849,14 +3849,32 @@ def _refine_once(
     )
     if "summary" in proposal:
         proposal["summary"] = _llm.normalize_summary(proposal["summary"])
+    # "Offered" (rendered to the model, FORMAT_PATTERNS_LIMIT-bounded) and
+    # "observed" (every pattern this pass actually saw) are different sets.
+    # Scoring grounded against the rendered slice alone means a real,
+    # currently-recurring failure that simply ranked outside the top
+    # FORMAT_PATTERNS_LIMIT reads as "unverified" even though it was seen --
+    # not a fabrication, just not shown. grounded now asks the question its
+    # name claims to ask: was this fingerprint OBSERVED. Whether it was also
+    # RENDERED to the model is kept separately, because a proposal citing a
+    # fingerprint the model never saw is still worth knowing about even when
+    # that fingerprint is real.
     _offered_fps = {
         str(pattern.get("fingerprint", ""))
         for pattern in error_patterns[:patterns.FORMAT_PATTERNS_LIMIT]
         if pattern.get("fingerprint")
     }
+    _observed_fps = {
+        str(pattern.get("fingerprint", ""))
+        for pattern in all_error_patterns
+        if pattern.get("fingerprint")
+    }
     _proposal_fp = str(proposal.get("pattern_fingerprint", "") or "")
     _run_llm_meta["fingerprint_offered"] = len(_offered_fps)
     _run_llm_meta["grounded"] = bool(
+        _proposal_fp and _proposal_fp in _observed_fps
+    )
+    _run_llm_meta["fingerprint_rendered"] = bool(
         _proposal_fp and _proposal_fp in _offered_fps
     )
     evidence_summary = {
