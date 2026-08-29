@@ -149,7 +149,7 @@ failure a journaled error (`subagent_strict_error`) instead of a downgrade.
 
 ## Installation
 
-> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (744 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below).
+> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (777 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below).
 
 The plugin lives in `<HERMES_HOME>/plugins/refine/` — `~/.hermes/plugins/refine/`
 on Linux and macOS, and `%LOCALAPPDATA%\hermes\plugins\refine\` on Windows.
@@ -596,6 +596,20 @@ Two honesty rules behind the verdicts:
   guessed. This horizon governs recurrence verdicts only — `unused_skills`'
   separate `min_age_days` (14) answers a different question ("has the skill
   been left idle") and is unchanged.
+- **A kind with no usage counter still earns `working` — on recurrence alone.**
+  The host counts uses only for skills, so `uses` is structurally unavailable for
+  memory entries and prompt notes. Until recently that made `working` unreachable
+  for them: the branch required `uses > 0`, so the edit kind refine produces most
+  often could never be reported as successful however long it held, and the column
+  read `unclear` forever. Recurrence now carries the verdict alone for those kinds,
+  under the same bar the usage path uses and not a lower one — the silence must be
+  *measured* (`recurred` false, never unmeasured), a fingerprint must exist (with
+  neither a fingerprint nor a counter there is no evidence at all, and the row stays
+  `unclear`), and the edit must be older than the recurrence horizon. The row still
+  prints `uses` as `—`, so it stays visible which evidence carried the verdict. The
+  gate is on **kind**, not on `usage_scope`: a skill whose usage lookup merely
+  *failed* also reports `unavailable`, and that is an unmeasured dimension rather
+  than an absent one, so it does not borrow this path.
 - **Memory rows check presence, not usage.** The host keeps no usage counter
   for memory entries, so the only checkable fact for an applied memory edit is
   whether the exact content refine appended is still in the store. Exact
@@ -961,7 +975,8 @@ initiated.
   outcome, never a false "nothing to propose" result.
 - **Shared proposal limit:** the proposal token budget derives from the
   15,000-character content guardrail, while the reviewer uses its independent
-  300-token cap.
+  2,400-token cap (raised from 300 after measurement: a reasoning model spent
+  the whole 300 thinking and returned no verdict at all).
 - **Agent-created skills only** for patches; creates require a free normalized
   name and cannot use the reserved `hermes-` prefix.
 - **No autonomous skill delete** — skill deletion is used only by an explicit
@@ -990,6 +1005,54 @@ initiated.
   they fail loudly with `llm_invocation_unavailable`, which is the intended honest
   gate. The manifest format cannot express a host requirement, so this is enforced
   at runtime rather than at install time.
+
+---
+
+## What is not yet proven in the field
+
+Everything above describes what the code does and what its tests hold it to. This
+section is about something else: how much of it has been *exercised on real
+installations*, as opposed to proven by construction and by test. The two are not
+the same, and the gap is stated here rather than left for a user to discover.
+
+- **The proposer path is far less exercised than the code implies.** On the
+  reference server journal (824 entries), 302 passes ended in `llm_error` and 115
+  in `llm_invocation_unavailable` — **51% never reached a usable model result**.
+  Most of that is provider and host-route trouble rather than plugin logic, and
+  every one of those outcomes is journaled honestly rather than reported as
+  "nothing to propose". But it does mean the proposal, guardrail, and apply chain
+  has run end to end far fewer times than the surrounding machinery has.
+
+- **The skill path has almost no field data, and it is the one with the largest
+  blast radius.** It is the only path that writes into another agent's skill
+  files. On the reference host: **1 applied skill edit** (itself synthetic), **0
+  skill patches**, **0 skill rollbacks**. The full create → patch → rollback cycle
+  *is* proven — six journal states in one run, external verification on disk, and
+  `sha256` before the patch identical to `sha256` after the rollback — but that was
+  done in an isolated, disposable `HERMES_HOME`, not against a real skill store.
+  Treat the skill path as mechanically sound and field-untested.
+
+- **Memory and prompt-note paths carry the real field evidence.** 19 applied
+  prompt notes and 4 applied memory entries on the same host, with one memory
+  rollback exercised end to end. These are the paths a first user will actually
+  meet.
+
+- **Crash behaviour is tested by its consequences, not by killing a process.**
+  Partial journal tails (including a crash inside the plugin's own append, between
+  the bytes landing and `fsync` returning), interrupted staging, stuck `prepared`
+  records, abandoned rollbacks, and stale cross-process locks left by a dead owner
+  all have tests. What has never been done is pulling power from a real host
+  mid-write and observing recovery on the resulting state.
+
+- **Every audit of this plugin so far was written by an agent that had also
+  written its code.** Two full audit passes and six defect fixes were produced
+  under that arrangement. The defects those passes found were real and are fixed
+  with both-direction tests; the point is only that no reviewer without a stake in
+  the code has yet formed an independent view.
+
+None of the above is a known defect. They are the places where confidence rests on
+construction and tests rather than on accumulated field use — which is exactly
+where this codebase has historically been wrong before.
 
 ---
 

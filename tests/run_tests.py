@@ -3593,6 +3593,68 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(journal.daily_limit_reached())
         self.assertNotIn("os.replace", inspect.getsource(journal._append_entry))
 
+    def test_crash_inside_the_plugins_own_append_leaves_a_recoverable_journal(self):
+        """A process death DURING _append_entry, not garbage appended after it.
+
+        The sibling test above proves the reader isolates a corrupt tail that
+        something else wrote. This one kills the plugin's own write between the
+        bytes reaching the file and fsync returning -- the window a real crash
+        actually opens -- and proves three things about what it leaves behind:
+        the partial record is on disk, the NEXT append isolates it instead of
+        fusing with it, and the budget still fails closed while the journal is
+        unreadable rather than silently allowing another edit.
+        """
+        journal.log(
+            trigger="test", reason="before crash", session_id="s",
+            proposal={"action": "no_op"}, outcome="no_op",
+        )
+        path = journal.journal_path()
+        intact = path.read_bytes()
+
+        # Die after the record is written but before it is durable. The bytes
+        # are already in the file, so this reproduces the on-disk state a power
+        # loss at that instant leaves -- including a partial trailing line.
+        def die_before_durable(fd):
+            with path.open("r+b") as truncating:
+                truncating.seek(0, os.SEEK_END)
+                end = truncating.tell()
+                # Chop the record mid-way: a valid JSON *prefix*, which is
+                # harder than obvious garbage -- it can look parseable right up
+                # until the closing brace turns out to be missing.
+                truncating.truncate(end - 12)
+            raise OSError("simulated power loss before fsync")
+
+        with patch.object(os, "fsync", side_effect=die_before_durable):
+            with self.assertRaises(OSError):
+                journal.log(
+                    trigger="test", reason="crashes mid-write", session_id="s",
+                    proposal={"action": "no_op"}, outcome="no_op",
+                )
+
+        after_crash = path.read_bytes()
+        self.assertNotEqual(after_crash, intact)
+        self.assertFalse(after_crash.endswith(b"\n"))
+
+        # While the tail is partial the store must not answer questions it
+        # cannot answer: reads fail closed and the daily budget refuses.
+        entries_value, state = journal._load_entries_safe()
+        self.assertEqual(entries_value, [])
+        self.assertEqual(state, "unreadable")
+        self.assertTrue(journal.daily_limit_reached())
+
+        # The next append must isolate the partial line rather than continue it
+        # -- otherwise one crash silently corrupts the following record too.
+        journal.log(
+            trigger="test", reason="after crash", session_id="s",
+            proposal={"action": "no_op"}, outcome="no_op",
+        )
+        raw = path.read_bytes()
+        self.assertTrue(raw.startswith(after_crash))
+        self.assertGreater(len(raw), len(after_crash))
+        # The recovery record begins on its own line: the byte directly after
+        # the salvaged partial tail is a newline, not the start of new JSON.
+        self.assertEqual(raw[len(after_crash):len(after_crash) + 1], b"\n")
+
     def test_finalize_failure_keeps_prepared_recovery(self):
         original_finalize = journal.finalize
         calls = 0
