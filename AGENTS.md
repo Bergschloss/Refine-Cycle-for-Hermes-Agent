@@ -153,8 +153,8 @@ Learned the hard way — check these when touching nearby code:
 ## Scope discipline
 
 - Do not add abstractions, folders, helpers or generators that do not remove existing complexity.
-- Do not propose packaging, release automation, or deployment. Not wanted. CI already exists and is
-  deliberately minimal — run the suite on two operating systems, nothing else. Do not extend it.
+- CI already exists and is deliberately minimal — run the suite on two operating systems, nothing
+  else. Do not extend it.
 - Do not reformat or restructure code the task does not name.
 - If a change turns out to require re-architecture, say so with the scope and risks before doing it.
 - When something cannot be done because Hermes does not expose the capability, **say that and
