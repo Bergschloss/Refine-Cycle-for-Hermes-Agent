@@ -388,3 +388,107 @@ s = scrub_text(raw)
 print(core._structured_error_status(s), core._is_error_content(s, tool_name="t"))
 # observed: (True, True) then (None, False) — a genuine failure reads as a success
 ```
+
+---
+
+# Second pass — three questions after the server run
+
+Server results read from `/home/ubuntu/refine-live-artifacts/phase-d/kiro-hypotheses/`
+(`REPORT.md`, `h4_server_deep_probe.py`, `h4h5_server_probe.py`). Desktop measurements below
+were re-run here against `%LOCALAPPDATA%\hermes\state.db` (15333 rows, 2694 active tool rows).
+
+## Q1 — H4 split across hosts: is it server-only, or does the desktop probe not see it?
+
+**Neither, and the distinction the question draws is the right one to insist on.** The answer
+is a third option: **the code defect is on both hosts, identically; the poison is data, and
+the data differs. The desktop probe was weak — but not in the direction that hid the server's
+poison.** Three separate claims, each measured.
+
+**1. The defect is in the code, and it is demonstrable on the clean desktop.** Nothing in
+`config.py` touches timestamps; no configuration participates. What the three call sites share
+is that they compare a host-owned column against a plugin-owned clock with no validation. I
+built a throwaway db with three rows — one sane, one at `1.06e+305` (the value the server's
+live db actually carries), one at `-7.56e+166` — and pushed it through the desktop's own code:
+
+```
+call site 1, cross-session horizon, days=1:
+  ts=1.788e+09  in_1day_window=True   counted=1
+  ts=1.060e+305 in_1day_window=False  counted=1     <-- admitted anyway
+  patterns_returned=2   (a 1-day horizon should hold 1; the negative row is gone entirely)
+call site 3, audit recurrence (last_ts > created), edit made now:
+  ts=1.060e+305 recurred=True         <-- recurs against ANY edit, forever
+  ts=1.788e+09  recurred=False
+```
+
+So `cross_session_days` is not a horizon for a future-dated row, and `recurred` is permanently
+`True` for one. Same code, same platform where H4 was "cleared". Call site 2
+(`ledger._count_uses_with_scope`) returned `(0, 'since_approx')` for both a now-baseline and a
+year-3000 baseline in my synthetic setup, so **that site I did not manage to exercise** — the
+usage matcher did not match my synthetic row, and I stopped rather than spend credits tuning a
+fixture. Treat call site 2 as unmeasured, not as safe.
+
+**2. The desktop data really is clean, and that part of the original verdict stands.** A
+stronger census — per-row, not aggregate:
+
+```
+typeof census (per row):  typeof=real rows=15333        (one type, no mixed column)
+sanity buckets (all rows): rows=15333 sane=15333 nulls=0 non_numeric=0 zeros=0
+                           negative=0 future_gt_now_plus_1d=0
+active tool rows:          2694  nulls=0 zeros=0 negative=0 future=0 sessions_affected=0
+rowid/timestamp inversions: 44
+```
+
+Server, same column: `min=-7.56e+166`, `max=1.06e+305`, 288 future rows, 63 negative, 66/35
+sessions affected. The two hosts differ in what has been written to that column, not in how
+the plugin reads it. Nothing marks the desktop as structurally safer — it is one bad writer
+away from the server's state, and nothing would announce the transition.
+
+**3. The original probe was weak, in three named ways — none of which explains the split.**
+`SELECT typeof(timestamp), MIN(timestamp), MAX(timestamp)` cannot see: NULLs (SQLite's
+`MIN`/`MAX` skip them, and `row["timestamp"] or 0` then turns NULL into `0` — a value every
+horizon excludes and every `last_ts > created` answers `False`, i.e. reports silence); a
+**mixed-type** column, because a bare `typeof(col)` in an aggregate query reports one
+arbitrary row; and `0` itself, which sits inside any sane min/max range. Extreme numeric
+garbage, though, is exactly what `MIN`/`MAX` do catch — so the server's poison would have
+shown on the desktop had it been there. The census above closes all three gaps and the desktop
+is still clean on every one.
+
+The 44 `rowid`/`timestamp` inversions are the one new thing that census found on the desktop.
+Every window orders by `timestamp DESC`, so insert order and read order disagree for those
+rows. 44 of 15333 is small and it is not the H4 defect; recorded, not chased.
+
+**Consequence.** The exposure is not "does my host have bad rows today". It is that the plugin
+treats a host-owned column as trusted input at three decision points, and the failure is
+directional and permanent: a future-dated row is inside every horizon and recurs against every
+edit forever, and a negative or zero one is invisible to every horizon and therefore reports
+silence forever. Both are the project's standard shape — a comparison confidently reporting on
+something it cannot see.
+
+**The probe that proves this answer** (and settles it on any host, without needing bad data):
+
+```python
+# A. per-row census -- run on BOTH hosts, compare
+#    SELECT typeof(timestamp), COUNT(*) FROM messages GROUP BY typeof(timestamp);
+#    SELECT COUNT(*), SUM(timestamp IS NULL), SUM(timestamp = 0), SUM(timestamp < 0),
+#           SUM(timestamp > strftime('%s','now') + 86400) FROM messages;
+#    -> confirms whether a host's DATA is clean, per row, not per aggregate.
+#
+# B. code probe -- run on the CLEAN host, no live data needed
+#    build a temp sqlite with the plugin's messages/sessions schema and three error
+#    rows: ts=now-3600, ts=1.06e305, ts=-7.56e166; point config.state_db_path at it;
+#    then assert:
+#      core.collect_cross_session_patterns(days=1) returns ONLY the sane row
+#      (last_ts or 0) > created is False for the future-dated row
+#    -> confirms the defect is host-independent. It fails today on the desktop.
+```
+
+**Confirms "code defect on both hosts":** probe B fails on a host whose probe A is clean —
+which is what happened here. **Would clear it:** probe B passing on the clean host, i.e. the
+plugin already rejecting an out-of-range timestamp.
+
+**Fix shape, if it is wanted** (not applied — the owner called it a separate decision): the
+column is untrusted host input, so treat it the way row content is treated — one coercion at
+the read boundary rather than three comparisons each guessing. A `_row_ts(value)` that returns
+`None` for NULL, non-numeric, negative, zero, or beyond `now + small_skew`, and callers that
+treat `None` as "no time" instead of `0`. That is one function and three call sites, and it
+makes both directions testable on a synthetic db without waiting for a host to corrupt itself.
