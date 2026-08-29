@@ -11508,7 +11508,106 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(result["success"])
         meta = journal.get_entry(result["journal_id"])["llm_meta"]
         self.assertEqual(meta.get("output_mode"), "json_schema")
-        self.assertNotIn("signal_path", meta)
+        # Q3-1: the old assertion was that signal_path was ABSENT here --
+        # itself the defect this fix closes, since absence used to mean
+        # three different things at once (gate closed, pre-field legacy
+        # entry, or model unreachable). The reviewer path IS a gate-closed
+        # (no_signal) pass, and the entry must say so explicitly, not by
+        # omission -- which is the stronger form of "does not claim
+        # gate_opened" this test's name promises.
+        self.assertEqual(meta.get("signal_path"), "no_signal")
+
+    # --- Package 4 (Q3-1): signal_path must reach the journal on EVERY
+    # gate-closed outcome, not only the ones that happen to call the model ---
+
+    def test_gate_closed_pass_journals_its_signal_path(self):
+        """The plain no-reviewer branch of a gate-closed pass (should_review
+        False) must journal signal_path='no_signal' -- previously this exact
+        branch wrote no llm_meta at all."""
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": False,
+        })
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "Routine context, nothing repeated", "", now - 3, 1),
+            ("session", "assistant", "Acknowledged", "", now - 2, 1),
+            ("session", "user", "Still nothing to repeat", "", now - 1, 1),
+        ])
+        result = core.refine_run(
+            MockLlm({"action": "no_op", "reason": "unused"}), session_id="session"
+        )
+        self.assertTrue(result["success"])
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertEqual(meta.get("signal_path"), "no_signal")
+
+    def test_reviewer_fallback_entry_carries_signal_path(self):
+        """The reviewer-fallback branch of a gate-closed pass builds its OWN
+        meta dict (reviewer_llm_meta), independent of the plain branch above --
+        it needs the same field seeded separately or it regresses alone."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+        })
+        result = core.refine_run(MockLlm({
+            "shouldRefine": False,
+            "rationale": "No durable lesson.",
+            "instructions": "",
+        }), session_id="session")
+        self.assertTrue(result["success"])
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertEqual(meta.get("signal_path"), "no_signal")
+
+    def test_no_signal_entry_records_whether_its_window_was_clipped(self):
+        """Q3-1 follow-up: a no_signal entry must say whether the window it
+        judged was itself truncated by the row or session cap -- not merely
+        that the window was quiet. Both directions: truncated and clean."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "Routine context, nothing repeated", "", now - 3, 1),
+            ("session", "assistant", "Acknowledged", "", now - 2, 1),
+            ("session", "user", "Still nothing to repeat", "", now - 1, 1),
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": False,
+        })
+        def truncated_collector(*args, **kwargs):
+            # Set the caps and return -- do NOT delegate to the real
+            # collector, which would recompute truncation_out from the
+            # actual (untruncated) fixture and silently overwrite this.
+            truncation_out = kwargs.get("truncation_out")
+            if truncation_out is not None:
+                truncation_out["rows_truncated"] = True
+                truncation_out["sessions_truncated"] = True
+            return []
+
+        with patch.object(core, "collect_cross_session_patterns", side_effect=truncated_collector):
+            result = core.refine_run(
+                MockLlm({"action": "no_op", "reason": "unused"}), session_id="session"
+            )
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertIs(meta.get("rows_truncated"), True)
+        self.assertIs(meta.get("sessions_truncated"), True)
+
+        # The clean direction: an ordinary pass truncates neither.
+        FakeHost.make_db([
+            ("session", "user", "Routine context, nothing repeated", "", now - 3, 1),
+            ("session", "assistant", "Acknowledged", "", now - 2, 1),
+            ("session", "user", "Still nothing to repeat", "", now - 1, 1),
+        ])
+        result = core.refine_run(
+            MockLlm({"action": "no_op", "reason": "unused"}), session_id="session"
+        )
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertFalse(meta.get("rows_truncated"))
+        self.assertFalse(meta.get("sessions_truncated"))
 
     def test_signal_path_gate_opened_when_repeated_error_signal_present(self):
         now = time.time()

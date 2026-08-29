@@ -1338,7 +1338,16 @@ def collect_cross_session_patterns(
     since_ts: Optional[float] = None,
     max_sessions: Optional[int] = None,
     strict: bool = False,
+    truncation_out: Optional[Dict[str, bool]] = None,
 ) -> List[Dict[str, Any]]:
+    """
+    ``truncation_out``, when given a dict, is filled in place with
+    ``rows_truncated``/``sessions_truncated`` (Q3-1 follow-up): an
+    out-parameter rather than a module global, because the automatic
+    thread and an interactive call can run this at the same time. A
+    no_signal journal entry that folds these in can finally say whether
+    the window it judged was clipped, instead of only THAT it was quiet.
+    """
     if not config.cross_session_enabled():
         if strict:
             raise IOError("Cross-session pattern collection is disabled")
@@ -1446,7 +1455,8 @@ def collect_cross_session_patterns(
         # FORMAT_PATTERNS_LIMIT separately at its rendering boundary, so truncating
         # here cannot hide a qualifying lower-ranked failure from has_signal().
         result = patterns.extract_patterns(iter_items(), limit=None)
-        if max_rows is not None and rows_seen >= max_rows:
+        rows_truncated = max_rows is not None and rows_seen >= max_rows
+        if rows_truncated:
             logger.warning(
                 "Cross-session row limit reached (%d); interactive evidence may be truncated",
                 max_rows,
@@ -1459,6 +1469,9 @@ def collect_cross_session_patterns(
                 "sessions were not counted",
                 session_cap,
             )
+        if truncation_out is not None:
+            truncation_out["rows_truncated"] = bool(rows_truncated)
+            truncation_out["sessions_truncated"] = bool(cap_reached)
         # Count only, never content: a row's timestamp failing believable_ts
         # says nothing trustworthy about what the row contained.
         if untimed_dropped:
@@ -2819,12 +2832,19 @@ def _handle_no_signal(
     run_target_issues: Any,
     run_target_unusable: bool,
     intended_target: Dict[str, str],
+    cross_session_truncation: Optional[Dict[str, bool]] = None,
 ) -> Union[Dict[str, Any], Tuple[str, str]]:
     """Handle a gate-closed pass: reviewer fallback or journaled no_op.
 
     Returns either a response dict that the caller must return unchanged, or
     ("reviewer_instructions", "reviewer_approved") when the reviewer opened
     the gate and the primary proposal call should proceed.
+
+    ``cross_session_truncation`` (Q3-1 follow-up): whether the window this
+    verdict was based on was clipped by the row or session cap, folded
+    into every meta dict this function journals so a no_signal entry does
+    not merely say the window was quiet -- it says whether the window was
+    the whole picture.
     """
     _signal_path = "no_signal"
     should_review = (
@@ -2839,6 +2859,11 @@ def _handle_no_signal(
         # transport fallback, not a second reviewer attempt). Keep the
         # attempt telemetry consistent with primary proposal calls.
         reviewer_llm_meta = {
+            # Q3-1: seeded here, where _signal_path is decided, not where
+            # the model call returns -- every meta dict this function
+            # journals must carry it, or "no_op" cannot be told apart from
+            # "the gate closed on thin evidence" after the fact.
+            "signal_path": _signal_path,
             "requested_provider": intended_target.get("provider", ""),
             "requested_model": intended_target.get("model", ""),
             "target_source": run_target_source,
@@ -2848,6 +2873,8 @@ def _handle_no_signal(
                 "output_tokens", "output_mode"
             )},
         }
+        if cross_session_truncation:
+            reviewer_llm_meta.update(cross_session_truncation)
         reviewer_substituted = _model_substituted(
             intended_target.get("provider", ""), intended_target.get("model", ""),
             str(reviewer_call_meta.get("reported_provider", "")),
@@ -2997,6 +3024,15 @@ def _handle_no_signal(
             session_id=session,
             proposal=proposal,
             outcome="no_op",
+            # Q3-1: the reviewer branch above carries signal_path in its
+            # meta dict; this plain gate-closed no_op (no reviewer even
+            # attempted) must carry it too, or absence of the field means
+            # three different things at once (gate closed, pre-field
+            # legacy entry, or model unreachable).
+            llm_meta={
+                "signal_path": _signal_path,
+                **(cross_session_truncation or {}),
+            },
         )
         if not entry_id:
             return {
@@ -3639,8 +3675,15 @@ def _refine_once(
 
     # An explicitly selected session is a strict trajectory boundary. Do not
     # query or echo patterns derived from any other session.
+    # Q3-1 follow-up: filled only on the cross-session path (an explicit
+    # session has no cross-session window to clip); folded into the
+    # no_signal journal entry below so a clipped window is visible, not
+    # just its quietness.
+    _cross_session_truncation: Dict[str, bool] = {}
     cross_session_patterns = (
-        [] if explicit_session else collect_cross_session_patterns()
+        []
+        if explicit_session
+        else collect_cross_session_patterns(truncation_out=_cross_session_truncation)
     )
     all_error_patterns = patterns.merge_patterns(
         evidence.get("error_patterns", []), cross_session_patterns
@@ -3672,6 +3715,7 @@ def _refine_once(
             run_target_issues=_run_target_issues,
             run_target_unusable=_run_target_unusable,
             intended_target=_intended_target,
+            cross_session_truncation=_cross_session_truncation,
         )
         if isinstance(_handled, dict):
             return _handled
