@@ -564,3 +564,96 @@ than a hazard. But it is a systematic cost paid on the majority of real patterns
 against `all_error_patterns` (observed) rather than the rendered slice, and keep a separate
 `fingerprint_rendered` if the narrower fact is still wanted. `all_error_patterns` is already in
 scope at that line.
+
+## Q3 — Generalizing H3: what else is computed, used for a decision, and never journaled?
+
+H3's shape stated plainly: **a fact the pass computes, acts on, and drops — so a later reader,
+or a later decision, has to guess it.** Two more instances, both measured on this install's
+real journal (58 entries). The first is worse than H3 was.
+
+### Q3-1 — `signal_path` is absent from exactly the outcome that needs it
+
+`_signal_path` is the answer to "why did this pass not produce an edit": `gate_disabled`,
+`gate_opened`, or `no_signal`. On the gate-open path it is stamped into `_run_llm_meta` and
+journaled. On the **gate-closed** path — `_handle_gate_closed`, which sets
+`_signal_path = "no_signal"` as its first act — the meta dicts it builds (`reviewer_llm_meta`,
+and the plain journal call in the non-reviewer branch) do not carry the field at all. So the
+value that explains the outcome exists only inside the function that decided it.
+
+Measured, this journal:
+
+```
+outcome                     with signal_path   without   newest entry
+applied                            4              1       12.5 d
+dry_run                            4              0       14.8 d
+rejected                           2              0        3.7 d
+rolled_back                        1              0       14.8 d
+no_op                              0             12        4.9 d
+llm_invocation_unavailable         0             34        0.4 d
+```
+
+Every other outcome carries it. **`no_op` carries it in 0 of 12 cases, and the newest such
+entry is 4.9 days old — younger than the `dry_run` entries that do carry it**, so this is not a
+legacy-format gap. The consequence is the failure mode AGENTS.md names first: for every
+`no_op` in this journal there is no record of whether the gate closed on thin evidence or the
+model looked at real evidence and declined. Those two demand opposite responses — fix the
+evidence pipeline, or accept the model's judgement — and the journal cannot tell them apart.
+Worse, *absence* of the field now means three different things at once: gate closed, entry
+predates the field, or the model was never reachable (the 34 `llm_invocation_unavailable`
+rows also lack it).
+
+**Probe.** Force a gate-closed pass (an install with no qualifying pattern, or
+`min_pattern_count` set high) and read the journal entry it writes. **Confirms:** the entry's
+`llm_meta` has no `signal_path` while a gate-open pass on the same install produces one.
+**Clears:** `signal_path="no_signal"` present on the gate-closed entry. *Fix shape:* seed
+`signal_path` into the meta dict where `_signal_path` is assigned, not where the model call
+returns — one key in two dicts. Both directions are cheap to test: assert the field is present
+and correct on a gate-closed pass and on a gate-open pass.
+
+### Q3-2 — `grounded` is persisted; the set it was measured against is not
+
+`core` builds `_offered_fps`, decides `grounded` from it, and journals **only the cardinality**
+(`fingerprint_offered`). Since `4701f36` the derived bool is now persisted twice over (journal
+`llm_meta`, ledger `fingerprint_grounded`) and drives a user-visible verdict — while the
+evidence for it is discarded at the end of the pass.
+
+That matters because of Q2(b): `grounded` is scored against the rendered eight, and this
+install currently observes fifteen patterns. When a `fingerprint_grounded=False` turns out to
+be wrong, **nothing in the journal can establish that** — the eight fingerprints the model was
+shown are gone. The verdict is unfalsifiable after the fact, which is the same defect H3 had,
+one level deeper: the input to the verdict survives, its justification does not. Cost of
+fixing: eight 12-character strings, 96 bytes, in a field that already exists.
+
+**Probe.** Take any applied entry with `fingerprint_offered=8` and try to determine from the
+journal alone whether its `pattern_fingerprint` was among the eight. **Confirms:** it cannot be
+determined (only the count is stored). **Clears:** an `offered_fingerprints` list in `llm_meta`.
+*Fix shape:* store the offered fingerprints alongside the count, and score `grounded` against
+`all_error_patterns` per Q2(b) — then a wrong flag can be re-derived instead of trusted.
+
+### Same shape, checked and not worth a fix
+
+- **Evidence-truncation facts.** `rows_seen >= max_rows` and the session-cap warning added in
+  `0e12ca0` are computed per pass and only logged. With Q3-1 fixed, a `no_signal` entry would
+  say the gate closed but still not say whether the window it judged was clipped — and on this
+  host the session cap binds today, so every current `no_signal` is of the clipped kind. Cheap
+  to fold into the same meta dict as Q3-1; pointless before it.
+- **`source_revision`.** Computed at collection, consumed by the fail-closed check before
+  mutation, never stored. Same shape, but no *later* decision reads it, and its failure is
+  journaled as `evidence_invalidated` — so the decision is recorded even though the basis is
+  not. Not a defect.
+- **Config in force at run time.** `audit_recurrence_horizon_days`, `cross_session_days` and
+  `min_pattern_count` are read when the audit runs, not when the edit was made, and are never
+  recorded — so lowering a threshold silently rewrites the verdicts of past edits. Real, but it
+  is a reproducibility gap rather than a wrong verdict, and pinning config per entry is a
+  larger design decision than this pass should take.
+
+## Not done in this pass
+
+- **H4 is unfixed.** The `_row_ts` boundary is named and both probes are written; no code
+  changed, per the owner's note that it is a separate decision.
+- **Q2's two cases are unfixed** — the per-run/per-edit grounding mismatch and
+  `grounded`-means-rendered. Both have a fix shape and a probe; neither was applied.
+- **Q3-1 and Q3-2 are unfixed**, same reason: credits went to establishing them with
+  measurements rather than to patches.
+- **Call site 2 of H4** (`ledger._count_uses_with_scope`) was never exercised with a poisoned
+  timestamp — my synthetic row failed to match the usage matcher. Unmeasured, not cleared.
