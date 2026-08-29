@@ -228,13 +228,24 @@ _BLOCK_RULES: list = []  # list of dicts: {type, target, action, ...}
 _PROPOSER_CHILD_SESSIONS: set = set()
 
 def _update_block_rules(notes):
-    """Parse prompt-notes into structured block rules."""
+    """Parse prompt-notes into structured block rules.
+
+    A rule inherits its note's ``scope``/``session_id`` unchanged. Without
+    this, a note scoped to one session (``scope == "session"``) built a rule
+    that _on_pre_tool_call enforced against every session on the host: advice
+    given for one task actively blocked an unrelated tool call in someone
+    else's conversation. The prompt-injection path a few lines below this one
+    (``_on_pre_llm_call``) already filters by scope before injecting text;
+    the block path must apply the identical filter before enforcing.
+    """
     global _BLOCK_RULES
     rules = []
     for note in (notes or []):
         content = note.get("content", "")
         rule = _parse_prompt_note_rule(content)
         if rule:
+            rule["scope"] = note.get("scope", "global")
+            rule["session_id"] = note.get("session_id", "")
             rules.append(rule)
     _BLOCK_RULES = rules
 
@@ -373,7 +384,14 @@ def _on_pre_tool_call(
                 ),
             }
 
+    # Same normalization _on_pre_llm_call uses before comparing against a
+    # note's stored session_id, so a rule built from a session-scoped note
+    # only ever fires inside that same session.
+    current_session = journal.normalize_prompt_note_session_id(session_id)
+
     for rule in _BLOCK_RULES:
+        if rule.get("scope") == "session" and rule.get("session_id", "") != current_session:
+            continue
         rt = rule.get("type", "")
         target = rule.get("target", "")
 

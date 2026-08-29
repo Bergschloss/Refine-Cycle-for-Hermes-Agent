@@ -818,6 +818,10 @@ class RefineTests(unittest.TestCase):
         # Both are process-lifetime globals: left set, they leak across tests.
         plugin_init._REGISTER_WARNED = False
         plugin_init._REGISTERED_CONTEXT = None
+        # Same reason: parsed from the note store, held until the next
+        # pre_llm_call turn, so a rule built by one test otherwise persists
+        # into the next test's _on_pre_tool_call calls.
+        plugin_init._BLOCK_RULES = []
         llm._call_transport.preferred_output_mode = ""
         llm._call_meta.value = {}
         config._set_runtime_journal_dir(None)
@@ -17068,6 +17072,7 @@ class SubagentProposerTests(unittest.TestCase):
         core._set_subagent_lifecycle_provider(None)
         core._PROPOSER_SUBAGENT_IDS.clear()
         plugin_init._PROPOSER_CHILD_SESSIONS.clear()
+        plugin_init._BLOCK_RULES = []
 
     class _FakeLifecycle:
         def __init__(self, result=None, launch_error=None, timed_out=False):
@@ -17409,6 +17414,53 @@ class SubagentProposerTests(unittest.TestCase):
                 "skill_manage", {"action": "create"}, session_id="child-sess"
             )
         )
+
+    # --- H4 (independent review): a session-scoped rule must not enforce
+    # against a session it was never scoped to ---
+
+    def test_session_scoped_block_rule_does_not_leak_to_other_sessions(self):
+        """A note scoped to one session must not block tool calls in another.
+
+        _on_pre_llm_call already filters notes by scope before injecting text
+        (a session-scoped note is never shown outside its own session); the
+        block-rule path built from the same notes had no such filter at all,
+        so advice given for one task actively vetoed an unrelated tool call
+        in a different, unrelated conversation on the same host.
+        """
+        note = {
+            "id": "n1", "scope": "session", "session_id": "session-A",
+            "content": "When calling curl, use wget instead of curl.",
+        }
+        plugin_init._update_block_rules([note])
+
+        blocked = plugin_init._on_pre_tool_call(
+            "terminal", {"command": "curl http://example.com"}, session_id="session-A"
+        )
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked["action"], "block")
+
+        leaked = plugin_init._on_pre_tool_call(
+            "terminal", {"command": "curl http://example.com"}, session_id="session-B"
+        )
+        self.assertIsNone(leaked)
+
+    def test_global_scope_block_rule_still_enforces_everywhere(self):
+        """The other direction: a genuinely global note must keep blocking in
+        every session -- the scope filter must not become a blanket bypass."""
+        note = {
+            "id": "n1", "scope": "global", "session_id": "",
+            "content": "When calling curl, use wget instead of curl.",
+        }
+        plugin_init._update_block_rules([note])
+
+        for session_id in ("session-X", "session-Y", ""):
+            with self.subTest(session_id=session_id):
+                blocked = plugin_init._on_pre_tool_call(
+                    "terminal", {"command": "curl http://example.com"},
+                    session_id=session_id,
+                )
+                self.assertIsNotNone(blocked)
+                self.assertEqual(blocked["action"], "block")
 
     def test_acceptance_duplicate_rule_short_signal_yields_no_op(self):
         """Acceptance: a short failure whose rule already exists must no_op.
