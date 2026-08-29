@@ -641,6 +641,34 @@ def resolve_session_id(explicit: str = "") -> Tuple[str, str]:
 # ── trajectory collection ──────────────────────────────────────────────────
 
 
+def _believable_ts_sql_bounds(now: Optional[float] = None) -> Tuple[float, float]:
+    """The believable-timestamp range, as SQL-comparable bounds.
+
+    ``_row_ts`` rejects an unbelievable timestamp *after* SQLite has already
+    chosen which rows to return -- and every trajectory query here is
+    ``ORDER BY timestamp DESC LIMIT n``. A future-dated row sorts to the very
+    top, so garbage consumes the LIMIT budget and the Python check then drops
+    it, leaving fewer genuine rows than were asked for, or none at all.
+    Measured on the reference server: 288 of 500 rows under one such query
+    were future-dated, displacing 288 real ones; on one live session 53 of a
+    60-row window were garbage.
+
+    The bound therefore has to travel into SQL, where the truncation happens.
+    Both halves are portable: SQLite stores NaN as NULL (excluded by any
+    comparison) and orders Inf above every finite value (excluded by the upper
+    bound). What is left for ``_row_ts`` is text/blob types, which SQLite
+    orders by storage class rather than numerically -- so it stays as the
+    second line of defence rather than the only one.
+
+    Deliberately NOT applied to the ``COUNT(*)`` session-size query: that asks
+    how much conversation exists, not when it happened. A row with a corrupt
+    timestamp is still a real message, and excluding it there would answer a
+    question about time that was never asked.
+    """
+    reference = now if now is not None else time.time()
+    return 0.0, reference + patterns.MAX_CLOCK_SKEW_SECONDS
+
+
 def _row_ts(value: Any, *, now: Optional[float] = None) -> Optional[float]:
     """Boundary wrapper: validate one host row's timestamp as it is read.
 
@@ -1177,8 +1205,13 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             "m.timestamp FROM messages m "
             "LEFT JOIN sessions s ON s.id = m.session_id "
             "WHERE m.session_id = ? AND m.active = 1"
+            # Bounded in SQL, not only in Python: this query truncates
+            # with ORDER BY timestamp DESC LIMIT, so a row rejected only
+            # afterwards has already displaced a real one from the window.
+            " AND m.timestamp > ? AND m.timestamp <= ?"
         )
-        params: List[Any] = [resolved]
+        _ts_low, _ts_high = _believable_ts_sql_bounds()
+        params: List[Any] = [resolved, _ts_low, _ts_high]
         skipped_sources = config.skip_session_sources()
         if skipped_sources:
             placeholders = ",".join("?" for _ in skipped_sources)
@@ -1231,8 +1264,9 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             "SELECT m.content, m.tool_name, m.timestamp FROM messages m "
             "LEFT JOIN sessions s ON s.id = m.session_id "
             "WHERE m.session_id = ? AND m.active = 1 AND m.role = 'tool'"
+            " AND m.timestamp > ? AND m.timestamp <= ?"
         )
-        failure_params: List[Any] = [resolved]
+        failure_params: List[Any] = [resolved, _ts_low, _ts_high]
         if skipped_sources:
             placeholders = ",".join("?" for _ in skipped_sources)
             failure_sql += (
@@ -1359,17 +1393,26 @@ def collect_cross_session_patterns(
         return []
     if max_rows == -1:
         max_rows = config.cross_session_max_rows()
+    # One clock for the SQL bound and for the per-row check below, so a slow
+    # scan cannot classify the same row differently at its two ends.
+    scan_started = time.time()
     since = (
         since_ts
         if since_ts is not None
-        else time.time() - ((days or config.cross_session_days()) * 86400)
+        else scan_started - ((days or config.cross_session_days()) * 86400)
     )
     sql = (
         "SELECT m.session_id, m.tool_name, m.content, m.timestamp FROM messages m "
         "LEFT JOIN sessions s ON s.id = m.session_id "
         "WHERE m.role = 'tool' AND m.active = 1 AND m.timestamp >= ?"
+        # The upper bound belongs here for the same reason the lower one
+        # does: this query truncates by LIMIT after ordering on this very
+        # column, so a future-dated row filtered only in Python has already
+        # cost a genuine row its place.
+        " AND m.timestamp <= ?"
     )
-    params: List[Any] = [since]
+    _, _ts_high = _believable_ts_sql_bounds(scan_started)
+    params: List[Any] = [max(since, 0.0), _ts_high]
     skipped_sources = config.skip_session_sources()
     if skipped_sources:
         placeholders = ",".join("?" for _ in skipped_sources)
@@ -1390,7 +1433,7 @@ def collect_cross_session_patterns(
         rows_seen = 0
         cap_reached = False
         untimed_dropped = 0
-        scan_now = time.time()
+        scan_now = scan_started
 
         def iter_items():
             nonlocal rows_seen, cap_reached, untimed_dropped

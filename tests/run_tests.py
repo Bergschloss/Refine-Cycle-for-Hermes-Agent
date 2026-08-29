@@ -16217,6 +16217,67 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     # --- Package 1 (HYPOTHESES Q1): messages.timestamp is untrusted host input ---
 
+    def test_poisoned_timestamps_do_not_starve_the_limit_budget(self):
+        """H1, found by independent review: rejecting an unbelievable timestamp
+        in Python is too late when SQL truncates on that same column.
+
+        Every trajectory query is ORDER BY timestamp DESC LIMIT n. A
+        future-dated row sorts to the very top, so it consumes a slot in the
+        LIMIT budget and the Python check then drops it -- leaving fewer
+        genuine rows than were asked for, or none at all. The row-level check
+        looked correct in isolation and the evidence still vanished.
+        """
+        now = time.time()
+        rows = [
+            ("session", "tool", f"ERROR: poison {index}", "http", 1e305, 1)
+            for index in range(10)
+        ]
+        rows += [
+            ("session", "tool", "ERROR: request failed for /item/1", "http",
+             now - 100 - index, 1)
+            for index in range(5)
+        ]
+        FakeHost.make_db(rows)
+
+        # A budget of exactly 10 is entirely consumed by the 10 poisoned rows
+        # if the bound is not pushed into SQL.
+        found = core.collect_cross_session_patterns(days=1, max_rows=10)
+        fingerprints = {entry["fingerprint"]: entry for entry in found}
+        genuine = patterns.fingerprint("http", "ERROR: request failed for /item/1")
+        self.assertIn(genuine, fingerprints)
+        self.assertEqual(fingerprints[genuine]["count"], 5)
+        # And the poison is still excluded rather than merely outvoted.
+        for index in range(10):
+            self.assertNotIn(
+                patterns.fingerprint("http", f"ERROR: poison {index}"), fingerprints
+            )
+
+    def test_poisoned_timestamps_do_not_starve_the_current_session_window(self):
+        """The same starvation, on the current-session evidence window.
+
+        collect_evidence takes the newest `limit` rows by the same ordering,
+        so a session whose tail is future-dated returns a window made of rows
+        that are then discarded, and the real conversation never enters it.
+        """
+        now = time.time()
+        rows = [
+            ("session", "user", "Real message one", "", now - 30, 1),
+            ("session", "assistant", "Real reply", "", now - 20, 1),
+            ("session", "user", "Real message two", "", now - 10, 1),
+        ]
+        rows += [
+            ("session", "tool", f"ERROR: poison {index}", "http", 1e300 + index, 1)
+            for index in range(20)
+        ]
+        FakeHost.make_db(rows)
+
+        evidence = core.collect_evidence(session_id="session", limit=5)
+        contents = [message["content"] for message in evidence["messages"]]
+        self.assertIn("Real message one", contents)
+        self.assertIn("Real message two", contents)
+        for message in evidence["messages"]:
+            self.assertNotIn("poison", message["content"])
+
     def test_horizon_rejects_a_future_dated_row(self):
         """A row whose timestamp is nowhere near believable does not enter
         cross-session evidence at all -- the whole point of this query is a
