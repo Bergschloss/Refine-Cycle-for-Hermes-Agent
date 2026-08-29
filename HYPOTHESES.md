@@ -492,3 +492,75 @@ the read boundary rather than three comparisons each guessing. A `_row_ts(value)
 `None` for NULL, non-numeric, negative, zero, or beyond `now + small_skew`, and callers that
 treat `None` as "no time" instead of `0`. That is one function and three call sites, and it
 makes both directions testable on a synthetic db without waiting for a host to corrupt itself.
+
+## Q2 — Does the H3 fix (`4701f36`) close the hole, and is its boundary right?
+
+Reviewed from the diff and the surrounding call sites, not re-run: the fix's own tests cover
+the four single-edit directions and CI is green on it, so re-executing them buys nothing.
+
+**Does it close the hole? Yes, for a single-edit run.** The plumbing is the variant that keeps
+the failure visible instead of fatal: `record_edit` persists `fingerprint_grounded` only when
+`llm_meta` carries the key, `_merge_journal_stats` propagates it through both branches
+including the same-`journal_id` refresh, and a missing key means grounded, so no historical row
+silently relabels itself. The audit row exposes the flag, so the verdict can be re-checked.
+That is the right shape.
+
+**Is the boundary right? Yes — and for a stronger reason than the commit gives.** The commit
+justifies "observed recurrence beats ungrounded" as "real evidence beats grounding". The
+sharper argument is arithmetic: a fingerprint is 12 hex characters of a SHA-1 over
+`tool|normalized_error`, so a genuinely fabricated string colliding with a real pattern is a
+~2⁻⁴⁸ event. Therefore **an ungrounded fingerprint that later appears in the window was never
+fabricated** — it was real and merely not offered. Nulling that would discard true evidence.
+The fix nulls only absence, which is the only case where nothing was measured. Correct.
+
+**Two cases where it still yields a wrong verdict.**
+
+**(a) The flag is per run; the fingerprint it judges is per edit.** `core` computes
+`grounded` once, from the **top-level** `proposal["pattern_fingerprint"]`
+(`grounded = bool(_proposal_fp and _proposal_fp in _offered_fps)`). A transaction then calls
+`_apply_edit` — and through it `ledger.record_edit(edit_proposal, ..., llm_meta=run_llm_meta)`
+— once per edit, and each edit may carry **its own** fingerprint: `llm.py` only back-fills the
+shared one when an edit has none (`if not _valid_fingerprint(candidate...)`), and
+`_apply_transaction` repeats that rule. So `meta["pattern_fingerprint"]` varies per row while
+`meta["fingerprint_grounded"]` does not. Both directions are wrong:
+
+- *False withhold.* A model that emits per-edit fingerprints and **no** top-level one makes
+  `_proposal_fp` empty, so `grounded` is `False` for the run — and every edit in that
+  transaction is stamped ungrounded and reads `unverified fingerprint`, even where its own
+  fingerprint was offered. Nothing requires a top-level fingerprint: `_validate_proposal`
+  accepts an empty one.
+- *Hole still open.* The reverse — top-level fingerprint grounded, one edit carrying an
+  unoffered fingerprint of its own — stamps that edit `True`, and H3's false `working` survives
+  untouched for exactly the case a transaction makes easy.
+
+*Probe:* build a transaction proposal with no top-level `pattern_fingerprint` and one valid
+per-edit fingerprint that IS in the offered set; apply it; read the ledger rows. **Confirms:**
+`fingerprint_grounded=False` on a row whose own fingerprint was offered, verdict
+`unverified fingerprint`. **Clears:** per-row flags that match each row's own fingerprint.
+*Fix shape:* compute grounding per edit where the per-edit fingerprint is resolved — the
+offered set is already in scope there — or carry the offered set (below) and let the ledger
+decide per row.
+
+**(b) `grounded` measures "was rendered", not "was observed".** `_offered_fps` is built from
+`error_patterns[:FORMAT_PATTERNS_LIMIT]` — the eight patterns the prompt shows. Every other
+observed pattern scores `False`. Measured on this install right now:
+
+```
+observed_patterns=15  rendered_to_model=8  observed_but_never_offered=7
+```
+
+Seven real, currently-observed failure shapes would be judged ungrounded today. The name and
+the verdict string both say "unverified", but the measurement says "not in the top eight". A
+fingerprint can be real and unoffered in ordinary ways — it ranked ninth, it came from
+refinement history or an earlier pass, or the H2 fix simply surfaced more patterns than the
+prompt renders (15 against a budget of 8). If such a pattern then stays quiet after the edit —
+which is what success looks like — `recurred` is nulled and the edit is denied its `working`
+verdict. That direction is the safe one, and the row exposes the flag, so this is a cost rather
+than a hazard. But it is a systematic cost paid on the majority of real patterns.
+
+*Probe:* a run whose evidence holds nine or more patterns where the proposal names the ninth.
+**Confirms:** `llm_meta.grounded=False` for a fingerprint present in `all_error_patterns`.
+**Clears:** `grounded` true for any observed fingerprint. *Fix shape:* score `grounded`
+against `all_error_patterns` (observed) rather than the rendered slice, and keep a separate
+`fingerprint_rendered` if the narrower fact is still wanted. `all_error_patterns` is already in
+scope at that line.
