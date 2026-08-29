@@ -4101,6 +4101,8 @@ def _refine_once(
                 explicit_session=explicit_session,
                 session_ending=session_ending,
                 source_revision=source_revision,
+                observed_fingerprints=frozenset(_observed_fps),
+                rendered_fingerprints=frozenset(_offered_fps),
             )
         transaction["evidence"] = evidence_summary
         transaction["llm_meta"] = _run_llm_meta
@@ -4657,6 +4659,8 @@ def _apply_transaction(
     explicit_session: bool = False,
     session_ending: bool = False,
     source_revision: Optional[frozenset] = None,
+    observed_fingerprints: Optional[frozenset] = None,
+    rendered_fingerprints: Optional[frozenset] = None,
 ) -> Dict[str, Any]:
     """Apply one multi-edit proposal as a sequence of independent durable edits.
 
@@ -4670,6 +4674,15 @@ def _apply_transaction(
     real Refine run), it is verified once, fail-closed, before the first edit is
     applied so a proposal grounded in rewound evidence never creates a backup or
     mutates host state. When ``None`` (a direct unit call), the check is skipped.
+
+    ``observed_fingerprints``/``rendered_fingerprints`` (Package 3, Q2a): the
+    run-level ``llm_meta["grounded"]`` is computed once against the
+    TOP-LEVEL proposal fingerprint, but each edit here may carry its OWN
+    fingerprint (``edit_proposal`` back-fills the shared one only when an
+    edit has none). Passing these sets lets each edit be graded against its
+    own fingerprint instead of inheriting a verdict computed for a
+    different one. ``None`` (the default, and every existing direct caller)
+    keeps today's shared-meta behaviour unchanged.
     """
     edits = [edit for edit in proposal.get("edits", []) if isinstance(edit, dict)]
     if not edits:
@@ -4908,14 +4921,30 @@ def _apply_transaction(
                 "before this edit was attempted"
             )
             break
+        resolved_edit = edit_proposal(edit)
+        edit_llm_meta = llm_meta
+        if observed_fingerprints is not None:
+            # Grade THIS edit against its own (possibly back-filled)
+            # fingerprint, not the run-level verdict computed for the
+            # top-level proposal fingerprint, which may differ or may not
+            # exist at all. Shallow copy: the shared run meta is read by
+            # the caller after this returns and must not be mutated.
+            edit_fp = str(resolved_edit.get("pattern_fingerprint", "") or "")
+            edit_llm_meta = dict(llm_meta or {})
+            edit_llm_meta["grounded"] = bool(
+                edit_fp and edit_fp in observed_fingerprints
+            )
+            edit_llm_meta["fingerprint_rendered"] = bool(
+                edit_fp and edit_fp in (rendered_fingerprints or frozenset())
+            )
         item = _apply_edit(
-            edit_proposal(edit),
+            resolved_edit,
             trigger=trigger,
             safe_reason=safe_reason,
             session=session,
             started=started,
             group=edit_group(index),
-            llm_meta=llm_meta,
+            llm_meta=edit_llm_meta,
             source_revision=source_revision,
             source_session=session,
         )

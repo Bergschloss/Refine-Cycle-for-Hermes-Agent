@@ -16126,6 +16126,112 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         finally:
             usage.get_usage_count = original
 
+    # --- Package 3 (Q2a): the grounding flag is per run, the fingerprint is per edit ---
+
+    def test_transaction_without_top_level_fingerprint_grounds_each_edit_on_its_own(self):
+        """A multi-edit proposal with NO top-level pattern_fingerprint must not
+        stamp every edit ungrounded (or every edit grounded) from a run-level
+        verdict computed for a fingerprint that may not even exist. Each edit
+        is graded against its own, already-resolved fingerprint."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", "ERROR: observed failure shape", "http", now - 3, 1),
+            ("session", "assistant", "Retrying", "", now - 2, 1),
+            ("session", "tool", "ERROR: observed failure shape", "http", now - 1, 1),
+        ])
+        observed_fp = core.collect_evidence()["error_patterns"][0]["fingerprint"]
+        invented_fp = "ffffffffffff"  # not present anywhere in this pass's evidence
+
+        grounded_edit = dict(
+            memory_edit("Observed lesson.", name="grounded-edit"),
+            pattern_fingerprint=observed_fp,
+        )
+        ungrounded_edit = dict(
+            memory_edit("Invented lesson.", name="ungrounded-edit"),
+            pattern_fingerprint=invented_fp,
+        )
+        proposal = multi_proposal(grounded_edit, ungrounded_edit)
+        proposal["pattern_fingerprint"] = ""  # no top-level fingerprint at all
+
+        result = self.run_proposal(proposal, session_id="session")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["edits_applied"], 2)
+
+        stats = ledger.load_stats()
+        self.assertIs(stats["memory:grounded-edit"]["fingerprint_grounded"], True)
+        self.assertIs(stats["memory:ungrounded-edit"]["fingerprint_grounded"], False)
+
+        # A non-empty window that does not itself contain either fingerprint --
+        # window_empty must not dominate, so the ungrounded/grounded distinction
+        # is what actually decides the verdict here.
+        rows = {
+            row["name"]: row
+            for row in ledger.audit(
+                [{
+                    "fingerprint": "unrelated0000", "tool": "x", "count": 1,
+                    "sessions_seen": 1, "last_ts": time.time(),
+                }],
+                journal_entries=journal.entries(),
+            )
+        }
+        self.assertEqual(rows["ungrounded-edit"]["verdict"], "unverified fingerprint")
+        self.assertNotEqual(rows["grounded-edit"]["verdict"], "unverified fingerprint")
+
+    def test_single_edit_grounding_is_unchanged(self):
+        """Package 3 touches only the multi-edit path -- the four single-edit
+        grounding directions 4701f36 established must stay byte-identical."""
+        offered_fp = core.collect_evidence()["error_patterns"][0]["fingerprint"]
+        result = core.refine_run(MockLlm({
+            "action": "no_op", "reason": "nothing",
+            "pattern_fingerprint": offered_fp,
+        }), session_id="session")
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertIs(meta["grounded"], True)
+
+        result = core.refine_run(MockLlm({
+            "action": "no_op", "reason": "nothing", "pattern_fingerprint": "",
+        }), session_id="session")
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertIs(meta["grounded"], False)
+
+        proposal = skill_proposal("single-edit-unoffered")
+        proposal["pattern_fingerprint"] = "ffffffffffff"
+        result = core.refine_run(MockLlm(proposal), session_id="session")
+        meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertIs(meta["grounded"], False)
+
+    def test_run_meta_is_not_mutated_per_edit(self):
+        """The run-level llm_meta describes the RUN and must not be mutated by
+        per-edit grounding overrides -- only a copy is edited per edit."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", "ERROR: observed failure shape", "http", now - 3, 1),
+            ("session", "assistant", "Retrying", "", now - 2, 1),
+            ("session", "tool", "ERROR: observed failure shape", "http", now - 1, 1),
+        ])
+        observed_fp = core.collect_evidence()["error_patterns"][0]["fingerprint"]
+        grounded_edit = dict(
+            memory_edit("Observed lesson.", name="run-meta-a"),
+            pattern_fingerprint=observed_fp,
+        )
+        ungrounded_edit = dict(
+            memory_edit("Invented lesson.", name="run-meta-b"),
+            pattern_fingerprint="ffffffffffff",
+        )
+        proposal = multi_proposal(grounded_edit, ungrounded_edit)
+        proposal["pattern_fingerprint"] = ""
+
+        result = self.run_proposal(proposal, session_id="session")
+        # The run-level meta returned alongside the result describes the
+        # (fingerprintless) top-level proposal, not either edit.
+        self.assertIs(result["llm_meta"]["grounded"], False)
+        stats = ledger.load_stats()
+        # And it is genuinely a distinct object from what each edit recorded --
+        # not the same dict silently overwritten by the last edit processed.
+        self.assertIsNot(stats["memory:run-meta-a"], result["llm_meta"])
+        self.assertIs(stats["memory:run-meta-a"]["fingerprint_grounded"], True)
+        self.assertIs(stats["memory:run-meta-b"]["fingerprint_grounded"], False)
+
 
 class SuiteDiscoveryContractTests(unittest.TestCase):
     """Guard against the 08-24 class of failure: a suite that runs ZERO tests.
