@@ -63,6 +63,58 @@ _PATH = re.compile(
     rf"(?:{_ROOTED_WINDOWS_PATH}|{_BACKSLASH_PATH}|{_POSIX_PATH}|{_RELATIVE_PATH})"
 )
 
+# A Windows-style CLI switch ("/help", "/force") is syntactically identical to
+# a single-segment POSIX path -- one slash, one word -- so the path rule below
+# swallows it as PATH, collapsing two genuinely different "unknown option"
+# errors into one. Restricted to "option"/"flag"/"switch": those precede a
+# flag NAME and nothing else, unlike "argument"/"parameter", which as often
+# introduce a VALUE (``argument /tmp/x.txt was invalid``) that is exactly the
+# volatile detail two failures should still collapse on.
+_CLI_FLAG = re.compile(r"(?i)\b(option|flag|switch)\s+/(\S+)")
+
+# An HTTP status code is the semantic core of the failure -- 404, 401 and 500
+# are different errors, not the same one with a different row count -- so it
+# must survive the blanket integer rule below rather than being erased into
+# "N" like a duration or a request id.
+#
+# Split by how much context each shape needs. ``HTTP/1.1 404``, ``HTTP Error
+# 404`` and requests.py's ``404 Client Error``/``500 Server Error`` are
+# unambiguous by themselves -- nothing else reads that way -- so they always
+# apply. A bare ``returned``/``status`` lead-in does not: tried ungated first,
+# and it flagged "query returned 250 items" as an HTTP error over a row count.
+# That one only applies once the message has separately proven itself
+# HTTP-flavored, by containing "http"/"https" somewhere at all.
+_HTTP_STATUS_PRESENT = re.compile(r"(?i)\bhttps?\b")
+_HTTP_STATUS_ANCHORED = re.compile(
+    r"(?i)\bhttps?/\d(?:\.\d+)?\s+([1-5]\d{2})\b"
+    r"|\bhttps?\b[^\d]{0,20}\b([1-5]\d{2})\b"
+    r"|\b([1-5]\d{2})\s+(?:client|server)\s+error\b"
+)
+_HTTP_STATUS_CONTEXTUAL = re.compile(
+    r"(?i)\b(?:returned|status|responded\s+with|response)\b\s*(?:code\s*)?[:=]?\s*([1-5]\d{2})\b"
+)
+
+
+def _mark_http_status(match: "re.Match[str]") -> str:
+    code = next(group for group in match.groups() if group)
+    return match.group(0).replace(code, f"httpstatus{code}")
+
+
+def _preserve_http_status(text: str) -> str:
+    """Shield a real HTTP status code before the path/digit rules can erase it.
+
+    Must run before ``_PATH`` and before the URL rule: ``HTTP/1.1 404`` is
+    otherwise read as a relative path with a ".1" extension (swallowing the
+    "http" anchor along with the code), and ``https://…`` is otherwise
+    collapsed to the literal token ``URL`` before the presence check below
+    ever sees it.
+    """
+    text = _HTTP_STATUS_ANCHORED.sub(_mark_http_status, text)
+    if _HTTP_STATUS_PRESENT.search(text):
+        text = _HTTP_STATUS_CONTEXTUAL.sub(_mark_http_status, text)
+    return text
+
+
 # Order matters: timestamps and paths must be replaced before bare integers,
 # otherwise the digit rule eats the parts that make them recognizable.
 _NORMALIZERS = [
@@ -72,6 +124,9 @@ _NORMALIZERS = [
     # Single-quoted literals: keep the contents for the same reason as above
     # (``KeyError: 'user_id'`` is identified by the name, not by the quotes).
     (re.compile(r"'([^']*)'"), r"\1"),
+    # CLI switches, before the path rule can mistake one for a single-segment
+    # POSIX path — see _CLI_FLAG above.
+    (_CLI_FLAG, lambda m: f"{m.group(1)} cliflag_{m.group(2)}"),
     # URLs before paths (a URL contains slashes)
     (re.compile(r"https?://\S+"), "URL"),
     # Filesystem paths, POSIX and Windows — see _PATH below for the boundaries
@@ -196,6 +251,12 @@ def normalize_error(content: str) -> str:
             text = exception_line
 
     text = _strip_quotes(text)
+
+    # Must run before the loop below: the URL rule collapses "https://…" to
+    # the literal token "URL" (losing the "http" anchor this depends on), and
+    # the path rule reads "HTTP/1.1" as a relative path with a ".1" extension
+    # (swallowing the anchor along with the code). See _preserve_http_status.
+    text = _preserve_http_status(text)
 
     for pattern, replacement in _NORMALIZERS:
         text = pattern.sub(replacement, text)

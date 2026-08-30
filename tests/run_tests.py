@@ -1731,6 +1731,55 @@ class RefineTests(unittest.TestCase):
             patterns.fingerprint("open", r"cannot open dir\sub\other"),
         )
 
+    def test_http_status_and_cli_flag_normalization_keeps_distinct_errors_apart(self):
+        """H5: normalization must not collapse errors that only look alike after
+        it runs.
+
+        An HTTP status code is the semantic core of the failure -- 404, 401 and
+        500 are different errors, not the same one with a different request id
+        -- but the blanket integer rule erased all three into the same "N", and
+        the path rule read a Windows-style CLI switch ("/help") as a
+        single-segment POSIX path, erasing the flag name that was the only
+        thing distinguishing two "unknown option" errors.
+        """
+        distinct_status = [
+            patterns.fingerprint("api", "GET https://api.github.com/repos/foo returned 404"),
+            patterns.fingerprint("api", "GET https://api.github.com/login returned 401"),
+            patterns.fingerprint("api", "GET https://api.github.com/status returned 500"),
+        ]
+        self.assertEqual(len(set(distinct_status)), 3)
+        # The request path underneath is still volatile and must keep collapsing.
+        self.assertEqual(
+            patterns.fingerprint("api", "GET https://api.github.com/repos/8821 returned 404"),
+            patterns.fingerprint("api", "GET https://api.github.com/repos/9134 returned 404"),
+        )
+        # A row/item count that is not HTTP-flavored at all must not be read as
+        # a status code -- the bug found when the fix was first tried without
+        # this gate.
+        self.assertNotIn("httpstatus", patterns.normalize_error("query returned 250 items"))
+        # requests.py's own idiom and a raw status line, both unambiguous
+        # without any "returned"/"status" lead-in.
+        self.assertNotEqual(
+            patterns.fingerprint("req", "404 Client Error: Not Found for url: https://x"),
+            patterns.fingerprint("req", "500 Server Error: Internal Server Error"),
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("curl", "HTTP/1.1 404 Not Found"),
+            patterns.fingerprint("curl", "HTTP/1.1 500 Internal Server Error"),
+        )
+
+        self.assertNotEqual(
+            patterns.fingerprint("cli", "Unknown option /help"),
+            patterns.fingerprint("cli", "Unknown option /force"),
+        )
+        # A real path passed as an argument VALUE is still volatile and must
+        # keep collapsing -- only a flag NAME after option/flag/switch is
+        # preserved.
+        self.assertEqual(
+            patterns.fingerprint("cli", "argument /tmp/a.txt was invalid"),
+            patterns.fingerprint("cli", "argument /tmp/b.txt was invalid"),
+        )
+
     def test_path_normalization_stays_linear_on_long_separator_runs(self):
         """/refine audit normalizes every row twice, with no bound on row count.
 
