@@ -19,6 +19,8 @@ This is a port of the `/refine` concept from
 (Continual Harness) built on the Hermes plugin system. The plugin only loads
 when it is explicitly enabled; it does not modify Hermes itself.
 
+![What it does: a mistake happens twice or more, the plugin writes a fix, and the loop continues next session](assets/what-it-does.gif)
+
 > **One thing to know before you install.** Status, audit, rollback, and
 > journaling work on a stock Hermes host. **New proposals** additionally need
 > the host route patch that `install.sh` applies to the Hermes checkout (see
