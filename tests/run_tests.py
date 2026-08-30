@@ -15787,6 +15787,60 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             has_prior_assistant_response=False,
         ))
 
+    def test_declared_success_does_not_mask_a_traceback_in_the_output_channel(self):
+        """H2: exit_code 0 / success:true / ok:true must not mute a traceback the
+        tool itself put in output/stdout/stderr.
+
+        A wrapper that catches its own exception, prints the traceback, and still
+        exits 0 has declared success over a real failure. Measured on a live
+        corpus of 3,636 `role='tool'` results: 64 declared-success payloads had
+        a real traceback or "ERROR:" line in their own output/stdout/stderr and
+        were classified as plain success before this fix, because the
+        exit-code/success/ok checks returned False before ever looking at the
+        channel that carried it. The channel check is line-anchored, not a bare
+        word scan, for the same reason: a bare scan flagged 237 on that corpus,
+        including a `git commit` whose own message read "...a failure is never
+        masked..." and a passing test run whose log line says "cleanup failed:
+        timed out" by design.
+        """
+        self.assertTrue(core._is_error_content(json.dumps({
+            "success": True,
+            "output": "Traceback (most recent call last):\nZeroDivisionError: division by zero",
+        }), tool_name="execute_code"))
+        self.assertTrue(core._is_error_content(json.dumps({
+            "exit_code": 0,
+            "stdout": "Error: compilation failed\nFatal error: cannot find module",
+        }), tool_name="terminal"))
+        self.assertTrue(core._is_error_content(json.dumps({
+            "ok": True,
+            "stderr": "Traceback (most recent call last):\nRuntimeError: crashed",
+        }), tool_name="execute_code"))
+        # A genuinely clean success must not flip: no marker anywhere in the
+        # channel, so the exit-code/success declaration stands as before.
+        self.assertFalse(core._is_error_content(json.dumps({
+            "success": True, "exit_code": 0, "output": "Build completed successfully.",
+        }), tool_name="terminal"))
+        # A runner summary in the output channel ("0 failed") must not flip either
+        # -- the same narrow success-form exclusion that protects the whole-content
+        # heuristic must protect the channel-only check too.
+        self.assertFalse(core._is_error_content(json.dumps({
+            "success": True, "exit_code": 0, "output": "3 passed, 0 failed in 1.2s",
+        }), tool_name="pytest_runner"))
+        self.assertFalse(core._is_error_content(json.dumps({
+            "exit_code": 0, "stdout": "test result: ok. 12 passed; 0 failed; 0 ignored",
+        }), tool_name="cargo"))
+        # Content fetchers are exempt: fetched bytes are the file's words, not the
+        # tool's report, so a declared success stands even with "error"/"failed"
+        # sitting inside the fetched output channel.
+        self.assertFalse(core._is_error_content(json.dumps({
+            "success": True,
+            "output": "def handle_error(e):\n    log.error('failed to connect')",
+        }), tool_name="read_file"))
+        self.assertFalse(core._is_error_content(json.dumps({
+            "exit_code": 0,
+            "output": "grep matched: 'connection failed' in log.txt",
+        }), tool_name="search_files"))
+
     def test_fetcher_file_content_is_not_error_evidence(self):
         """B2: a fetched file mentioning error/failed is not a call failure.
 

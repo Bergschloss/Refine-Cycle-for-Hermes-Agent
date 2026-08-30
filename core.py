@@ -861,7 +861,42 @@ def _leading_json_object(content: str) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def _structured_error_status(content: str) -> Optional[bool]:
+def _channel_carries_failure_text(value: Dict[str, Any]) -> bool:
+    """True when a line inside an output/stdout/stderr channel is itself a
+    failure report, using ``_TOOL_FAILURE_HEAD``'s anchored vocabulary — the
+    same one fetchers are already judged by — applied to every line instead of
+    only the payload's first one, since a wrapper's own error line is not
+    always the first line it prints.
+
+    A bare word scan (``_ERROR_MARKER``) was tried first and measured against
+    3,636 live `role='tool'` results carrying a declared exit_code 0 / success /
+    ok: it flagged 237, including a `git commit` whose own message read
+    "...a failure is never masked..." and a PASSING test run whose log line says
+    "cleanup failed: timed out" by design — prose that contains the word, not a
+    tool reporting its own outcome. Anchoring each line the way a genuine
+    self-report actually starts (``ERROR: …``, ``Traceback (most recent call
+    last):``) cut that to 64 on the same corpus, and each of the 64 was read by
+    hand: every one is a real traceback, a failed patch/git/pip operation, or a
+    unittest ``ERROR:``/``Traceback`` line — none of the 173 dropped rows were,
+    so the anchor removed exactly the false-positive class and kept the rest.
+    """
+    for key in _OUTPUT_CHANNELS:
+        channel = value.get(key)
+        if not isinstance(channel, str) or not channel:
+            continue
+        sample = (
+            channel
+            if len(channel) <= 4000
+            else channel[:1000] + "\n…\n" + channel[-3000:]
+        )
+        if any(_TOOL_FAILURE_HEAD.match(line) for line in sample.split("\n")):
+            return True
+    return False
+
+
+def _structured_error_status(
+    content: str, *, tool_name: Optional[str] = None
+) -> Optional[bool]:
     """Return a definitive structured status, or None when text is unstructured."""
     try:
         value = json.loads(content)
@@ -921,10 +956,24 @@ def _structured_error_status(content: str) -> Optional[bool]:
             return True
         if value.get("success") is False or value.get("ok") is False:
             return True
+        # A declared success (exit 0, ``success: true``, ``ok: true``) is only
+        # evidence about the CALL, not about what the tool printed while making
+        # it. A wrapper that catches its own exception, prints the traceback to
+        # stdout/stderr, and still exits 0 has declared success over a failure --
+        # on a live corpus of 3,636 `role='tool'` results, 64 payloads shaped
+        # exactly this way (declared success, a real traceback or "ERROR:" line
+        # in their own output/stdout/stderr) were classified as plain success
+        # before this check existed. Content-fetching tools are exempt: their
+        # channel is fetched bytes, not the tool's own account, and the
+        # ``_CONTENT_FETCHER_TOKENS`` gate downstream already owns that case.
+        is_fetcher = bool(
+            tool_name and _CONTENT_FETCHER_TOKENS.intersection(_tool_name_tokens(tool_name))
+        )
+        channel_failure = not is_fetcher and _channel_carries_failure_text(value)
         if exit_values and all(code == 0 for code in exit_values):
-            return False
+            return True if channel_failure else False
         if value.get("success") is True or value.get("ok") is True:
-            return False
+            return True if channel_failure else False
         # A payload that reports no failure AND carries no output channel is a
         # tool returning DATA, not a tool reporting an outcome. Its data is not
         # evidence about the call: `read_file` on a config that mentions "error",
@@ -1004,7 +1053,7 @@ def _is_error_content(content: str, *, tool_name: Optional[str] = None) -> bool:
     if not content:
         return False
     
-    structured = _structured_error_status(content)
+    structured = _structured_error_status(content, tool_name=tool_name)
     if structured is not None:
         return structured
 
@@ -1017,13 +1066,13 @@ def _is_error_content(content: str, *, tool_name: Optional[str] = None) -> bool:
         if len(content) <= 4000
         else content[:1000] + "\n…\n" + content[-3000:]
     )
-    
+
     # Strip the phrases whose own wording would otherwise trip the markers: a
     # quoted ``error: null``, and the tool's ``not an error`` declaration. Only
     # those are removed, so markers elsewhere in the output still count -- that is
     # what stops an untrusted tool muting its own failure.
     sample = _strip_non_error_declarations(sample)
-    
+
     # Narrow, known success forms that must NOT be classified as errors
     # These are complete runner summaries, not prose that happens to include "failed"
     if (
@@ -1043,10 +1092,10 @@ def _is_error_content(content: str, *, tool_name: Optional[str] = None) -> bool:
         )
     ):
         return False
-    
+
     # For Jest/Vitest, only include if we have a canonical form (e.g., "0 tests  passed")
     # We could add more Jest-specific patterns if we have examples
-    
+
     # The rest of the function remains unchanged to catch real errors
     return bool(_ERROR_MARKER.search(sample))
 
