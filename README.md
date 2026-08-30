@@ -90,6 +90,8 @@ memory or a skill.
 
 ## How it works
 
+![How the Refine Cycle plugin works: a session ends, repeated failures are found, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](assets/refine-cycle.png)
+
 ```
 trajectory (state.db) → scrub → fingerprint + aggregate → signal gate
                                                   ├→ reviewer decline → journaled no_op
