@@ -70,7 +70,13 @@ _PATH = re.compile(
 # flag NAME and nothing else, unlike "argument"/"parameter", which as often
 # introduce a VALUE (``argument /tmp/x.txt was invalid``) that is exactly the
 # volatile detail two failures should still collapse on.
-_CLI_FLAG = re.compile(r"(?i)\b(option|flag|switch)\s+/(\S+)")
+#
+# Captured with ``_SEGMENT`` -- the same class the path rule tokenizes with --
+# not a bare ``\S+``: a bare capture swallows trailing sentence punctuation a
+# real path segment never would (a comma before "try again" is not part of a
+# path either), which would keep two occurrences of the identical flag apart
+# whenever one sentence happened to end differently than the other.
+_CLI_FLAG = re.compile(rf"(?i)\b(option|flag|switch)\s+/({_SEGMENT})")
 
 # An HTTP status code is the semantic core of the failure -- 404, 401 and 500
 # are different errors, not the same one with a different row count -- so it
@@ -125,8 +131,13 @@ _NORMALIZERS = [
     # (``KeyError: 'user_id'`` is identified by the name, not by the quotes).
     (re.compile(r"'([^']*)'"), r"\1"),
     # CLI switches, before the path rule can mistake one for a single-segment
-    # POSIX path — see _CLI_FLAG above.
-    (_CLI_FLAG, lambda m: f"{m.group(1)} cliflag_{m.group(2)}"),
+    # POSIX path — see _CLI_FLAG above. A trailing "." is stripped from the
+    # flag itself (not just excluded from the match, the way a comma already
+    # is by _SEGMENT): _SEGMENT admits "." mid-token for real filenames
+    # ("/help.txt"), so a sentence-final period after a bare flag ("/help.")
+    # is still captured, and must not survive into the replacement or "/help"
+    # and "/help." would fingerprint apart for no reason.
+    (_CLI_FLAG, lambda m: f"{m.group(1)} cliflag_{m.group(2).rstrip('.') or m.group(2)}"),
     # URLs before paths (a URL contains slashes)
     (re.compile(r"https?://\S+"), "URL"),
     # Filesystem paths, POSIX and Windows — see _PATH below for the boundaries
@@ -270,6 +281,18 @@ def fingerprint(tool_name: str, content: str) -> str:
 
     Hashes the full normalized text so errors sharing a long prefix but with
     different tails remain distinct patterns.
+
+    "Stable" is stable only against unchanged ``normalize_error`` output --
+    every rule change here changes the fingerprint of any message the rule
+    touches. A ``pattern_fingerprint`` already written to the journal or
+    ``skill_stats.json`` is compared against a freshly recomputed live window
+    (``ledger.audit``'s ``by_fingerprint`` lookup), never against itself, so a
+    rule change silently orphans any stored fingerprint it altered -- the row
+    keeps its outcome but audit can no longer prove recurrence for it. Checked
+    for the HTTP-status/CLI-flag rules added in H5: 0 of this install's stored
+    fingerprints were affected, but that was a live measurement at the time,
+    not a property this function enforces. A rule change wide enough to matter
+    should re-check the same way before shipping.
     """
     key = f"{tool_name or ''}|{normalize_error(content)}"
     return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:12]

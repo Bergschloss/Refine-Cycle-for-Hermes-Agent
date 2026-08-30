@@ -1779,6 +1779,22 @@ class RefineTests(unittest.TestCase):
             patterns.fingerprint("cli", "argument /tmp/a.txt was invalid"),
             patterns.fingerprint("cli", "argument /tmp/b.txt was invalid"),
         )
+        # Sentence-final punctuation is not part of the flag's identity: the
+        # old PATH-based normalization erased it (everything became the same
+        # literal "PATH"), and the fix that preserves the flag name must not
+        # reintroduce a difference the old behavior never had.
+        self.assertEqual(
+            patterns.fingerprint("cli", "Unknown option /help"),
+            patterns.fingerprint("cli", "Unknown option /help."),
+        )
+        # A comma right after the flag is not part of it either -- the path
+        # rule's own segment class already excludes it, so the flag capture
+        # must too, leaving the comma as ordinary trailing prose rather than
+        # glued onto the flag name.
+        self.assertEqual(
+            patterns.normalize_error("Unknown option /help, try again"),
+            "unknown option cliflag_help, try again",
+        )
 
     def test_path_normalization_stays_linear_on_long_separator_runs(self):
         """/refine audit normalizes every row twice, with no bound on row count.
@@ -15842,14 +15858,17 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
         A wrapper that catches its own exception, prints the traceback, and still
         exits 0 has declared success over a real failure. Measured on a live
-        corpus of 3,636 `role='tool'` results: 64 declared-success payloads had
-        a real traceback or "ERROR:" line in their own output/stdout/stderr and
+        corpus of 3,636 `role='tool'` results: 64 declared-success payloads led
+        with an "ERROR:"/"Traceback" line in their own output/stdout/stderr and
         were classified as plain success before this fix, because the
         exit-code/success/ok checks returned False before ever looking at the
-        channel that carried it. The channel check is line-anchored, not a bare
-        word scan, for the same reason: a bare scan flagged 237 on that corpus,
-        including a `git commit` whose own message read "...a failure is never
-        masked..." and a passing test run whose log line says "cleanup failed:
+        channel that carried it (61 of the 64 are real failures; see
+        _channel_carries_failure_text's docstring for the 3 that are not, and
+        why they are an accepted, singleton-only limit rather than a bug). The
+        channel check is line-anchored, not a bare word scan, for the same
+        reason: a bare scan flagged 237 on that corpus, including a `git
+        commit` whose own message read "...a failure is never masked..." and a
+        passing test run whose log line says "cleanup failed:
         timed out" by design.
         """
         self.assertTrue(core._is_error_content(json.dumps({
@@ -15889,6 +15908,35 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "exit_code": 0,
             "output": "grep matched: 'connection failed' in log.txt",
         }), tool_name="search_files"))
+
+    def test_channel_truncation_does_not_fabricate_a_false_line_start(self):
+        """The H2 channel check's own truncation must not manufacture the
+        anchor it is trying to require.
+
+        A channel over 4000 chars is sampled as head[:1000] + tail[-3000:].
+        The tail slice can start mid-line -- if that cut happened to land
+        right before an error word, the word reads as a line start
+        (``_TOOL_FAILURE_HEAD`` anchors on ``^``) even though, in the real
+        text, something else precedes it on the same line and the anchor
+        should not have fired at all.
+        """
+        marker = "error: connection reset by peer"
+        # Position the marker so the tail slice (channel[-3000:]) begins
+        # exactly at it -- the fragment "AAAA...error: ..." would otherwise
+        # read as a genuine line start once sliced.
+        filler_tail = "B" * (3000 - len(marker))
+        body = ("A" * 4000) + marker + filler_tail
+        self.assertEqual(len(body) - 3000, body.index(marker))
+        self.assertFalse(core._is_error_content(json.dumps({
+            "success": True, "output": body,
+        }), tool_name="terminal"))
+        # A genuine error immediately after a real newline near the same
+        # boundary must still be caught -- this is not a blanket exemption on
+        # the tail, only on its own leading fragment.
+        real = ("A" * 4000) + "\n" + "ERROR: disk full" + ("B" * 2950)
+        self.assertTrue(core._is_error_content(json.dumps({
+            "success": True, "output": real,
+        }), tool_name="terminal"))
 
     def test_fetcher_file_content_is_not_error_evidence(self):
         """B2: a fetched file mentioning error/failed is not a call failure.

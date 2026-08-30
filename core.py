@@ -875,20 +875,38 @@ def _channel_carries_failure_text(value: Dict[str, Any]) -> bool:
     "cleanup failed: timed out" by design — prose that contains the word, not a
     tool reporting its own outcome. Anchoring each line the way a genuine
     self-report actually starts (``ERROR: …``, ``Traceback (most recent call
-    last):``) cut that to 64 on the same corpus, and each of the 64 was read by
-    hand: every one is a real traceback, a failed patch/git/pip operation, or a
-    unittest ``ERROR:``/``Traceback`` line — none of the 173 dropped rows were,
-    so the anchor removed exactly the false-positive class and kept the rest.
+    last):``) cut that to 64 on the same corpus. All 64 were read by hand: 61
+    are a real traceback, a failed patch/git/pip operation, or a unittest
+    ``ERROR:``/``Traceback`` line.
+
+    Declared limit: 3 of the 64 are not calls failing at all -- a `hermes
+    status` display table whose per-provider cells read ``Error:  No Codex
+    credentials stored``, and a `pip install` run whose standard advisory
+    ("ERROR: pip's dependency resolver does not currently take into account
+    ...") sits ahead of its own "Successfully installed" line. Both still lead
+    with the anchor vocabulary at a real line start, so this check cannot tell
+    them from a genuine self-reported failure without naming those specific
+    tools or messages, which would re-open exactly the whack-a-mole this
+    anchor was built to avoid. Accepted because both are singleton
+    fingerprints on this corpus -- the >=2 repeat gate a run needs to actually
+    propose from never sees them.
     """
     for key in _OUTPUT_CHANNELS:
         channel = value.get(key)
         if not isinstance(channel, str) or not channel:
             continue
-        sample = (
-            channel
-            if len(channel) <= 4000
-            else channel[:1000] + "\n…\n" + channel[-3000:]
-        )
+        if len(channel) <= 4000:
+            sample = channel
+        else:
+            # channel[-3000:] can start mid-line -- the fragment before its
+            # first real newline is not a genuine line start, and matching
+            # _TOOL_FAILURE_HEAD against it would credit a mid-line error word
+            # ("...the call raised an error: ...") as if the tool had led with
+            # it. Drop that fragment; if the slice has no newline at all
+            # (one line longer than 3000 chars), there is no recoverable line
+            # start in it, so it drops to nothing rather than risk one.
+            _, _, tail = channel[-3000:].partition("\n")
+            sample = channel[:1000] + "\n…\n" + tail
         if any(_TOOL_FAILURE_HEAD.match(line) for line in sample.split("\n")):
             return True
     return False
