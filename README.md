@@ -1,6 +1,6 @@
 # Refine Cycle for Hermes Agent
 
-![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.jpg)
+![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.gif)
 
 **A measurement layer for Hermes Agent's self-improvement.** Hermes already
 learns from the conversation in front of it. Refine Cycle asks a different
