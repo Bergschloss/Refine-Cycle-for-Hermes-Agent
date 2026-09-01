@@ -14,6 +14,7 @@ put that at risk.
 import argparse
 import logging
 import threading
+from typing import Optional, Tuple
 
 try:
     from . import config
@@ -72,6 +73,38 @@ def _report_send_failure_once(target: str, detail: object) -> None:
     )
 
 
+def target_for_chat(chat: Optional[Tuple[str, str, str]]) -> Optional[str]:
+    """Decide where a notification goes. Pure: no host imports, no side effects.
+
+    ``chat`` is the ``(platform, chat_id, thread_id)`` triple captured in a hook
+    callback. It is a parameter, not something this module reads, on purpose: the
+    active chat lives in a per-asyncio-task ContextVar that a worker thread is
+    not guaranteed to inherit, so ``__init__._capture_active_chat`` reads it on
+    the turn's own thread and hands the value down. Reading it here would run on
+    the worker and address the wrong chat, or none.
+
+    Order:
+
+    1. The active chat. A numeric ``chat_id`` is a valid target on its own
+       (``tools.send_message_tool._TELEGRAM_TOPIC_TARGET_RE`` is
+       ``^\\s*(-?\\d+)(?::(\\d+))?\\s*$``, verified against real ids), and a
+       ``thread_id`` addresses a forum topic, so the message lands in the
+       conversation it came from.
+    2. An explicitly configured ``notify_target``. Not optional: only 13 of 187
+       sessions on the reference host carry a chat id -- the rest are CLI/local
+       -- so without this tier the notification is silent for the bulk of that
+       operator's work.
+    3. ``None`` -- nothing to send to. The caller sends nothing and reports once,
+       rather than failing a delivery to a bare platform name that cannot route.
+    """
+    if chat:
+        platform, chat_id, thread_id = chat
+        if platform and chat_id:
+            target = f"{platform}:{chat_id}"
+            return f"{target}:{thread_id}" if thread_id else target
+    return config.notify_target_configured()
+
+
 def _build_send_namespace(target: str, text: str) -> argparse.Namespace:
     """Every attribute hermes_cli.send_cmd.cmd_send reads, set explicitly.
 
@@ -117,8 +150,12 @@ def _send(target: str, text: str) -> tuple:
     return True, "exit 0"
 
 
-def notify(text: str) -> bool:
+def notify(text: str, chat: Optional[Tuple[str, str, str]] = None) -> bool:
     """Send a user-facing message. Returns True on delivery, False otherwise.
+
+    ``chat`` is the active conversation captured in a hook callback; when it is
+    present the message goes there, otherwise it falls back to a configured
+    ``notify_target``. Defaulting to None keeps every existing caller working.
 
     Never raises: a notification failure must not touch a refine outcome. The
     coupling to cmd_send is undocumented and expected to break someday, so every
@@ -131,7 +168,16 @@ def notify(text: str) -> bool:
             # is never reached.
             return False
 
-        target = config.notify_target()
+        target = target_for_chat(chat)
+        if not target:
+            # No active chat and no configured address. Sending is impossible,
+            # not merely failing, so report once and never call cmd_send: a bare
+            # platform guess here is the silent-forever bug documented in
+            # docs/FINDING-notify-bare-target-undeliverable.md.
+            _report_send_failure_once(
+                "(none)", "no active chat and no notify_target configured"
+            )
+            return False
         # Invariant 4: everything leaving for the user goes through the single
         # scrubbing choke point, even text the caller already scrubbed.
         safe_text = scrub_text(text)

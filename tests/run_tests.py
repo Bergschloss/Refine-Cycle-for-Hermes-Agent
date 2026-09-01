@@ -19673,7 +19673,7 @@ class NotifyModuleTests(unittest.TestCase):
         """A credential in the text must arrive redacted, never raw."""
         secret = "ghp_" + "A" * 36
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             self.assertTrue(self.notify.notify(f"token {secret} here"))
         self.assertEqual(len(self._captured), 1)
         self.assertNotIn(secret, self._captured[0].message)
@@ -19689,7 +19689,7 @@ class NotifyModuleTests(unittest.TestCase):
         production.
         """
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             self.assertTrue(self.notify.notify("body"))
         args = self._captured[0]
         for attr in ("to", "message", "file", "subject", "list_targets", "quiet", "json"):
@@ -19708,14 +19708,14 @@ class NotifyModuleTests(unittest.TestCase):
             raise SystemExit(0)
         self._send_module.cmd_send = exit_ok
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             self.assertTrue(self.notify.notify("body"), "SystemExit(0) is a successful send")
 
         def exit_fail(args):
             raise SystemExit(1)
         self._send_module.cmd_send = exit_fail
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             self.assertFalse(self.notify.notify("body"), "SystemExit(1) is a failed send")
 
     def test_undeliverable_notification_is_reported_at_warning_once(self):
@@ -19733,7 +19733,7 @@ class NotifyModuleTests(unittest.TestCase):
 
         self._send_module.cmd_send = exit_fail
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             with self.assertLogs(self.notify.logger, level="WARNING") as captured:
                 self.assertFalse(self.notify.notify("body"))
             # A misconfigured target fails on every applied edit, so the warning
@@ -19751,7 +19751,7 @@ class NotifyModuleTests(unittest.TestCase):
 
         self._send_module.cmd_send = boom
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             with self.assertLogs(self.notify.logger, level="WARNING") as captured:
                 self.assertFalse(self.notify.notify("body"))
         self.assertEqual(len(captured.output), 1, captured.output)
@@ -19763,7 +19763,7 @@ class NotifyModuleTests(unittest.TestCase):
 
         self._send_module.cmd_send = exit_ok
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             with patch.object(self.notify.logger, "warning") as warn:
                 self.assertTrue(self.notify.notify("body"))
         warn.assert_not_called()
@@ -19776,12 +19776,61 @@ class NotifyModuleTests(unittest.TestCase):
         self._send_module.cmd_send = hang
         with patch.object(self.notify, "_SEND_TIMEOUT_SECONDS", 0.3), \
                 patch.object(self.notify.config, "notify_enabled", return_value=True), \
-                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+                patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             started = time.time()
             result = self.notify.notify("body")
             elapsed = time.time() - started
         self.assertFalse(result)
         self.assertLess(elapsed, 6.0)
+
+    # ── N1: target_for_chat resolves active chat first, config second ─────
+
+    def test_target_for_chat_builds_a_plain_chat_target(self):
+        """A DM/group chat becomes platform:chat_id."""
+        self.assertEqual(
+            self.notify.target_for_chat(("telegram", "6667956926", "")),
+            "telegram:6667956926",
+        )
+
+    def test_target_for_chat_appends_a_forum_thread(self):
+        """A thread id addresses a forum topic."""
+        self.assertEqual(
+            self.notify.target_for_chat(("telegram", "-1001234567890", "25")),
+            "telegram:-1001234567890:25",
+        )
+
+    def test_active_chat_wins_over_configured_target(self):
+        """The conversation the lesson came from beats a static address."""
+        with patch.object(
+            self.notify.config, "notify_target_configured", return_value="telegram:Someone"
+        ):
+            self.assertEqual(
+                self.notify.target_for_chat(("telegram", "42", "")), "telegram:42"
+            )
+
+    def test_no_chat_falls_back_to_configured_target(self):
+        """A run with no chat uses the operator's explicit notify_target."""
+        with patch.object(
+            self.notify.config, "notify_target_configured", return_value="telegram:Taras"
+        ):
+            self.assertEqual(self.notify.target_for_chat(None), "telegram:Taras")
+
+    def test_partial_chat_is_treated_as_no_chat(self):
+        """An empty chat_id must not build 'telegram:' -- fall back instead."""
+        with patch.object(
+            self.notify.config, "notify_target_configured", return_value=None
+        ):
+            self.assertIsNone(self.notify.target_for_chat(("telegram", "", "")))
+
+    def test_no_target_at_all_sends_nothing_and_reports_once(self):
+        """No chat and no configured target: cmd_send is never called."""
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(
+                    self.notify.config, "notify_target_configured", return_value=None
+                ):
+            with self.assertLogs(self.notify.logger, level="WARNING"):
+                self.assertFalse(self.notify.notify("body", chat=None))
+        self.assertEqual(self._captured, [])
 
 
 class NotifyCallSiteTests(unittest.TestCase):
