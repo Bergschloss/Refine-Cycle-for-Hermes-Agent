@@ -376,70 +376,78 @@ def _on_pre_tool_call(
     Also enforces the proposer subagent's read-only contract: a child the
     plugin launched as a proposer may read skills but never write them.
     """
-    import re, shlex
-
-    session_id = str(kwargs.get("session_id", "") or "")
-    if session_id and session_id in _PROPOSER_CHILD_SESSIONS:
-        if tool_name == "skill_manage":
-            return {
-                "action": "block",
-                "message": (
-                    "You are the refine proposer and have no write access. "
-                    "Use skills_list and skill_view to verify, then return "
-                    "your JSON proposal."
-                ),
-            }
-
-    # The block rules come only from prompt notes. When the operator turns the
-    # feature off, _BLOCK_RULES can still hold rules parsed on an earlier turn
-    # (the list lives for the process), so tool calls would keep being refused
-    # by a feature that is disabled. Clear the stale rules and stop enforcing
-    # them. The proposer read-only contract above is a separate concern and is
-    # intentionally left in force. Mind the global: this rebinds _BLOCK_RULES.
+    # This hook runs inside the host's tool dispatch. An exception here — a
+    # malformed rule, a helper raising, an unreadable config — would propagate
+    # into that dispatch and could block the agent's tool calls entirely. A
+    # broken hook must fail OPEN: log and return None so the agent keeps working
+    # rather than losing tool access to a refine bug. The block decisions on the
+    # happy path are unchanged.
     global _BLOCK_RULES
-    if not config.prompt_notes_enabled():
-        _BLOCK_RULES = []
+    try:
+        import re, shlex
+
+        session_id = str(kwargs.get("session_id", "") or "")
+        if session_id and session_id in _PROPOSER_CHILD_SESSIONS:
+            if tool_name == "skill_manage":
+                return {
+                    "action": "block",
+                    "message": (
+                        "You are the refine proposer and have no write access. "
+                        "Use skills_list and skill_view to verify, then return "
+                        "your JSON proposal."
+                    ),
+                }
+
+        # The block rules come only from prompt notes. When the operator turns
+        # the feature off, _BLOCK_RULES can still hold rules parsed on an earlier
+        # turn (the list lives for the process), so tool calls would keep being
+        # refused by a feature that is disabled. Clear the stale rules and stop
+        # enforcing them. The proposer read-only contract above is a separate
+        # concern and is intentionally left in force.
+        if not config.prompt_notes_enabled():
+            _BLOCK_RULES = []
+            return None
+
+        # Same normalization _on_pre_llm_call uses before comparing against a
+        # note's stored session_id, so a rule built from a session-scoped note
+        # only ever fires inside that same session.
+        current_session = journal.normalize_prompt_note_session_id(session_id)
+
+        for rule in _BLOCK_RULES:
+            if rule.get("scope") == "session" and rule.get("session_id", "") != current_session:
+                continue
+            rt = rule.get("type", "")
+            target = rule.get("target", "")
+
+            # --- Block a specific CLI binary ---
+            if rt == "block_binary" and tool_name == "terminal":
+                cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
+                # check all binaries in the pipeline/chain
+                for binary in _extract_binaries(cmd):
+                    if _binary_matches(binary, target):
+                        return {"action": "block", "message": rule["action"]}
+
+            # --- Block a specific tool name ---
+            if rt == "block_tool":
+                if _tool_matches(tool_name, target):
+                    return {"action": "block", "message": rule["action"]}
+
+            # --- Require specific fields ---
+            if rt == "require_fields":
+                if _tool_matches(tool_name, rule.get("tool", "")):
+                    if isinstance(args, dict):
+                        missing = [f for f in rule.get("fields", []) if f not in args]
+                        if missing:
+                            return {
+                                "action": "block",
+                                "message": f"Missing required fields: {', '.join(missing)}. "
+                                           f"{rule['action']}",
+                            }
+
         return None
-
-    # Same normalization _on_pre_llm_call uses before comparing against a
-    # note's stored session_id, so a rule built from a session-scoped note
-    # only ever fires inside that same session.
-    current_session = journal.normalize_prompt_note_session_id(session_id)
-
-    for rule in _BLOCK_RULES:
-        if rule.get("scope") == "session" and rule.get("session_id", "") != current_session:
-            continue
-        rt = rule.get("type", "")
-        target = rule.get("target", "")
-
-        # --- Block a specific CLI binary ---
-        if rt == "block_binary" and tool_name == "terminal":
-            cmd = str(args.get("command", "")) if isinstance(args, dict) else ""
-            # check all binaries in the pipeline/chain
-
-            for binary in _extract_binaries(cmd):
-                if _binary_matches(binary, target):
-            
-                                return {"action": "block", "message": rule["action"]}
-
-        # --- Block a specific tool name ---
-        if rt == "block_tool":
-            if _tool_matches(tool_name, target):
-                return {"action": "block", "message": rule["action"]}
-
-        # --- Require specific fields ---
-        if rt == "require_fields":
-            if _tool_matches(tool_name, rule.get("tool", "")):
-                if isinstance(args, dict):
-                    missing = [f for f in rule.get("fields", []) if f not in args]
-                    if missing:
-                        return {
-                            "action": "block",
-                            "message": f"Missing required fields: {', '.join(missing)}. "
-                                       f"{rule['action']}",
-                        }
-
-    return None
+    except Exception:
+        logger.debug("refine _on_pre_tool_call failed; failing open", exc_info=True)
+        return None
 
 
 def _extract_binaries(cmd: str) -> list:

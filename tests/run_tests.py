@@ -8171,6 +8171,29 @@ class RefineTests(unittest.TestCase):
         self.assertIsNotNone(blocked, "an enabled block must still fire")
         self.assertEqual(blocked["action"], "block")
 
+    def test_pre_tool_call_fails_open_on_internal_error(self):
+        """B9: this hook runs inside the host's tool dispatch, so an exception
+        here would propagate and could block the agent's tool calls entirely.
+        A broken hook must fail OPEN — log and return None — not brick the agent.
+        """
+        plugin_init._update_block_rules([
+            {"content": "When calling curl, use wget instead of curl.",
+             "scope": "global", "session_id": ""}
+        ])
+        # An internal helper raises; the hook must swallow it and return None.
+        with patch.object(plugin_init, "_extract_binaries", side_effect=RuntimeError("boom")):
+            result = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "curl http://x"}, session_id="s"
+            )
+        self.assertIsNone(result, "a broken hook must fail open, not propagate")
+
+        # Happy path unchanged: with no fault injected, the block still fires.
+        blocked = plugin_init._on_pre_tool_call(
+            tool_name="terminal", args={"command": "curl http://x"}, session_id="s"
+        )
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked["action"], "block")
+
     def test_prompt_note_cannot_reroute_away_from_a_load_bearing_binary(self):
         """A reroute note is a live veto, so it must not disable the agent.
 
