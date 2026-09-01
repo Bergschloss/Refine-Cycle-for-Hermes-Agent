@@ -15626,6 +15626,85 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIsNotNone(error)
         self.assertIn("context-control", error)
 
+    def test_journal_entries_with_llm_meta_always_carry_a_result_code(self):
+        """No failure may be structurally indistinguishable from another.
+
+        Measured on the live journal before this landed: 313 of 837 entries were
+        outcome="llm_error", and not one recorded which of the five causes it was
+        -- llm_call_error, llm_timeout, llm_route_error, llm_transport_unsupported
+        or llm_trust_denied. The human `error` string did say "timed out", so the
+        information was not absent; it was uncountable. That is why a deadline
+        truncating 17% of working calls stayed invisible: its failures looked
+        exactly like a dead route.
+
+        Asserted at the choke point rather than per call site, because per call
+        site is what failed.
+        """
+        captured = []
+
+        def fake_log(**kwargs):
+            captured.append(kwargs)
+            return "id0"
+
+        original = core.journal.log
+        core.journal.log = fake_log
+        try:
+            # A caller that classified the failure keeps its own code.
+            core._journal_nonmutation(
+                outcome="llm_error",
+                llm_meta={"latency_ms": 45220, "result_code": "llm_timeout"},
+            )
+            # A caller that did not gets the outcome, never nothing.
+            core._journal_nonmutation(
+                outcome="llm_invocation_unavailable",
+                llm_meta={"latency_ms": 0},
+            )
+            # An empty string is not a classification either.
+            core._journal_nonmutation(
+                outcome="no_op", llm_meta={"result_code": "  "},
+            )
+            # No outcome at all still must not yield an absent key.
+            core._journal_nonmutation(llm_meta={"latency_ms": 1})
+            # An entry with no model call keeps no llm_meta invented for it.
+            core._journal_nonmutation(outcome="rolled_back")
+        finally:
+            core.journal.log = original
+
+        self.assertEqual(captured[0]["llm_meta"]["result_code"], "llm_timeout")
+        self.assertEqual(
+            captured[1]["llm_meta"]["result_code"], "llm_invocation_unavailable")
+        self.assertEqual(captured[2]["llm_meta"]["result_code"], "no_op")
+        self.assertEqual(captured[3]["llm_meta"]["result_code"], "unset")
+        self.assertIsNone(captured[4].get("llm_meta"))
+        for entry in captured[:4]:
+            self.assertTrue(str(entry["llm_meta"]["result_code"]).strip())
+
+    def test_journal_result_code_does_not_leak_between_entries(self):
+        """One pass shares its llm_meta across writes; a thread per session runs.
+
+        Filling the caller's dict in place would let one entry's classification
+        appear on another's, and on_session_end starts a thread per session, so
+        the two writes need not even belong to the same pass.
+        """
+        shared = {"latency_ms": 10}
+        captured = []
+
+        def fake_log(**kwargs):
+            captured.append(kwargs)
+            return "id0"
+
+        original = core.journal.log
+        core.journal.log = fake_log
+        try:
+            core._journal_nonmutation(outcome="llm_error", llm_meta=shared)
+            core._journal_nonmutation(outcome="no_op", llm_meta=shared)
+        finally:
+            core.journal.log = original
+
+        self.assertNotIn("result_code", shared)
+        self.assertEqual(captured[0]["llm_meta"]["result_code"], "llm_error")
+        self.assertEqual(captured[1]["llm_meta"]["result_code"], "no_op")
+
     def test_proposal_and_review_timeouts_stay_derived_from_one_constant(self):
         """Two limits describing the same work must not be written twice.
 

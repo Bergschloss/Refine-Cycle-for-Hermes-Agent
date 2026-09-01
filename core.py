@@ -2951,7 +2951,29 @@ def _skill_patch_matches_baseline(proposal: Dict[str, Any]) -> bool:
 
 
 def _journal_nonmutation(**kwargs: Any) -> Optional[str]:
-    """Write a non-mutating journal entry. Accepts all journal.log kwargs including llm_meta."""
+    """Write a non-mutating journal entry. Accepts all journal.log kwargs including llm_meta.
+
+    Guarantees ``llm_meta["result_code"]`` on every entry that carries model-call
+    metadata, because this is the one place all of them pass through. Setting it
+    at each call site is what left it unset: the pass that fails is exactly the
+    pass whose author was thinking about the failure, not about the record.
+
+    When a caller has already classified the failure, that value stands. When it
+    has not, the entry's own ``outcome`` is used -- never nothing. An absent key
+    cannot be told apart from an old entry, a pass that made no call, and a pass
+    that succeeded, and the journal is the durable record those questions get
+    asked of months later.
+
+    The caller's dict is copied rather than filled in place. ``_run_llm_meta`` is
+    shared across the writes of one pass, and ``on_session_end`` runs a thread per
+    session, so mutating it here would let one entry's classification appear on
+    another's.
+    """
+    meta = kwargs.get("llm_meta")
+    if isinstance(meta, dict) and not str(meta.get("result_code") or "").strip():
+        meta = dict(meta)
+        meta["result_code"] = str(kwargs.get("outcome") or "").strip() or "unset"
+        kwargs["llm_meta"] = meta
     try:
         return journal.log(**kwargs)
     except Exception as exc:
@@ -4240,6 +4262,26 @@ def _refine_once(
     # so the observed set is stored as a count only, not a full list.
     _run_llm_meta["offered_fingerprints"] = sorted(_offered_fps)
     _run_llm_meta["observed_fingerprint_count"] = len(_observed_fps)
+    # What actually happened to the model call, in the journal, as a code.
+    #
+    # Five distinct causes collapse into outcome="llm_error" below --
+    # llm_call_error, llm_timeout, llm_route_error, llm_transport_unsupported and
+    # llm_trust_denied -- and llm_meta did not carry which one. Measured on the
+    # live journal: 313 of 837 entries are llm_error and not one of them records
+    # its cause structurally. The human `error` string does say "timed out", so
+    # the information was not absent, but nothing could be counted: "how often
+    # does the route fail versus the provider versus our own deadline" had no
+    # answer, and that is the question the deadline fix needed. A ceiling that
+    # was truncating 17% of working calls stayed invisible for exactly as long
+    # as its failures were indistinguishable from a dead route.
+    #
+    # Set on every path, success included, and set HERE -- where the pass's meta
+    # is finished and before any journal write -- so no branch can forget it.
+    # Omission is what made this unfalsifiable: an absent key reads as "old
+    # entry", "no call made" and "call succeeded" at once.
+    _run_llm_meta["result_code"] = (
+        scrub_text(str(proposal.get("failure", "")).strip()) or "ok"
+    )
     evidence_summary = {
         "session_id": session,
         "session_id_source": session_source,
