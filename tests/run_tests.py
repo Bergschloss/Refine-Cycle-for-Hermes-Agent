@@ -11041,6 +11041,20 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         dupes = sorted({n for n in names if names.count(n) > 1})
         self.assertEqual(dupes, [], f"duplicate defs: {dupes}")
 
+    def test_recurrence_horizon_accepts_documented_alias(self):
+        """The README documents recurrence_horizon_days; an operator who sets it
+        must get that value, not a silent default from a key the code ignored."""
+        with patch.object(config, "_get_refine_entry",
+                          return_value={"recurrence_horizon_days": 10}):
+            self.assertEqual(config.audit_recurrence_horizon_days(), 10)
+
+    def test_recurrence_horizon_explicit_key_takes_precedence(self):
+        """The explicit audit_ key wins when both are present."""
+        with patch.object(config, "_get_refine_entry",
+                          return_value={"audit_recurrence_horizon_days": 14,
+                                        "recurrence_horizon_days": 10}):
+            self.assertEqual(config.audit_recurrence_horizon_days(), 14)
+
     def test_config_string_coercion_and_cooldown_zero(self):
         """Wave 2.9-2.12: config honors string bool/int and allows cooldown=0."""
         # String booleans

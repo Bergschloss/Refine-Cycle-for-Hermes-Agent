@@ -670,8 +670,15 @@ def audit_recurrence_horizon_days() -> int:
     therefore more likely fixed than paused. Deliberately separate from
     ``unused_skills``' 14-day age gate: an unused skill for 3 days is normal,
     a chronic failure silent for 3 days is a signal. Different questions.
+
+    Accepts the README-documented ``recurrence_horizon_days`` as an alias so an
+    operator who follows the docs is not silently given the default. The
+    explicit ``audit_recurrence_horizon_days`` still wins when both are set.
     """
-    return get_int("audit_recurrence_horizon_days", 3, min_val=1)
+    entry = _get_refine_entry()
+    if "audit_recurrence_horizon_days" in entry:
+        return get_int("audit_recurrence_horizon_days", 3, min_val=1)
+    return get_int("recurrence_horizon_days", 3, min_val=1)
 
 
 def proposer_subagent_enabled() -> bool:

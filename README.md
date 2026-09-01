@@ -590,7 +590,8 @@ Two honesty rules behind the verdicts:
   (typically after a restored or rebuilt `state.db`). An empty scan cannot
   tell "the failure stopped" from "the evidence was lost", so the row names
   the gap instead of drifting into `unclear` or claiming `working`.
-- **Recurrence horizon** (`refine.recurrence_horizon_days`, default **3**).
+- **Recurrence horizon** (`refine.audit_recurrence_horizon_days`, also accepted
+  as `refine.recurrence_horizon_days`, default **3**).
   On the reference journal, the median gap between recurrences of a chronic
   failure is minutes and the 95th percentile is 2.17 days — so silence shorter
   than the horizon is indistinguishable from a pause. Fingerprintless rows
@@ -729,6 +730,7 @@ All keys live under `plugins.entries.refine`:
 | `cross_session_max_sessions` | int | `25` | Interactive session scan cap. |
 | `cross_session_max_rows` | int | `4000` | Maximum trajectory rows scanned by an interactive cross-session pass. |
 | `dedup_window_days` | int | `7` | Refuse an edit identical to a recent applied, pending, or prepared edit. |
+| `audit_recurrence_horizon_days` | int | `3` | Days of post-edit silence after which `/refine audit` reads "no recurrence" as fixed rather than paused. Also accepted as `recurrence_horizon_days`; the explicit `audit_` key wins when both are set. |
 
 LLM trust policy (`plugins.entries.refine.llm`):
 
