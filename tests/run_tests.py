@@ -17745,21 +17745,17 @@ class TraceContractTests(unittest.TestCase):
             _trace_mod.logger.propagate = True
 
     def test_trace_no_raw_identity_in_output(self):
-        from trace import build_trace
-        t = build_trace(
-            session_id="s",
-            source="tool",
-            operation="test",
-            route_state="bound",
-            provider="openai",
-            model="gpt-4",
-        )
-        # provider/model are allowed metadata (reported by host response);
-        # but any value starting with secret patterns must be rejected by _safe_hash
-        # (verified in build_trace by absence of raw identity fields)
-        for k, v in t.items():
-            if isinstance(v, str) and (v.startswith(("sk-", "Bearer ", "token=")) or ("@" in v and "/" in v)):
-                self.fail(f"Potential credential in trace field {k}: {v[:30]}")
+        import trace as trace_mod
+        # The original test built a trace with only clean metadata (provider,
+        # model) and then looped asserting no field looked like a secret. Nothing
+        # secret was ever put in, so the scrub path was never exercised. Feed a
+        # credential-shaped value through the real emission boundary (_boundary,
+        # confirmed in trace.py — it applies scrub_text) and assert the raw
+        # secret does not survive.
+        secret = "sk-" + "A" * 32
+        scrubbed = trace_mod._boundary(secret)
+        self.assertNotIn("A" * 32, scrubbed)
+        self.assertIn("[REDACTED]", scrubbed)
 
 
 class TraceBoundaryScrubTests(unittest.TestCase):
