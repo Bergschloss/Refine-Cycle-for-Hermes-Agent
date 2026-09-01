@@ -3471,34 +3471,10 @@ def _set_subagent_lifecycle_provider(provider: Optional[Any]) -> None:
     _subagent_lifecycle_provider = provider
 
 
-# The slash command name lives in __init__ (it is /refine, or /refine-cycle when
-# the host already ships a built-in /refine). core.py cannot import __init__
-# without a cycle, so register() installs a resolver here the same way it
-# installs the subagent lifecycle provider. Until it does — bare imports, tests,
-# offline runs — the notification falls back to the default name rather than
-# guessing wrong.
-_command_display_provider: Optional[Any] = None
+_LESSON_BODY = "♾️ Refine Cycle — new lesson learned"
 
 
-def _set_command_display_provider(provider: Optional[Any]) -> None:
-    """Install __init__'s command-name resolver so notifications can name it."""
-    global _command_display_provider
-    _command_display_provider = provider
-
-
-def _command_display() -> str:
-    """The slash command name to render in a notification, e.g. '/refine'."""
-    provider = _command_display_provider
-    if provider is None:
-        return "/refine"
-    try:
-        name = provider()
-        return name if name else "/refine"
-    except Exception:
-        return "/refine"
-
-
-def _notify_lesson(*, kind: str, name: str, journal_id: str) -> None:
+def _notify_lesson(active_chat=None) -> None:
     """Tell the user a refine edit landed. Only ever called for outcome=applied.
 
     The durable journal entry is the source of truth and already exists by the
@@ -3506,15 +3482,16 @@ def _notify_lesson(*, kind: str, name: str, journal_id: str) -> None:
     recorded. ``notify`` is failure-isolated and never raises, but the call is
     still guarded: a cosmetic notification must not be able to change the applied
     outcome the caller is about to return.
+
+    The body is one plain line, by owner decision: no kind, no name, no journal
+    id, no markdown. It must not distract, and it must render identically on
+    every platform (``**bold**`` shows as literal asterisks on some). The
+    rollback id stays discoverable in the journal and via ``/refine-cycle
+    audit``. ``active_chat`` is the captured conversation triple; when present
+    the message goes there, otherwise notify falls back to a configured target.
     """
     try:
-        label = f"{kind}: {name}" if name else str(kind)
-        body = (
-            "♾️ **Refine Cycle** — new lesson learned\n\n"
-            f"{label}\n"
-            f"↩ undo: {_command_display()} rollback {journal_id}"
-        )
-        _notify.notify(body)
+        _notify.notify(_LESSON_BODY, active_chat)
     except Exception:
         logger.debug("refine notify: lesson message failed", exc_info=True)
 
@@ -3855,6 +3832,7 @@ def _refine_once(
     dry_run: bool = False,
     explicit_session: bool = False,
     session_ending: bool = False,
+    active_chat=None,
 ) -> Dict[str, Any]:
     trigger = "auto" if auto else "manual"
     started = time.time()
@@ -4655,6 +4633,7 @@ def _refine_once(
                 source_revision=source_revision,
                 observed_fingerprints=frozenset(_observed_fps),
                 rendered_fingerprints=frozenset(_offered_fps),
+                active_chat=active_chat,
             )
         transaction["evidence"] = evidence_summary
         transaction["llm_meta"] = _run_llm_meta
@@ -4708,6 +4687,7 @@ def _refine_once(
             started=started,
             llm_meta=_run_llm_meta,
             source_revision=source_revision,
+            active_chat=active_chat,
         )
     response["evidence"] = evidence_summary
     response["llm_meta"] = _run_llm_meta
@@ -4725,6 +4705,7 @@ def _apply_edit(
     llm_meta: Optional[Dict[str, Any]] = None,
     source_revision: Optional[frozenset] = None,
     source_session: Optional[str] = None,
+    active_chat=None,
 ) -> Dict[str, Any]:
     """Validate, back up, apply, and finalize exactly one edit.
 
@@ -5096,7 +5077,7 @@ def _apply_edit(
         # not recorded. Only outcome=applied — a pending_approval edit has NOT
         # landed, so "lesson learned" would be a lie. Failure is logged and
         # ignored inside _notify_lesson.
-        _notify_lesson(kind=kind, name=name, journal_id=entry_id)
+        _notify_lesson(active_chat=active_chat)
 
     message = (
         f"done ({time.time() - started:.1f}s) | action={action} kind={kind} "
@@ -5221,6 +5202,7 @@ def _apply_transaction(
     source_revision: Optional[frozenset] = None,
     observed_fingerprints: Optional[frozenset] = None,
     rendered_fingerprints: Optional[frozenset] = None,
+    active_chat=None,
 ) -> Dict[str, Any]:
     """Apply one multi-edit proposal as a sequence of independent durable edits.
 
@@ -5507,6 +5489,7 @@ def _apply_transaction(
             llm_meta=edit_llm_meta,
             source_revision=source_revision,
             source_session=session,
+            active_chat=active_chat,
         )
         results.append(item)
         if not item.get("success"):
@@ -5645,6 +5628,7 @@ def refine_run(
     dry_run: bool = False,
     explicit_session: bool = False,
     session_ending: bool = False,
+    active_chat=None,
 ) -> Dict[str, Any]:
     """Serialize a run, reconcile approvals, and preserve every recovery id.
 
@@ -5677,7 +5661,7 @@ def refine_run(
         return _refine_once(
             llm, reason=scrub_text(reason), session_id=session_id,
             auto=auto, dry_run=True, explicit_session=explicit_session,
-            session_ending=session_ending,
+            session_ending=session_ending, active_chat=active_chat,
         )
 
     runs: List[Dict[str, Any]] = []
@@ -5693,6 +5677,7 @@ def refine_run(
         result = _refine_once(
             llm, reason=run_reason, session_id=session_id, auto=auto,
             explicit_session=explicit_session, session_ending=session_ending,
+            active_chat=active_chat,
         )
         runs.append(result)
         if not result.get("success") or not int(result.get("edits_applied", 0) or 0):

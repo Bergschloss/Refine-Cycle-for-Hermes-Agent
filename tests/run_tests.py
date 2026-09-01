@@ -19855,15 +19855,27 @@ class NotifyCallSiteTests(unittest.TestCase):
             return core.refine_run(MockLlm(), **kwargs)
 
     def test_applied_edit_notifies_once(self):
-        """A real applied edit fires exactly one lesson notification."""
+        """A real applied edit fires exactly one lesson notification.
+
+        N2: the body is now one plain line with no kind/name/undo. The old
+        assertions (``skill: notify-applied`` and ``rollback``) are wrong by
+        decision, not by accident, and are replaced with their exact-equality
+        opposite. This is the one existing assertion the spec permits changing.
+        """
         calls = []
-        with patch.object(core._notify, "notify", side_effect=lambda text: calls.append(text) or True):
+        with patch.object(
+            core._notify, "notify",
+            side_effect=lambda text, chat=None: calls.append(text) or True,
+        ):
             result = self.run_proposal(skill_proposal("notify-applied"))
         self.assertEqual(result["outcome"], "applied")
         self.assertEqual(len(calls), 1)
-        self.assertIn("\u267e\ufe0f **Refine Cycle** \u2014 new lesson learned", calls[0])
-        self.assertIn("skill: notify-applied", calls[0])
-        self.assertIn("rollback", calls[0])
+        # Exact equality, not assertIn: an assertIn cannot catch appended text,
+        # which is precisely what N2 removes.
+        self.assertEqual(calls[0], "\u267e\ufe0f Refine Cycle \u2014 new lesson learned")
+        self.assertNotIn("**", calls[0])
+        self.assertNotIn("rollback", calls[0])
+        self.assertNotIn("notify-applied", calls[0])
 
     def test_non_applied_outcomes_do_not_notify(self):
         """Only outcome=applied notifies; every other outcome stays silent."""
