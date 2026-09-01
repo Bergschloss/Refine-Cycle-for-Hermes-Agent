@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from agent.plugin_llm import PluginLlm
 
@@ -20,9 +20,10 @@ _ROLLBACK_COMMAND = re.compile(r"^rollback\s+([0-9a-fA-F]{12})$")
 
 
 _AUTO_THREAD_GUARD = threading.Lock()
-# A deferred session-end must retain the invocation-bound facade captured by
-# its host callback. Bare worker threads do not inherit the host ContextVar.
-_AUTO_PENDING_SESSION_ENDS: dict[str, Optional[PluginLlm]] = {}
+# A deferred session-end must retain the invocation-bound facade AND the active
+# chat captured by its host callback. Bare worker threads do not inherit either
+# ContextVar, so both travel by value: {session_id: (llm, active_chat)}.
+_AUTO_PENDING_SESSION_ENDS: dict = {}
 _AUTO_PENDING_LOCK = threading.Lock()
 _REGISTERED_CONTEXT: Optional[Any] = None
 _BOUND_LLM_UNSET = object()
@@ -38,13 +39,15 @@ _HOST_PATH_LOCK_TIMEOUT = 2.0
 
 
 def _defer_or_claim_session_end(
-    session_id: str, llm: Optional[PluginLlm]
+    session_id: str,
+    llm: Optional[PluginLlm],
+    active_chat: Optional[Tuple[str, str, str]] = None,
 ) -> bool:
     """Atomically claim the worker slot or publish one deferred fallback."""
     with _AUTO_PENDING_LOCK:
         if _AUTO_THREAD_GUARD.acquire(blocking=False):
             return True
-        _AUTO_PENDING_SESSION_ENDS[session_id] = llm
+        _AUTO_PENDING_SESSION_ENDS[session_id] = (llm, active_chat)
         return False
 
 
@@ -62,7 +65,7 @@ def _finish_auto_worker() -> None:
             if pending is None:
                 _AUTO_THREAD_GUARD.release()
                 return
-            session_id, llm = pending
+            session_id, (llm, pending_chat) = pending
             del _AUTO_PENDING_SESSION_ENDS[session_id]
         if not config.auto_enabled():
             # Auto is disabled — clean up prompt notes and continue draining
@@ -71,7 +74,10 @@ def _finish_auto_worker() -> None:
             continue
         try:
             _on_session_end(
-                session_id=session_id, _bound_llm=llm, _worker_claimed=True
+                session_id=session_id,
+                _bound_llm=llm,
+                _worker_claimed=True,
+                _active_chat=pending_chat,
             )
         except Exception:
             logger.exception("deferred refine session-end hook failed")
@@ -112,6 +118,46 @@ def _assistant_turn_count(conversation_history: Any) -> int:
         if role == "assistant":
             count += 1
     return count
+
+
+_ACTIVE_CHAT_UNSET = object()
+
+
+def _capture_active_chat() -> Optional[Tuple[str, str, str]]:
+    """Read the active conversation. MUST be called from a hook callback.
+
+    Returns ``(platform, chat_id, thread_id)`` for a live chat turn, or None when
+    the turn is not a messaging surface (CLI, local, tui, tool, ...) or the host
+    does not expose session context at all.
+
+    **Why the call site matters.** These values live in a ContextVar the gateway
+    sets per asyncio task. A raw ``threading.Thread`` inheriting that context is
+    an accident of where it was started, and the host confirmed there is no
+    contract behind it. Refine notifies from worker threads, so the capture
+    happens here, on the turn's own thread, and the triple is passed down by
+    value — exactly as the LLM facade already is. Never call this from a worker:
+    it would read an empty context and address the wrong chat, or none.
+
+    Any failure means "no chat": this reaches into host internals
+    (``gateway.session_context``) a future version may move, and a notification
+    address is never worth raising over.
+    """
+    try:
+        from gateway.session_context import (  # type: ignore
+            get_session_env,
+            session_is_messaging_surface,
+        )
+
+        if not session_is_messaging_surface():
+            return None
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        if not platform or not chat_id:
+            return None
+        return (platform, chat_id, get_session_env("HERMES_SESSION_THREAD_ID", ""))
+    except Exception:
+        logger.debug("refine: active chat unavailable", exc_info=True)
+        return None
 
 
 def _cooldown_elapsed() -> bool:
@@ -177,8 +223,13 @@ def _run_auto_refine(
     llm: Optional[PluginLlm] = None,
     *,
     cleanup_session_notes: bool = False,
+    active_chat: Optional[Tuple[str, str, str]] = None,
 ) -> None:
-    """Run one guarded automatic pass with the callback-captured LLM facade."""
+    """Run one guarded automatic pass with the callback-captured LLM facade.
+
+    ``active_chat`` travels by value for the same reason ``llm`` does: this runs
+    on a worker thread that cannot be trusted to have inherited the turn context.
+    """
     try:
         if not _auto_refine_allowed():
             if cleanup_session_notes:
@@ -198,6 +249,7 @@ def _run_auto_refine(
                         # The same worker clears this session's notes below, so a
                         # session-scoped note written here would not survive the call.
                         session_ending=cleanup_session_notes,
+                        active_chat=active_chat,
                     )
             finally:
                 # Cleanup must always run, even if refine_run raised above.
@@ -220,7 +272,10 @@ def _run_auto_refine(
 
 
 def _start_auto_refine(
-    session_id: str, assistant_turns: int, llm: Optional[PluginLlm]
+    session_id: str,
+    assistant_turns: int,
+    llm: Optional[PluginLlm],
+    active_chat: Optional[Tuple[str, str, str]] = None,
 ) -> None:
     """Start one pass with the bound facade captured in the host callback."""
     if (
@@ -236,6 +291,9 @@ def _start_auto_refine(
         threading.Thread(
             target=_run_auto_refine,
             args=(session_id, llm),
+            # kwargs, not args: a positional here would land on
+            # cleanup_session_notes and both break notes and mis-route the chat.
+            kwargs={"active_chat": active_chat},
             daemon=True,
             name="refine-auto",
         ).start()
@@ -644,8 +702,13 @@ def _on_post_llm_call(
         # Resolve while Hermes still has this callback's invocation ContextVar.
         # The worker is a bare thread and cannot resolve the same route later.
         llm = _session_llm()
+        # Same reason, same moment: the active chat lives in a per-task
+        # ContextVar the worker may not inherit. Capture here, pass by value.
         _start_auto_refine(
-            session_id, _assistant_turn_count(conversation_history), llm
+            session_id,
+            _assistant_turn_count(conversation_history),
+            llm,
+            _capture_active_chat(),
         )
     except Exception as exc:
         safe_error = core.scrub_text(str(exc))
@@ -971,6 +1034,8 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 auto=False,
                 dry_run=True,
                 explicit_session=bool(dry_session),
+                # This handler runs inside the turn, so the chat context is valid.
+                active_chat=_capture_active_chat(),
             )
         except Exception as exc:
             logger.exception("refine dry-run failed")
@@ -1071,6 +1136,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                     session_id=explicit_session,
                     auto=False,
                     explicit_session=True,
+                    active_chat=_capture_active_chat(),
                 )
             except Exception as exc:
                 logger.exception("refine session command failed")
@@ -1109,7 +1175,10 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         return mistyped
 
     try:
-        result = core.refine_run(llm=_session_llm(), reason=args, auto=False)
+        result = core.refine_run(
+            llm=_session_llm(), reason=args, auto=False,
+            active_chat=_capture_active_chat(),
+        )
     except Exception as exc:
         logger.exception("refine command failed")
         return f"❌ Refine failed: {core.scrub_text(str(exc))}"
@@ -1209,6 +1278,8 @@ def _handle_refine_run(args: dict, **kw) -> str:
             auto=False,
             dry_run=dry_run,
             explicit_session=bool(session_id),
+            # The tool handler runs inside the turn, like the command handler.
+            active_chat=_capture_active_chat(),
         )
     except Exception as exc:
         logger.exception("refine_run tool failed")
@@ -1223,12 +1294,20 @@ def _on_session_end(
     interrupted: bool = False,
     _bound_llm: Any = _BOUND_LLM_UNSET,
     _worker_claimed: bool = False,
+    _active_chat: Any = _ACTIVE_CHAT_UNSET,
     **kwargs,
 ) -> None:
     """Run the session-end fallback without blocking or losing its bound route."""
     # A deferred drain calls this function from a worker and supplies the facade
     # captured by the original callback. Only a real host callback resolves it.
     bound_llm = _session_llm() if _bound_llm is _BOUND_LLM_UNSET else _bound_llm
+    # Same contract for the active chat: resolve it here only when this really is
+    # a host callback. A drain runs on a worker whose context is not the turn's,
+    # so it hands back the triple its original callback captured — reading it
+    # again would address the wrong chat, or none.
+    active_chat = (
+        _capture_active_chat() if _active_chat is _ACTIVE_CHAT_UNSET else _active_chat
+    )
     core.note_session_id(session_id)
     _forget_turn_marks(session_id)
     if not config.auto_enabled() or interrupted:
@@ -1236,7 +1315,9 @@ def _on_session_end(
         if _worker_claimed:
             _finish_auto_worker()
         return
-    if not _worker_claimed and not _defer_or_claim_session_end(session_id, bound_llm):
+    if not _worker_claimed and not _defer_or_claim_session_end(
+        session_id, bound_llm, active_chat
+    ):
         return
 
     def _collect_and_run() -> None:
@@ -1251,7 +1332,8 @@ def _on_session_end(
                 # but do not fetch even one trajectory row in this preflight.
                 handed_off = True
                 _run_auto_refine(
-                    session_id, bound_llm, cleanup_session_notes=True
+                    session_id, bound_llm, cleanup_session_notes=True,
+                    active_chat=active_chat,
                 )
                 return
             # Session-end only gates on ``auto_min_messages``. Count at most that
@@ -1286,7 +1368,8 @@ def _on_session_end(
                 return
             handed_off = True
             _run_auto_refine(
-                session_id, bound_llm, cleanup_session_notes=True
+                session_id, bound_llm, cleanup_session_notes=True,
+                active_chat=active_chat,
             )
         except Exception:
             logger.exception("refine auto session-end hook failed")

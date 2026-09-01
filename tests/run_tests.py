@@ -4465,6 +4465,7 @@ class RefineTests(unittest.TestCase):
             auto=False,
             dry_run=True,
             explicit_session=True,
+            active_chat=None,
         )
         self.assertIn("Dry run", output)
 
@@ -6274,7 +6275,14 @@ class RefineTests(unittest.TestCase):
         # session-scoped note.
         self.assertEqual(
             calls[0][1],
-            {"session_id": "session", "auto": True, "session_ending": False},
+            {
+                "session_id": "session",
+                "auto": True,
+                "session_ending": False,
+                # N1: the captured active chat travels with the run. None here
+                # because the test host exposes no gateway.session_context.
+                "active_chat": None,
+            },
         )
         self.assertEqual(calls[0][2], "refine-auto")
 
@@ -6343,7 +6351,7 @@ class RefineTests(unittest.TestCase):
             self.assertTrue(called.wait(1))
         self.assertEqual(limits, [4])
         run_auto.assert_called_once_with(
-            "session", None, cleanup_session_notes=True
+            "session", None, cleanup_session_notes=True, active_chat=None
         )
         self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
 
@@ -6461,9 +6469,12 @@ class RefineTests(unittest.TestCase):
             finishing.set()
             return original_finish()
 
-        def observed_session_claim(session_id, llm):
+        def observed_session_claim(session_id, llm, *args, **kwargs):
+            # Widened for the active_chat third argument (N1). This is a mock
+            # wrapper, not an assertion: forwarding the extra arg changes nothing
+            # the test verifies.
             session_claiming.set()
-            return original_session_claim(session_id, llm)
+            return original_session_claim(session_id, llm, *args, **kwargs)
 
         def invoke_turn():
             token = route_var.set(turn_route)
@@ -10956,6 +10967,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             auto=False,
             dry_run=True,
             explicit_session=True,
+            active_chat=None,
         )
 
     def test_refine_run_tool_rejects_bad_sessions_before_model_call(self):
@@ -16033,8 +16045,9 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         # Defer two sessions
         with plugin_init._AUTO_PENDING_LOCK:
             plugin_init._AUTO_PENDING_SESSION_ENDS.clear()
-            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_a"] = None
-            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_b"] = None
+            # Value is (llm, active_chat) since N1.
+            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_a"] = (None, None)
+            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_b"] = (None, None)
         # Simulate auto disabled
         original = config.auto_enabled
         config.auto_enabled = lambda: False
@@ -19902,6 +19915,140 @@ class NotifyCallSiteTests(unittest.TestCase):
         FakeHost.stage_writes = False
         self.assertEqual(staged["outcome"], "pending_approval")
         self.assertEqual(pending_notify.call_count, 0)
+
+    # ── N1/§3: the captured chat reaches notify and becomes the target ────
+
+    def test_applied_edit_routes_to_the_captured_chat(self):
+        """The chat passed into refine_run resolves to that chat's target."""
+        seen = {}
+        with patch.object(
+            core._notify, "notify",
+            side_effect=lambda text, chat=None: seen.update(chat=chat) or True,
+        ):
+            result = self.run_proposal(
+                skill_proposal("notify-routed"),
+                active_chat=("telegram", "6667956926", ""),
+            )
+        self.assertEqual(result["outcome"], "applied")
+        self.assertEqual(seen["chat"], ("telegram", "6667956926", ""))
+        # And the chat turns into the expected target through the pure resolver.
+        self.assertEqual(
+            core._notify.target_for_chat(seen["chat"]), "telegram:6667956926"
+        )
+
+    def test_applied_edit_with_no_chat_passes_none(self):
+        """A run with no captured chat hands notify None -> config fallback."""
+        seen = {}
+        with patch.object(
+            core._notify, "notify",
+            side_effect=lambda text, chat=None: seen.update(chat=chat, seen=True) or True,
+        ):
+            self.run_proposal(skill_proposal("notify-nochat"))
+        self.assertTrue(seen.get("seen"))
+        self.assertIsNone(seen["chat"])
+
+
+class ActiveChatCaptureTests(unittest.TestCase):
+    """_capture_active_chat reads the turn context and degrades safely.
+
+    The load-bearing rule (host-confirmed): the active chat lives in a per-task
+    ContextVar a worker thread is not guaranteed to inherit, so it is captured on
+    the turn's own thread. gateway.session_context is not importable in the test
+    process, so these install a stand-in in sys.modules.
+    """
+
+    def setUp(self):
+        self._saved = sys.modules.get("gateway.session_context")
+
+    def tearDown(self):
+        if self._saved is None:
+            sys.modules.pop("gateway.session_context", None)
+        else:
+            sys.modules["gateway.session_context"] = self._saved
+
+    def _install(self, *, surface, env):
+        mod = types.ModuleType("gateway.session_context")
+        mod.session_is_messaging_surface = lambda: surface
+        mod.get_session_env = lambda name, default="": env.get(name, default)
+        # A parent package must exist for the ``from gateway.session_context``
+        # import to resolve.
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        sys.modules["gateway.session_context"] = mod
+
+    def test_messaging_surface_yields_the_triple(self):
+        self._install(surface=True, env={
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "6667956926",
+            "HERMES_SESSION_THREAD_ID": "",
+        })
+        self.assertEqual(
+            plugin_init._capture_active_chat(), ("telegram", "6667956926", "")
+        )
+
+    def test_forum_thread_is_carried(self):
+        self._install(surface=True, env={
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "-1001234567890",
+            "HERMES_SESSION_THREAD_ID": "25",
+        })
+        self.assertEqual(
+            plugin_init._capture_active_chat(),
+            ("telegram", "-1001234567890", "25"),
+        )
+
+    def test_cli_surface_returns_none(self):
+        """A non-messaging turn has no chat, even with stale env values."""
+        self._install(surface=False, env={
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "6667956926",
+        })
+        self.assertIsNone(plugin_init._capture_active_chat())
+
+    def test_missing_chat_id_returns_none(self):
+        self._install(surface=True, env={"HERMES_SESSION_PLATFORM": "telegram"})
+        self.assertIsNone(plugin_init._capture_active_chat())
+
+    def test_unimportable_session_context_degrades_to_none(self):
+        """A host without gateway.session_context must not raise."""
+        sys.modules.pop("gateway.session_context", None)
+        sys.modules["gateway.session_context"] = None  # forces ImportError
+        try:
+            self.assertIsNone(plugin_init._capture_active_chat())
+        finally:
+            sys.modules.pop("gateway.session_context", None)
+
+    def test_capture_is_never_called_from_the_worker_thread(self):
+        """THE load-bearing rule: the chat is read on the callback's thread only.
+
+        Install a session_context whose accessors raise if touched from any
+        thread other than the one that ran the hook, then drive an applied-edit
+        auto pass. The notification must still resolve from the captured triple,
+        proving the read happened in the callback, not the worker.
+        """
+        capturing_thread = threading.current_thread().ident
+        breaches = []
+
+        def guarded_env(name, default=""):
+            if threading.current_thread().ident != capturing_thread:
+                breaches.append(name)
+                raise AssertionError("get_session_env called off the hook thread")
+            return {
+                "HERMES_SESSION_PLATFORM": "telegram",
+                "HERMES_SESSION_CHAT_ID": "6667956926",
+                "HERMES_SESSION_THREAD_ID": "",
+            }.get(name, default)
+
+        mod = types.ModuleType("gateway.session_context")
+        mod.session_is_messaging_surface = lambda: True
+        mod.get_session_env = guarded_env
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        sys.modules["gateway.session_context"] = mod
+        try:
+            captured = plugin_init._capture_active_chat()
+        finally:
+            sys.modules.pop("gateway.session_context", None)
+        self.assertEqual(captured, ("telegram", "6667956926", ""))
+        self.assertEqual(breaches, [], "chat was read off the hook thread")
 
 
 if __name__ == "__main__":
