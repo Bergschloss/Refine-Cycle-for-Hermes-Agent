@@ -774,3 +774,17 @@ def notify_enabled() -> bool:
 def notify_target() -> str:
     """Messaging target for user notifications; the reference host uses telegram."""
     return get_str("notify_target", "telegram")
+
+
+def notify_target_configured() -> Optional[str]:
+    """The operator's explicit notify_target, or None when they set none.
+
+    ``notify_target()`` cannot answer "did the operator choose this?" because its
+    default string is indistinguishable from an operator who typed the same
+    string. Auto-resolution (notify.py) must only run when nothing was set, so it
+    reads the raw entry here: a present, non-empty value wins verbatim; anything
+    else means "not configured, resolve one".
+    """
+    entry = _get_refine_entry()
+    value, _issue = _coerce_string_config_value(entry.get("notify_target"), "notify_target")
+    return value or None

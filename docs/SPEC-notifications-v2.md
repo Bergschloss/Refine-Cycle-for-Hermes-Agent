@@ -49,7 +49,115 @@ confirm before changing anything.
 
 ---
 
-## N1 — make message 2 deliverable for every user on every platform
+## N1 — send message 2 to the active chat (supersedes the channel-directory approach)
+
+**This section was rewritten after asking the host.** An earlier draft resolved a target by
+scanning `gateway.channel_directory.load_directory()` and preferring a DM. That still works as a
+fallback, but it is not the right primary: it guesses a chat instead of using the one the
+conversation is actually in. The supported way is below, and every claim in it was verified
+in-process on the reference host.
+
+### The host API, verified
+
+```python
+from gateway.session_context import get_session_env, session_is_messaging_surface
+```
+
+- `get_session_env(name, default="")` — reads the per-task session ContextVar, falling back to
+  `os.environ`. Confirmed present in `_VAR_MAP`: `HERMES_SESSION_PLATFORM`,
+  `HERMES_SESSION_CHAT_ID`, `HERMES_SESSION_THREAD_ID`, plus `..._CHAT_TYPE`, `..._CHAT_NAME`,
+  `..._SOURCE`, `..._KEY`.
+- `session_is_messaging_surface()` — False for a non-chat turn. Verified
+  `NON_MESSAGING_SESSION_SURFACES`:
+  `{'', 'cli', 'local', 'desktop', 'tui', 'gateway', 'tool', 'kanban', 'codex', 'webhook',
+  'api_server', 'msgraph_webhook'}`.
+- Target format, from `tools.send_message_tool._TELEGRAM_TOPIC_TARGET_RE`
+  (`^\s*(-?\d+)(?::(\d+))?\s*$`): **a numeric `chat_id` is accepted directly**, no directory
+  lookup. Verified matching: `6667956926` ✓, `-1003790284798` ✓, `-1001234567890:25` ✓,
+  `Taras` ✗ (a name needs `resolve_channel_name`). So build
+  `platform:chat_id` or `platform:chat_id:thread_id`.
+- `load_gateway_config().get_home_channel(platform)` exists, takes a `Platform` **enum** (not a
+  string), and returns `None` on a host with no home channel — which is the reference host. It
+  therefore adds nothing as an explicit tier: `send_message_tool` already falls back to it
+  internally when handed a bare platform name.
+
+### THE critical rule — capture in the hook callback, never in the worker
+
+The session ContextVar is set per asyncio task by the gateway. A raw `threading.Thread` **happens**
+to inherit it today, but the host confirms there is **no contract** guaranteeing that. Refine
+notifies from worker threads (`_on_post_llm_call` and `_on_session_end` both spawn one), so:
+
+> Read `platform` / `chat_id` / `thread_id` inside the hook callback, where the ContextVar is
+> valid, and pass the three values explicitly into the thread and down to the notification.
+> **Never call `get_session_env` from the worker thread.**
+
+This is what Hermes itself does for cron delivery, async delegation and background review
+messages.
+
+### Resolution order
+
+1. **The active chat**, when the run carries a captured context with a non-empty `platform` and
+   `chat_id`. This is the primary path and what the owner asked for.
+2. **An explicitly configured `notify_target`**, for runs with no chat. This tier is not optional:
+   on the reference host only **13 of 187 sessions (7%)** have a `chat_id` — the rest are CLI or
+   local — so skipping them outright would silence the notification for 93% of this owner's work.
+   Their existing `notify_target: telegram:Taras` must keep working.
+3. Otherwise **do not send**, and report once through the existing `_report_send_failure_once`
+   path with a reason saying no chat and no configured target.
+
+`session_is_messaging_surface()` is the guard for tier 1: when it is False there is no chat to
+reply into, so go straight to tier 2.
+
+### Why a group chat is now acceptable
+
+An earlier draft argued for forcing a DM because a lesson derived from private conversations
+should not surface in a shared group. **N2 removes that concern**: the body becomes one line with
+no kind, no name, no evidence and no journal id, so it carries zero trajectory content. Replying
+into the active chat — group or DM — leaks nothing. An operator who still wants it elsewhere sets
+`notify_target`, which tier 2 honours.
+
+### Plumbing
+
+The capture has to reach `core._notify_lesson`. Add one optional parameter carrying the three
+values (a small immutable value — a `tuple` or a frozen dataclass-like `dict`; do not add a
+class if a tuple reads fine) threaded from each entry point:
+
+- `_on_post_llm_call` and `_on_session_end` — capture, then pass into the worker thread and on to
+  `core.refine_run`.
+- `_handle_refine_command` and `_handle_refine_run` — these run **inside** the turn, so capturing
+  inline at the top of the handler is valid and simpler.
+
+**Do not** stash the capture in a module-level global. The gateway runs several channels
+concurrently; a shared "last known chat" would announce session A's edit into session B's chat.
+That is a privacy defect, not a style preference.
+
+### Tests for N1
+
+- A captured context builds `platform:chat_id` and, with a thread id,
+  `platform:chat_id:thread_id`.
+- A captured context wins over a configured `notify_target`.
+- No captured context falls back to the configured `notify_target`.
+- No captured context and no configured target sends nothing and reports once.
+- `session_is_messaging_surface()` False means tier 1 is skipped even if stale values are present.
+- **`get_session_env` is never called from the worker thread.** Patch it to raise if called off
+  the capturing thread, run an applied-edit path, and assert the notification still resolves from
+  the captured values. This is the rule most likely to be broken by a later refactor.
+- Two concurrent runs with different captured chats each notify their own chat and never the
+  other's. Per AGENTS.md a concurrency test must actually start two threads.
+- `gateway.session_context` being unimportable (a bare CLI process, or a future host without it)
+  degrades to tier 2 and never raises.
+
+---
+
+## N1-old — channel-directory resolution (kept only as reference, do NOT implement)
+
+Superseded by N1 above. The directory scan remains a legitimate *last* resort if tier 2 is ever
+dropped, but it guesses where the user is instead of knowing, so it is not being built.
+
+<details>
+<summary>Original text</summary>
+
+### make message 2 deliverable for every user on every platform
 
 **The problem, measured.** `config.notify_target()` defaults to `"telegram"` — a bare platform
 name. Hermes routes a bare name only when that platform has a home channel configured. On the
@@ -147,6 +255,8 @@ Both directions, and the negative cases are the load-bearing ones:
 - An empty directory and no connected platforms returns `None`, sends nothing, and reports once.
 - A failed send invalidates the cache, so the next `notify()` re-resolves.
 - `notify()` still never raises and still returns within the join timeout on every new path.
+
+</details>
 
 ---
 
