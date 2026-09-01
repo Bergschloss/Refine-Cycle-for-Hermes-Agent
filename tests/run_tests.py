@@ -15549,6 +15549,68 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 self.assertIsNotNone(error, payload)
                 self.assertIn("context-control", error)
 
+    def test_chat_template_delimiters_per_family_are_rejected(self):
+        """10-02: the delimiter list missed three families' real spellings.
+
+        Every token below failed on the parent commit, measured one by one. Six
+        of them because the delimiter gate accepted them outright; the seventh,
+        ``[/TOOL_CALLS]``, because it was refused by the *resource* gate for its
+        slash and reported as "cannot reference resources, hosts, URLs, paths"
+        -- a true refusal with a reason that names the wrong mechanism, and one
+        that does not apply on the skill path at all. Asserting the reason, not
+        just the refusal, is what keeps that from reading as coverage.
+
+        The six genuine gaps:
+
+        - Gemma writes its turn markers WITHOUT pipes. Only ``<|start_of_turn|>``
+          was covered, so ``<start_of_turn>`` -- the form Gemma actually emits --
+          went through.
+        - Mistral's tool-calling delimiters were absent entirely; only ``[INST]``
+          was listed.
+        - Llama 3's ``<|eom_id|>`` and ``<|python_tag|>`` were absent while its
+          ``<|eot_id|>`` sibling was covered.
+        """
+        by_family = {
+            "gemma": ("<start_of_turn>user", "<end_of_turn>"),
+            "mistral": ("[TOOL_CALLS]", "[AVAILABLE_TOOLS]", "[/TOOL_CALLS]"),
+            "llama": ("<|eom_id|>", "<|python_tag|>"),
+        }
+        for family, payloads in by_family.items():
+            for payload in payloads:
+                with self.subTest(family=family, payload=payload):
+                    memory = {
+                        "action": "create", "kind": "memory", "name": "delim-family",
+                        "content": f"note {payload} note", "reason": "test",
+                        "evidence": [],
+                    }
+                    error = core._validate_proposal(memory)
+                    self.assertIsNotNone(error, payload)
+                    self.assertIn("context-control", error)
+
+    def test_lowercase_tool_call_labels_stay_accepted(self):
+        """The other direction for 10-02: Mistral's tokens are uppercase.
+
+        ``[tool_calls]`` in lowercase is an ordinary Markdown link label, and
+        ``tool_calls`` is a real OpenAI response field a skill about tool calling
+        may well document. Matching the Mistral delimiters case-insensitively --
+        as ``[INST]`` is matched -- would refuse that prose. ``[inst]`` is not a
+        word anyone writes, so that one stays wide and its existing test above
+        still pins it.
+
+        This test must pass on the parent commit too: it guards the fix's blast
+        radius, it is not evidence of the fix.
+        """
+        accepted = (
+            "See [tool_calls](#tool-calls) for the response field.",
+            'Read response["message"]["tool_calls"] to get the calls.',
+            "The [available_tools] section lists them.",
+            "Turn handling: start_of_turn and end_of_turn are template names.",
+        )
+        for body in accepted:
+            with self.subTest(body=body):
+                skill = skill_proposal("benign-toolcalls", body=body)
+                self.assertIsNone(core._validate_proposal(skill))
+
     def test_model_delimiter_rejection_covers_skill_and_multi_paths(self):
         """Same gate on the skill path and inside a multi-edit transaction."""
         skill = skill_proposal(

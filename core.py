@@ -313,11 +313,30 @@ _CONTEXT_OVERRIDE_INTENT = re.compile(
     rf")"
     r")"
 )
+# Chat-template delimiters, per model family. A skill or memory body is loaded
+# into the agent's future context verbatim, so a token the serving template
+# treats as structural is markup, not prose.
+#
+# Gemma spells its turn markers WITHOUT pipes -- `<start_of_turn>` -- and only
+# the piped `<|start_of_turn|>` spelling was covered, so the form Gemma actually
+# emits passed. The two names therefore belong in the bare-angle list below, not
+# only in the piped one.
 _CONTEXT_CONTROL_TAGS = re.compile(
-    r"(?i)(?:<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result|assistant_response|assistant|developer|user|user_context|prompt|rules|guidelines|context|custom_instructions)[^>]*>"
+    r"(?i)(?:<\s*/??\s*(?:system|instruction|tool_result|untrusted_tool_result|assistant_response|assistant|developer|user|user_context|prompt|rules|guidelines|context|custom_instructions|start_of_turn|end_of_turn)[^>]*>"
     r"|<<\s*sys\s*>>"
-    r"|<\|(?:im_start|im_end|system|user|assistant|begin_of_text|start_header_id|end_header_id|eot_id|start_of_turn|end_of_turn)\|>"
+    # Llama 3: `<|eom_id|>` ends a message in a tool-calling turn and
+    # `<|python_tag|>` opens one, so either can restructure a turn on its own.
+    r"|<\|(?:im_start|im_end|system|user|assistant|begin_of_text|start_header_id|end_header_id|eot_id|eom_id|python_tag|start_of_turn|end_of_turn)\|>"
     r"|\[\s*/?\s*INST\s*\]"
+    # Mistral's tool-calling delimiters, matched case-sensitively while `[INST]`
+    # above stays case-insensitive. That difference is deliberate: the real
+    # tokens are uppercase, and lowercase `[tool_calls]` is an ordinary Markdown
+    # link label or a reference to the OpenAI `tool_calls` field, which a skill
+    # about tool calling may legitimately write. `[inst]` is not a word anyone
+    # writes, so widening that one costs nothing and a test already pins it.
+    # A false positive here silently refuses a real improvement, which costs as
+    # much as a miss.
+    r"|(?-i:\[\s*/?\s*(?:TOOL_CALLS|AVAILABLE_TOOLS)\s*\])"
     r"|<<\s*/?\s*SYS\s*>>)"
 )
 _AGENT_IMPERSONATION = re.compile(
