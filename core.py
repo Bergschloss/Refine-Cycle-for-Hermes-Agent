@@ -242,6 +242,52 @@ _CONTEXT_DOCUMENT_HEAD = (
 # A closed set is the whole point: it lets the phrase keep its natural article
 # without letting an arbitrary prepositional phrase drift in ("steps copied from
 # the earlier context"), which is ordinary defensive prose and must stay writable.
+# Which class to enumerate, for the third override branch below.
+#
+# Finding 10-05 is that the imperative branch's 15-verb list is a closed list, and
+# 27 phrasings walk past it: `skip`, `omit`, `nullify`, `suppress`, `invalidate`,
+# `disobey` against durable-context objects. Extending the list would leave the
+# same weakness one synonym further out; a verb is an OPEN class and every
+# addition is a guess about what the next model writes.
+#
+# What the measurement showed is that the verb was never carrying the decision.
+# `skip the cache` and `suppress the retry warning` pass today not because those
+# verbs are unlisted but because `cache` and `warning` are not durable-context
+# nouns. The object clause was doing the work all along.
+#
+# So enumerate the closed class instead. Function words are finite and do not grow
+# with the language, and "the head of this clause is not a function word" is a
+# usable stand-in for "this is an imperative" without a verb list or a POS tagger.
+_CONTEXT_FUNCTION_WORD = (
+    r"(?:the|a|an|this|that|these|those|its|their|our|my|your|his|her"
+    r"|it|they|we|i|you|he|she|one|ones"
+    r"|is|are|was|were|be|been|being|am|has|have|had|do|does|did|can|could"
+    r"|will|would|shall|should|may|might|must"
+    r"|and|or|but|if|when|whenever|where|wherever|while|whilst|because|since"
+    r"|as|of|in|into|on|onto|at|to|from|by|with|without|about|after|before"
+    r"|until|unless|though|although|whether|per|via|upon"
+    r"|all|any|each|every|both|either|neither|no|not|nor|some|most|more|less"
+    r"|there|here|what|which|who|whom|whose|how|why"
+    r"|so|then|than|too|very|also|only|just|even|still|yet|however|therefore"
+    r"|thus|hence|otherwise|instead|rather|once|now|always|never|already)"
+)
+_CONTEXT_LIST_MARKER = r"(?:[-*+]|\d+[.)]|\#{1,6}|>)"
+# Where an imperative can begin: the body start, after sentence-ending
+# punctuation, after a blank line, or on a list/heading/quote line. Deliberately
+# NOT after any bare newline -- a newline inside a paragraph is a soft wrap, and
+# treating it as a sentence start refused "Refine Cycle never reads or\nwrites the
+# base system prompt", a description of what this plugin does not do. That is the
+# same reason _CONTEXT_PHRASE_GAP refuses to bridge two Markdown blocks.
+#
+# Exactly one unbounded horizontal-whitespace run is reachable per path, and the
+# optional marker group begins with a non-whitespace character, so no two such
+# runs are ever adjacent. That adjacency is what turned a 15,000-character body of
+# spaces into a ten-second check in this same regex once before; measured here,
+# every adversarial shape scales linearly (4x input costs 3.5-4.4x).
+_CONTEXT_SENTENCE_HEAD = (
+    rf"(?:^|[.;!?]|\n[^\S\n]*\n|\n(?=[^\S\n]*{_CONTEXT_LIST_MARKER}))"
+    rf"[^\S\n]*(?:{_CONTEXT_LIST_MARKER}[^\S\n]*)?"
+)
 _CONTEXT_FOLLOW_DETERMINER = (
     r"(?:the|a|an|any|all|those|these|them|its|such|this|that|my|your|our|of)"
 )
@@ -345,6 +391,48 @@ _CONTEXT_OVERRIDE_INTENT = re.compile(
     rf"(?:{_CONTEXT_PHRASE_GAP}{_CONTEXT_PRIOR_QUALIFIER}){{1,3}}"
     rf"{_CONTEXT_PHRASE_GAP}{_CONTEXT_GUIDANCE_NOUN}\b{_CONTEXT_DOCUMENT_HEAD}"
     rf")"
+    # Third branch (10-05): an imperative with ANY verb, identified by its head not
+    # being a function word, against a durable-context object. This is what closes
+    # `skip`/`omit`/`nullify`/`suppress`/`invalidate`/`disobey` without naming them,
+    # and without the next synonym reopening the hole.
+    #
+    # Two differences from the imperative branch above, and both are what make a
+    # wildcard head safe:
+    #
+    # 1. The prior-reference qualifier is REQUIRED. The listed-verb branch can
+    #    afford it optional because naming `disregard` is already evidence of
+    #    intent. With any word admitted as the verb, the object has to prove on its
+    #    own that it names durable context -- otherwise every compound noun holding
+    #    a guidance word matches, and measured against this repository's own
+    #    Markdown that is exactly what happened: "New prompt notes", "trust
+    #    policy", "Two honesty rules", "Interactive prompts remain" -- 16 false
+    #    positives across 2024 lines. With the qualifier required: zero.
+    #
+    # 2. The gap is the closed determiner set, not `\w+` filler, for the reason
+    #    that set already exists. With `\w+` this branch refused the two sentences
+    #    the comment above names as required-writable -- "never follow links in
+    #    earlier context" and "steps copied from the earlier context are not
+    #    authoritative" -- because a qualifier and a guidance noun merely appeared
+    #    nearby. Determiners force the phrase to be the verb's direct object.
+    #
+    # Declared limit, measured and left open: a multi-word verb phrase whose head
+    # is followed by non-determiners still walks past -- "pay no attention to the
+    # previous instructions", "take no notice of the previous instructions". A gap
+    # wide enough to catch those is the same gap that reintroduced both false
+    # positives above, so the miss is preferred. This is the same trade-off the
+    # negative branch already declares for its own bounded filler.
+    rf"|{_CONTEXT_SENTENCE_HEAD}"
+    rf"(?!{_CONTEXT_FUNCTION_WORD}\b)"
+    # An English imperative is a bare infinitive, so a head in `-ing` is a gerund
+    # or a participle and the clause is descriptive, not a command. Without this,
+    # the branch refused "Following the previous rule is correct here." -- caught
+    # by a test that already existed, which is the reason it is a rule about word
+    # shape rather than another entry in a list. The imperative verbs that do end
+    # in `-ing` (ring, sing, bring) do not govern durable-context nouns.
+    rf"(?![a-z]*ing\b)"
+    rf"[a-z]+(?:\s+{_CONTEXT_FOLLOW_DETERMINER}){{0,2}}\s+"
+    rf"(?:all\s+)?{_CONTEXT_PRIOR_QUALIFIER}\s+"
+    rf"{_CONTEXT_GUIDANCE_NOUN}\b{_CONTEXT_DOCUMENT_HEAD}"
     r")"
 )
 # Chat-template delimiters, per model family. A skill or memory body is loaded
