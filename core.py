@@ -133,6 +133,40 @@ _UNAMBIGUOUS_HOST = re.compile("(?ix)(?:" + _UNAMBIGUOUS_HOST_FORMS + ")")
 # keyword marks it as a target. A URL, a port, a scheme, an IP literal and
 # `localhost` are all still refused unconditionally, and those are the operational
 # shapes; a bare name with no verb is a fact, not an instruction.
+#
+# The admission is wider than that sentence suggests, and it is wider on purpose.
+# Audit finding 10-04 reported that ingress verbs (`download`, `fetch`,
+# `retrieve`, `clone`, `relay`, `pipe`) with `from`/`through` carry a real host
+# past this predicate. Measured: they do, and so does every one of 176 of the 224
+# verb x preposition combinations tried, including `download the archive TO
+# collector.evil`, which the directed clause below was written to catch.
+#
+# It is not fixable here, and the measurement says why rather than guessing.
+# Put a host and a filename in the same frame:
+#
+#     fetch the payload from collector.evil     -> accepted
+#     fetch the payload from SKILL.md           -> accepted
+#
+# One token differs. Every syntactic signal available -- verb, preposition,
+# adjacency, clause shape -- is identical, so no rule over this text can refuse
+# the first line and keep the second. Widening the directed verb list was tried
+# and measured across 24 candidate verbs: each one gained all 3 host frames and
+# cost all 35 ordinary file-prose frames (`dump the state to state.db`, `pipe the
+# output to core.py`). A perfect 1:1 trade of a miss for a false positive. The
+# precision of the directed clause comes from its verb list being SHORT, not from
+# it being correct.
+#
+# An extension allowlist (`.md`, `.py`, `.yaml`) would separate these two lines,
+# and is still refused for the reason stated above: an attacker choosing a
+# hostname simply picks `drop.md`, so the list buys nothing against the case it
+# exists for while costing permanent maintenance.
+#
+# What remains refused unconditionally, verified: any scheme (`https://`), any
+# `host:port`, IPv4/IPv6 literals, `localhost`, absolute/home/drive paths, and
+# `$VAR`/`%VAR%` expansions. The residual gap is exactly one shape -- a bare
+# dotted name, no scheme, no port -- and closing it re-breaks M-08, which is the
+# defect that this narrowing exists to fix and which cost this project the only
+# correct proposal an eleven-session corpus produced.
 _DOTTED_NAME_FORM = r"(?<![\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,63}\.?(?![\w.-])"
 _DOTTED_NAME = re.compile("(?ix)" + _DOTTED_NAME_FORM)
 # The strict rule, unchanged, and it stays on the prompt-note path. A prompt note
