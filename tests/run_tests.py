@@ -2074,6 +2074,36 @@ class RefineTests(unittest.TestCase):
         twice = patterns.normalize_error(once)
         self.assertEqual(once, twice)
 
+    def test_normalize_error_keeps_contractions_but_still_unwraps_tokens(self):
+        """B10: the single-quote unwrap must not eat apostrophes inside words.
+
+        `'([^']*)'` matched across the apostrophes in `Don't`/`doesn't`,
+        collapsing them to `dont`/`doesnt` and silently re-partitioning the
+        fingerprint of any error phrased with a contraction. This is the
+        fingerprinting layer, one of the two opposing requirements AGENTS.md
+        names: volatile detail must collapse while genuinely different errors
+        stay apart. Requiring non-letter boundaries fixes the contraction
+        without touching genuine quoted-token unwrapping.
+        """
+        # Contractions survive intact.
+        self.assertEqual(
+            patterns.normalize_error("Don't open file if it doesn't exist"),
+            "don't open file if it doesn't exist",
+        )
+        # Real quoted-token unwrapping still works (both directions load-bearing).
+        self.assertEqual(patterns.normalize_error("KeyError: 'user_id'"), "keyerror: user_id")
+        self.assertEqual(patterns.normalize_error("Error: 'rate limited'"), "error: rate limited")
+        # The existing traceback idiom that relies on 'foo' -> foo is unchanged.
+        self.assertIn(
+            "modulenotfounderror",
+            patterns.normalize_error(
+                "Traceback (most recent call last):\n"
+                "  File \"main.py\", line 5, in <module>\n"
+                "    import foo\n"
+                "ModuleNotFoundError: No module named 'foo'"
+            ),
+        )
+
     def test_url_credentials_with_colon_in_password(self):
         """Wave 3.4: URL with colon in password -> fully redacted."""
         result = sanitization.scrub_text("http://admin:my:pass@example.com")

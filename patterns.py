@@ -129,7 +129,11 @@ _NORMALIZERS = [
     (re.compile(r"\b\d{2}:\d{2}:\d{2}\b"), "T"),
     # Single-quoted literals: keep the contents for the same reason as above
     # (``KeyError: 'user_id'`` is identified by the name, not by the quotes).
-    (re.compile(r"'([^']*)'"), r"\1"),
+    # Require non-letter boundaries so the apostrophe inside a contraction
+    # (``Don't``, ``doesn't``) is not treated as an opening/closing quote and
+    # collapsed to ``dont``/``doesnt`` — that mangling silently re-partitioned
+    # the fingerprint of any error phrased with a contraction.
+    (re.compile(r"(?<![a-zA-Z])'([^']*)'(?![a-zA-Z])"), r"\1"),
     # CLI switches, before the path rule can mistake one for a single-segment
     # POSIX path — see _CLI_FLAG above. A trailing "." is stripped from the
     # flag itself (not just excluded from the match, the way a comma already
