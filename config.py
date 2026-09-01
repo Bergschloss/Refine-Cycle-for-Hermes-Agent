@@ -674,11 +674,6 @@ def audit_recurrence_horizon_days() -> int:
     return get_int("audit_recurrence_horizon_days", 3, min_val=1)
 
 
-def prompt_notes_max_chars() -> int:
-    """Maximum characters for one complete rendered prompt-note block."""
-    return get_int("prompt_notes_max_chars", 600, min_val=1)
-
-
 def proposer_subagent_enabled() -> bool:
     """Whether refine may produce proposals through a read-only subagent.
 

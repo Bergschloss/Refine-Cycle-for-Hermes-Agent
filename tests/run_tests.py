@@ -11030,6 +11030,17 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         FakeHost.entry_config()["skip_session_sources"] = "not a list"
         self.assertEqual(config.skip_session_sources(), ["cron"])
 
+    def test_config_has_no_duplicate_function_definitions(self):
+        """A duplicate top-level def is a silent trap: Python keeps the last,
+        so editing an earlier copy is a no-op. Guard against it re-appearing."""
+        import ast
+        import pathlib
+        src = pathlib.Path(config.__file__).read_text(encoding="utf-8")
+        names = [n.name for n in ast.parse(src).body
+                 if isinstance(n, ast.FunctionDef)]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        self.assertEqual(dupes, [], f"duplicate defs: {dupes}")
+
     def test_config_string_coercion_and_cooldown_zero(self):
         """Wave 2.9-2.12: config honors string bool/int and allows cooldown=0."""
         # String booleans
