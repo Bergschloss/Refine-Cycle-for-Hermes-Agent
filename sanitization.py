@@ -38,7 +38,11 @@ _FIXED_PATTERNS = [
     re.compile(r"github_pat_[A-Za-z0-9_]+"),
     re.compile(r"gh[pours]_[A-Za-z0-9]{20,}"),
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{16,}"),
+    # Stripe issues secret AND restricted keys; only sk_ was covered, so a
+    # live restricted key (rk_live_...) went out in the clear (audit 08-02).
+    re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"),
+    # Stripe webhook signing secret -- a credential in its own right.
+    re.compile(r"whsec_[A-Za-z0-9]{24,}"),
     re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
     re.compile(r"AIza[A-Za-z0-9_-]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
@@ -48,9 +52,12 @@ _FIXED_PATTERNS = [
     re.compile(r"SG\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}"),
     re.compile(r"dop_v1_[a-f0-9]{60,}"),
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    # `[A-Z ]*` in the key-block header excluded digits, so an RFC 4716
+    # `SSH2 ENCRYPTED PRIVATE KEY` block -- the `2` -- matched nothing and the
+    # whole key body leaked (audit 08-03). Allow digits in the header words.
     re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?"
-        r"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----",
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?"
+        r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
         re.S,
     ),
 ]
@@ -75,19 +82,35 @@ _QUOTED_SECRET = re.compile(
     rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
     r"(?P<quote>[\"'])(?P<value>(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n])+)(?P=quote)"
 )
+# HTTP auth schemes that precede a bare credential. `bearer`/`basic` were the
+# only two covered, so `Authorization: Token <hex>` leaked whole and
+# `Authorization: ApiKey <key>` lost its scheme to the generic unquoted pass
+# while the key itself survived (audit 08-04). One shared alternation keeps
+# _UNQUOTED_SECRET, _AUTH_TOKEN and the two marker-preservation patterns below
+# in agreement; they drift into a leak if edited separately.
+_AUTH_SCHEME = r"(?:bearer|basic|token|apikey)"
 _UNQUOTED_SECRET = re.compile(
     rf"(?i)(?P<prefix>{_SECRET_PREFIX})"
-    r"(?P<value>(?:[\"']?(?:bearer|basic)\s+\[REDACTED\][\"']?|[^\s,;&\}\]\[]{6,}))"
+    rf"(?P<value>(?:[\"']?{_AUTH_SCHEME}\s+\[REDACTED\][\"']?|[^\s,;&\}}\]\[]{{6,}}))"
 )
+# The token may be quoted on EITHER side of the scheme: `Bearer "tok"` as well
+# as `"Bearer tok"`. The old pattern only allowed a quote before the scheme, so
+# `Bearer "tok"` fell through to the unquoted pass, which then mistook the word
+# `Bearer` for the secret and produced `[REDACTED] "[REDACTED]"` (audit 08-01).
 _AUTH_TOKEN = re.compile(
-    r"(?i)(?P<label>\b(?:bearer|basic)\s+)(?P<quote>[\"']?)"
+    rf"(?i)(?P<label>\b{_AUTH_SCHEME}\s+)(?P<quote>[\"']?)"
     r"[A-Za-z0-9._~+/=-]{8,}(?P<close>[\"']?)"
 )
 # Preserve only already-canonical auth fields as units before marker splitting.
 # Without this, a later boundary pass sees the pre-marker fragment
 # (``credentials=Bearer ``) by itself and destroys the auth scheme.
+# The quote may sit before the scheme (``"Bearer [REDACTED]"``) or between the
+# scheme and the marker (``Bearer "[REDACTED]"``). Both are canonical outputs of
+# _AUTH_TOKEN and must be protected as a unit; without the second layout the
+# unquoted pass matched the bare word ``Bearer`` as a 6-char secret and rewrote
+# it to ``[REDACTED] "[REDACTED]"`` (audit 08-01).
 _CANONICAL_AUTH_FIELD = re.compile(
-    rf"(?i){_SECRET_PREFIX}(?:[\"']?(?:bearer|basic)\s+)\[REDACTED\]"
+    rf"(?i){_SECRET_PREFIX}[\"']?{_AUTH_SCHEME}\s+[\"']?\[REDACTED\]"
     r"(?:[\"'](?=$|[\s,;&\}\]])|(?=$|[\s,;&\}\]]))"
 )
 # A marker inside a credential value is untrusted input, not proof that the
@@ -97,9 +120,9 @@ _CANONICAL_AUTH_FIELD = re.compile(
 # field; otherwise repeated scrubbing would erase neighboring telemetry.
 _FORGED_AUTH_MARKER_FIELD = re.compile(
     rf"(?ix)(?P<prefix>{_SECRET_PREFIX})(?:"
-    r"(?P<quote>[\"'])(?P<quoted_scheme>bearer|basic)\s+"
+    rf"(?P<quote>[\"'])(?P<quoted_scheme>{_AUTH_SCHEME})\s+"
     r"\[REDACTED\][^\r\n\"']+(?P<close>(?P=quote))?"
-    r"|(?P<unquoted_scheme>bearer|basic)\s+\[REDACTED\](?:[^\s,;&\}\]]+|"
+    rf"|(?P<unquoted_scheme>{_AUTH_SCHEME})\s+\[REDACTED\](?:[^\s,;&\}}\]]+|"
     r"\s+(?![A-Za-z_][A-Za-z0-9_.-]*\s*[:=])[^\s,;&\}\]]+))"
 )
 _FORGED_SECRET_MARKER_FIELD = re.compile(
@@ -108,6 +131,12 @@ _FORGED_SECRET_MARKER_FIELD = re.compile(
     r"|\[REDACTED\][^\s,;&\}\]]+)"
 )
 _AUTH_SCHEME_KEYS = {"authorization", "auth", "credential", "credentials"}
+# The already-canonical `<scheme> [REDACTED]` values the quoted pass must leave
+# alone, derived from the one scheme list so it cannot fall behind it.
+_CANONICAL_SCHEME_MARKERS = {
+    f"{scheme} {_REDACTED}".lower()
+    for scheme in ("bearer", "basic", "token", "apikey")
+}
 _URL_CREDENTIALS = re.compile(
     r"(?<![A-Za-z0-9+.-])([a-zA-Z][a-zA-Z0-9+.-]*://)"
     r"[^\s/?#]+@(?=[^\s/?#]+(?:[/?#]|\s|$))"
@@ -172,10 +201,7 @@ def _replace_quoted(match: re.Match) -> str:
         _preserve_non_secret_token_field(prefix)
         or (
             key in _AUTH_SCHEME_KEYS
-            and value.lower() in {
-                f"bearer {_REDACTED}".lower(),
-                f"basic {_REDACTED}".lower(),
-            }
+            and value.lower() in _CANONICAL_SCHEME_MARKERS
         )
         or value.lower() in _NON_SECRETS
         or (_is_number(value) and key in _NUMERIC_METRIC_KEYS)
@@ -203,12 +229,24 @@ def _replace_unquoted(match: re.Match) -> str:
     literal = value
     if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
         literal = value[1:-1]
+    # `_AUTH_TOKEN` already reduced `Bearer "tok"` to `Bearer "[REDACTED]"`, and
+    # the marker now sits inside the quote. This pass would otherwise match the
+    # bare scheme word `Bearer` as a 6-char secret and rewrite it, producing
+    # `[REDACTED] "[REDACTED]"` (audit 08-01). If the value is exactly an auth
+    # scheme and the very next thing is a quoted-or-bare redaction marker, this
+    # is finished canonical output -- leave it whole.
+    if (
+        key in _AUTH_SCHEME_KEYS
+        and re.fullmatch(rf"(?i){_AUTH_SCHEME}", value)
+        and re.match(r"\s*[\"']?\[REDACTED\]", match.string[match.end():])
+    ):
+        return match.group(0)
     if (
         _preserve_non_secret_token_field(prefix)
         or (
             key in _AUTH_SCHEME_KEYS
             and re.fullmatch(
-                r"(?i)[\"']?(?:bearer|basic)\s+\[REDACTED\][\"']?",
+                rf"(?i)[\"']?{_AUTH_SCHEME}\s+\[REDACTED\][\"']?",
                 value,
             )
         )

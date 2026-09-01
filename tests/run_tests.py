@@ -4653,6 +4653,72 @@ class RefineTests(unittest.TestCase):
             self.assertNotIn("12345678", text)
             self.assertNotIn("abc12345", text)
 
+    def test_stripe_restricted_keys_and_webhook_secrets_are_redacted(self):
+        """Audit 08-02: only sk_ was covered, so live restricted keys and
+        webhook signing secrets went out in the clear.
+
+        Fixtures are assembled from parts at runtime rather than written as
+        literals: a literal `rk_live_...` is a real Stripe key shape and trips
+        GitHub push protection, which is the very leak this test guards against.
+        """
+        body = "A" * 24
+        for secret in (
+            "rk_" + "live_" + body,
+            "rk_" + "test_" + body,
+            "whsec_" + body + "012345",
+        ):
+            with self.subTest(secret=secret[:8]):
+                out = sanitization.scrub_text(secret)
+                self.assertEqual(out, "[REDACTED]")
+                self.assertEqual(sanitization.scrub_text(out), out)
+        # sk_ must still redact -- the widened prefix must not drop it.
+        self.assertEqual(
+            sanitization.scrub_text("sk_" + "live_" + body), "[REDACTED]")
+
+    def test_ssh2_private_key_block_with_digit_in_header_is_redacted(self):
+        """Audit 08-03: `[A-Z ]*` excluded the digit in `SSH2`, so an RFC 4716
+        key block matched nothing and the whole body leaked."""
+        key = (
+            "-----BEGIN SSH2 ENCRYPTED PRIVATE KEY-----\n"
+            "secret_body_material\n"
+            "-----END SSH2 ENCRYPTED PRIVATE KEY-----"
+        )
+        out = sanitization.scrub_text(key)
+        self.assertEqual(out, "[REDACTED]")
+        self.assertNotIn("secret_body_material", out)
+        # The digit-free blocks that already worked must keep working.
+        rsa = "-----BEGIN RSA PRIVATE KEY-----\nMIIkeybody\n-----END RSA PRIVATE KEY-----"
+        self.assertEqual(sanitization.scrub_text(rsa), "[REDACTED]")
+
+    def test_token_and_apikey_auth_schemes_redact_without_erasing_scheme(self):
+        """Audit 08-04: only bearer/basic were auth schemes, so `Token <hex>`
+        leaked whole and `ApiKey <key>` lost its scheme while the key survived."""
+        cases = (
+            ("Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b",
+             "Authorization: Token [REDACTED]", "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"),
+            ("Authorization: ApiKey abcdef1234567890abcdef12345",
+             "Authorization: ApiKey [REDACTED]", "abcdef1234567890abcdef12345"),
+        )
+        for raw, expected, secret in cases:
+            with self.subTest(raw=raw[:30]):
+                out = sanitization.scrub_text(raw)
+                self.assertEqual(out, expected)
+                self.assertNotIn(secret, out)
+                self.assertEqual(sanitization.scrub_text(out), out)
+
+    def test_quoted_bearer_token_keeps_its_scheme_intact(self):
+        """Audit 08-01: `Bearer "tok"` was corrupted to `[REDACTED] "[REDACTED]"`
+        -- the auth-token pass quoted the marker, then the unquoted pass matched
+        the bare word `Bearer` as a secret. The scheme must survive."""
+        raw = 'Authorization: Bearer "token12345678"'
+        out = sanitization.scrub_text(raw)
+        self.assertEqual(out, 'Authorization: Bearer "[REDACTED]"')
+        self.assertNotIn("token12345678", out)
+        self.assertEqual(sanitization.scrub_text(out), out)
+        # The same layout for a widened scheme must also stay intact.
+        tok = sanitization.scrub_text('Authorization: Token "9944b09199c62"')
+        self.assertEqual(tok, 'Authorization: Token "[REDACTED]"')
+
     def test_scrub_text_does_not_produce_double_bracket_marker(self):
         """Wave 1.4: [REDACTED]] corruption must not occur in any secret form."""
         cases = [
