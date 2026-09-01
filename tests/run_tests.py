@@ -19643,12 +19643,16 @@ class NotifyModuleTests(unittest.TestCase):
         self._send_module.cmd_send = cmd_send
         self._saved_send = sys.modules.get("hermes_cli.send_cmd")
         sys.modules["hermes_cli.send_cmd"] = self._send_module
+        # The "report an undeliverable notification" latch is process-lifetime
+        # state; clear it so one test's warning cannot suppress the next test's.
+        notify._SEND_FAILURE_LOGGED = False
 
     def tearDown(self):
         if self._saved_send is None:
             sys.modules.pop("hermes_cli.send_cmd", None)
         else:
             sys.modules["hermes_cli.send_cmd"] = self._saved_send
+        self.notify._SEND_FAILURE_LOGGED = False
 
     def test_notify_never_raises(self):
         """A cmd_send that raises must be swallowed; notify returns False."""
@@ -19713,6 +19717,56 @@ class NotifyModuleTests(unittest.TestCase):
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
                 patch.object(self.notify.config, "notify_target", return_value="telegram"):
             self.assertFalse(self.notify.notify("body"), "SystemExit(1) is a failed send")
+
+    def test_undeliverable_notification_is_reported_at_warning_once(self):
+        """A failed send must be visible in the log, not swallowed at debug.
+
+        Measured on the live host: notify_target defaults to the bare platform
+        name "telegram", which Hermes only routes when that platform has a home
+        channel. None was set, so send_message_tool returned "No home channel
+        set for telegram", cmd_send exited 1, and notify() returned False while
+        logging nothing above debug. Every notification failed and the operator
+        had no way to find out.
+        """
+        def exit_fail(args):
+            raise SystemExit(1)
+
+        self._send_module.cmd_send = exit_fail
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            with self.assertLogs(self.notify.logger, level="WARNING") as captured:
+                self.assertFalse(self.notify.notify("body"))
+            # A misconfigured target fails on every applied edit, so the warning
+            # is latched: one report, then debug, or the log trains you to skip it.
+            self.notify.notify("body")
+        self.assertEqual(len(captured.output), 1, captured.output)
+        message = captured.output[0]
+        self.assertIn("telegram", message)
+        self.assertIn("notify_target", message)
+
+    def test_a_broken_coupling_is_also_reported_not_only_a_bad_exit_code(self):
+        """An exception from cmd_send is as invisible as a non-zero exit."""
+        def boom(args):
+            raise RuntimeError("host coupling broke")
+
+        self._send_module.cmd_send = boom
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            with self.assertLogs(self.notify.logger, level="WARNING") as captured:
+                self.assertFalse(self.notify.notify("body"))
+        self.assertEqual(len(captured.output), 1, captured.output)
+
+    def test_a_successful_send_logs_no_warning(self):
+        """The report must not fire on the happy path."""
+        def exit_ok(args):
+            raise SystemExit(0)
+
+        self._send_module.cmd_send = exit_ok
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            with patch.object(self.notify.logger, "warning") as warn:
+                self.assertTrue(self.notify.notify("body"))
+        warn.assert_not_called()
 
     def test_notify_timeout_does_not_block(self):
         """A blocked cmd_send must not hang refine: return False within ~6s."""
