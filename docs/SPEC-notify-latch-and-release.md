@@ -168,7 +168,15 @@ case does. This is what makes the branch real rather than cosmetic.
 
 ---
 
-## F3 — AGENTS.md contradicts the live host on the edit budget
+## F3, F4 — WITHDRAWN (documentation-only, not doing)
+
+The operator declined all documentation work. The edit-budget wording in AGENTS.md
+and the ContextVar claim in SPEC-notifications-v2.md are left as-is on purpose: the
+`max_edits_per_day: 10` on the host is intentional (raised for testing), and the
+code already captures the active chat on the turn thread regardless of what the
+spec says. Neither affects operation.
+
+## F3 (withdrawn) — AGENTS.md contradicts the live host on the edit budget
 
 **File:** `AGENTS.md`
 
@@ -193,7 +201,7 @@ and that the 10 was confirmed intentional.
 
 ---
 
-## F4 — the notifications spec states a false fact about ContextVars
+## F4 (withdrawn) — the notifications spec states a false fact about ContextVars
 
 **File:** `docs/SPEC-notifications-v2.md`
 
@@ -256,7 +264,10 @@ commit says it was.
 
 ## Order and stop condition
 
-F1 → F2 → F3 → F4 → F5.
+F1 → F2 → F5. (F3 and F4 are withdrawn — documentation-only, declined.)
+
+F1 and F2 are already implemented and shipped in commit 61eec28; if you are reading
+this fresh, only F5 (the release) remains.
 
 Done when, each read rather than assumed:
 
