@@ -6534,6 +6534,263 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(calls[0][1]["session_ending"])
         self.assertTrue(calls[1][1]["session_ending"])
 
+    @contextmanager
+    def _guarded_session_context(self, per_thread, *, surface=True):
+        """Install a gateway.session_context that records reads off its thread.
+
+        ``per_thread`` maps a thread name to the chat triple that thread is
+        allowed to see. Any read from a thread that is not in the map is a
+        breach: the active chat must be captured on the turn's own thread and
+        passed down by value, because a worker does not inherit the gateway's
+        per-task ContextVar.
+
+        The breach is *recorded* and then raised. Recording is the part that
+        matters: ``_capture_active_chat`` swallows every exception and returns
+        None, so an AssertionError raised here never reaches the test. Without
+        the list a worker-side read would look exactly like "no chat".
+        """
+        breaches = []
+
+        def _chat_for_this_thread(what):
+            name = threading.current_thread().name
+            if name not in per_thread:
+                breaches.append((what, name))
+                raise AssertionError(f"{what} read from {name!r}, not a callback thread")
+            return per_thread[name]
+
+        def guarded_env(name, default=""):
+            platform, chat_id, thread_id = _chat_for_this_thread(f"get_session_env({name})")
+            return {
+                "HERMES_SESSION_PLATFORM": platform,
+                "HERMES_SESSION_CHAT_ID": chat_id,
+                "HERMES_SESSION_THREAD_ID": thread_id,
+            }.get(name, default)
+
+        def guarded_surface():
+            _chat_for_this_thread("session_is_messaging_surface")
+            return surface
+
+        module = types.ModuleType("gateway.session_context")
+        module.get_session_env = guarded_env
+        module.session_is_messaging_surface = guarded_surface
+        saved_package = sys.modules.get("gateway")
+        saved_module = sys.modules.get("gateway.session_context")
+        if saved_package is None:
+            sys.modules["gateway"] = types.ModuleType("gateway")
+        sys.modules["gateway.session_context"] = module
+        try:
+            yield breaches
+        finally:
+            if saved_module is None:
+                sys.modules.pop("gateway.session_context", None)
+            else:
+                sys.modules["gateway.session_context"] = saved_module
+            if saved_package is None:
+                sys.modules.pop("gateway", None)
+
+    def _await_idle_auto_worker(self, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while plugin_init._AUTO_THREAD_GUARD.locked() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
+
+    def test_auto_pass_notifies_the_captured_chat_without_a_worker_side_read(self):
+        """The load-bearing rule, exercised through the whole production path.
+
+        hook callback -> worker thread -> refine_run -> applied edit ->
+        _notify_lesson -> notify. The session context refuses any read that does
+        not happen on the callback's own thread, so if a later refactor moves the
+        capture into the worker the chat arrives as None and this fails.
+
+        Asserting on ``_capture_active_chat()`` alone cannot show this: with no
+        worker running there is no off-thread read to catch.
+        """
+        FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
+        self._observe_session_from_its_start()
+        # The auto worker needs a route-bound facade or refine_run declines
+        # before it can ever apply anything.
+        route_bound = MockLlm()
+        route_bound.invocation_bound = True
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=route_bound)
+        chat = ("telegram", "6667956926", "")
+        delivered = []
+        notified = threading.Event()
+
+        def spy(text, chat_arg=None):
+            delivered.append((text, chat_arg, threading.current_thread().name))
+            notified.set()
+            return True
+
+        callback_thread = threading.current_thread().name
+        with self._guarded_session_context({callback_thread: chat}) as breaches, \
+                patch.object(
+                    core._llm, "propose", return_value=skill_proposal("auto-routed")
+                ), \
+                patch.object(core._notify, "notify", side_effect=spy):
+            plugin_init._on_post_llm_call("session", [{"role": "assistant"}])
+            self.assertTrue(notified.wait(5), "the automatic pass never notified")
+            self._await_idle_auto_worker()
+
+        self.assertEqual(breaches, [], "the chat was read off the callback thread")
+        self.assertEqual(len(delivered), 1)
+        body, seen_chat, sending_thread = delivered[0]
+        self.assertEqual(seen_chat, chat)
+        # The send really did happen on the worker, so the pass-down is what
+        # carried the chat there -- not an inherited context.
+        self.assertNotEqual(sending_thread, callback_thread)
+        self.assertEqual(body, "\u267e\ufe0f Refine Cycle \u2014 new lesson learned")
+        self.assertEqual(core._notify.target_for_chat(seen_chat), "telegram:6667956926")
+
+    def test_deferred_session_end_delivers_to_the_chat_its_own_callback_captured(self):
+        """A drained session-end keeps the address its deferring callback read.
+
+        The session context is uninstalled before the drain runs, so a worker
+        that re-read it would resolve None and fall back to a configured target.
+        The stored triple has to survive the queue instead.
+        """
+        FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 0})
+        chat = ("telegram", "-1003790284798", "25")
+        callback_thread = threading.current_thread().name
+
+        with self._guarded_session_context({callback_thread: chat}) as breaches:
+            # Occupy the single worker slot so this session-end must defer.
+            self.assertTrue(plugin_init._claim_auto_worker())
+            plugin_init._on_session_end(session_id="session")
+            pending = plugin_init._AUTO_PENDING_SESSION_ENDS["session"]
+        self.assertEqual(breaches, [])
+        self.assertEqual(pending[1], chat)
+
+        calls = []
+        started = threading.Event()
+
+        def run(**kwargs):
+            calls.append(kwargs)
+            started.set()
+            return {"success": True}
+
+        with patch.object(
+            plugin_init.core,
+            "count_session_messages",
+            return_value={
+                "count": config.auto_min_messages(), "collection_status": "ok",
+            },
+        ), patch.object(plugin_init.core, "refine_run", side_effect=run):
+            plugin_init._finish_auto_worker()
+            self.assertTrue(started.wait(3), "the deferred session-end never ran")
+            self._await_idle_auto_worker()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["active_chat"], chat)
+        self.assertEqual(plugin_init._AUTO_PENDING_SESSION_ENDS, {})
+
+    def test_two_concurrent_session_ends_never_notify_each_others_chat(self):
+        """A privacy test: one shared global here would cross two operators' chats.
+
+        Two real callback threads end two sessions at the same moment with
+        different chats. One claims the worker, the other defers; both must reach
+        refine_run addressed to their own conversation and never the other's.
+        """
+        FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 0})
+        chats = {
+            "callback-a": ("telegram", "111111", ""),
+            "callback-b": ("telegram", "222222", "9"),
+        }
+        sessions = {"callback-a": "session-a", "callback-b": "session-b"}
+        barrier = threading.Barrier(len(chats))
+        calls = []
+        calls_lock = threading.Lock()
+        both_ran = threading.Semaphore(0)
+
+        def run(**kwargs):
+            with calls_lock:
+                calls.append((kwargs["session_id"], kwargs["active_chat"]))
+            both_ran.release()
+            return {"success": True}
+
+        def callback():
+            barrier.wait(2)
+            plugin_init._on_session_end(
+                session_id=sessions[threading.current_thread().name]
+            )
+
+        with self._guarded_session_context(chats) as breaches, \
+                patch.object(
+                    plugin_init.core,
+                    "_get_session_source_status",
+                    return_value=("", "ok"),
+                ), \
+                patch.object(
+                    plugin_init.core,
+                    "count_session_messages",
+                    return_value={
+                        "count": config.auto_min_messages(),
+                        "collection_status": "ok",
+                    },
+                ), patch.object(plugin_init.core, "refine_run", side_effect=run):
+            threads = [
+                threading.Thread(target=callback, name=name) for name in chats
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(3)
+            for _ in chats:
+                self.assertTrue(
+                    both_ran.acquire(timeout=3), "one session-end never ran"
+                )
+            self._await_idle_auto_worker()
+
+        self.assertEqual(breaches, [], "the chat was read off a callback thread")
+        self.assertEqual(
+            dict(calls),
+            {"session-a": chats["callback-a"], "session-b": chats["callback-b"]},
+        )
+
+    def test_command_and_tool_handlers_capture_the_chat_inline(self):
+        """Both in-turn entry points address the conversation they were typed in.
+
+        They run inside the turn, so capturing at the call is correct there --
+        but it still has to happen, or a /refine-cycle run notifies the wrong
+        place.
+        """
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
+            llm=types.SimpleNamespace(invocation_bound=True)
+        )
+        chat = ("telegram", "6667956926", "")
+        callback_thread = threading.current_thread().name
+        with self._guarded_session_context({callback_thread: chat}) as breaches, \
+                patch.object(
+                    plugin_init.core,
+                    "refine_run",
+                    return_value={
+                        "success": True, "outcome": "no_op", "message": "done",
+                    },
+                ) as run:
+            plugin_init._handle_refine_command("look at gmail failures")
+            plugin_init._handle_refine_command("dry-run")
+            plugin_init._handle_refine_command("session session")
+            plugin_init._handle_refine_run({"reason": "audit"})
+        self.assertEqual(breaches, [])
+        self.assertEqual(len(run.call_args_list), 4)
+        for index, call in enumerate(run.call_args_list):
+            self.assertEqual(call.kwargs["active_chat"], chat, f"call {index}")
+
+    def test_a_cli_turn_gives_the_run_no_chat_at_all(self):
+        """A non-messaging surface must resolve None even with live env values."""
+        callback_thread = threading.current_thread().name
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
+            llm=types.SimpleNamespace(invocation_bound=True)
+        )
+        with self._guarded_session_context(
+            {callback_thread: ("telegram", "6667956926", "")}, surface=False
+        ), patch.object(
+            plugin_init.core,
+            "refine_run",
+            return_value={"success": True, "outcome": "no_op", "message": "done"},
+        ) as run:
+            plugin_init._handle_refine_command("look at gmail failures")
+        self.assertIsNone(run.call_args.kwargs["active_chat"])
+
     def test_gateway_style_concurrent_post_hooks_start_only_one_worker(self):
         """Concurrent gateway callback threads must coalesce to one auto worker."""
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
@@ -20017,13 +20274,16 @@ class ActiveChatCaptureTests(unittest.TestCase):
         finally:
             sys.modules.pop("gateway.session_context", None)
 
-    def test_capture_is_never_called_from_the_worker_thread(self):
-        """THE load-bearing rule: the chat is read on the callback's thread only.
+    def test_capture_reads_the_context_on_its_own_caller_thread(self):
+        """The capture itself does no off-thread read; it is synchronous.
 
-        Install a session_context whose accessors raise if touched from any
-        thread other than the one that ran the hook, then drive an applied-edit
-        auto pass. The notification must still resolve from the captured triple,
-        proving the read happened in the callback, not the worker.
+        This is the narrow half of the load-bearing rule -- all it can prove is
+        that ``_capture_active_chat`` does not hand the read to a helper thread.
+        It cannot prove the *worker* never reads, because no worker runs here.
+        That claim is tested end to end by
+        ``RefineTests.test_auto_pass_notifies_the_captured_chat_without_a_worker_side_read``,
+        which drives a real hook-to-notification pass against a context that
+        records every off-thread read.
         """
         capturing_thread = threading.current_thread().ident
         breaches = []
