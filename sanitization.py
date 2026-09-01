@@ -1,10 +1,38 @@
-"""Recursive credential redaction shared by evidence and persistence paths."""
+"""Recursive credential redaction and line-structure hygiene shared by the
+evidence and persistence paths."""
 
 import re
 import unicodedata
 from typing import Any
 
 _REDACTED = "[REDACTED]"
+
+# Every codepoint that can end a line, which is not the same set as "control
+# characters". Two callers need the same answer for opposite purposes: core
+# refuses these inside a skill or memory body, llm collapses them out of a value
+# whose contract is to render as one prompt line. One list, because two lists
+# drift and the drift is invisible -- each site keeps working while agreeing
+# about a different set of characters.
+#
+# This is exactly the set ``str.splitlines()`` splits on;
+# ``test_line_break_chars_match_str_splitlines`` holds the definition to that
+# over the whole codepoint range, so a future codepoint cannot be missed by hand.
+LINE_BREAK_CHARS = frozenset(
+    "\n"        # U+000A LINE FEED
+    "\v"        # U+000B LINE TABULATION
+    "\f"        # U+000C FORM FEED
+    "\r"        # U+000D CARRIAGE RETURN
+    "\x1c"      # U+001C FILE SEPARATOR
+    "\x1d"      # U+001D GROUP SEPARATOR
+    "\x1e"      # U+001E RECORD SEPARATOR
+    "\x85"      # U+0085 NEXT LINE            (category Cc)
+    "\u2028"    # U+2028 LINE SEPARATOR       (category Zl)
+    "\u2029"    # U+2029 PARAGRAPH SEPARATOR  (category Zp)
+)
+
+LINE_BREAK_RE = re.compile(
+    "[" + "".join(re.escape(ch) for ch in sorted(LINE_BREAK_CHARS)) + "]+"
+)
 
 _FIXED_PATTERNS = [
     re.compile(r"github_pat_[A-Za-z0-9_]+"),

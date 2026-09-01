@@ -16,11 +16,11 @@ from agent.plugin_llm import PluginLlm
 
 try:
     from . import config, journal, ledger, llm as _llm, patterns
-    from .sanitization import sanitize, scrub_text
+    from .sanitization import LINE_BREAK_CHARS, sanitize, scrub_text
     from . import trace as _trace
 except ImportError:
     import config, journal, ledger, llm as _llm, patterns  # noqa: F811
-    from sanitization import sanitize, scrub_text  # noqa: F811
+    from sanitization import LINE_BREAK_CHARS, sanitize, scrub_text  # noqa: F811
     _trace = None
 
 logger = logging.getLogger(__name__)
@@ -2537,8 +2537,11 @@ def _skill_or_memory_injection_error(content: str) -> Optional[str]:
     1. Context-control tags that a model would parse as structural markup.
     2. Imperative override phrasing targeted at guidance/instructions.
     3. Agent-impersonation patterns.
-    4. Unicode categories that can restructure rendering (Cc/Cf/Cs/Co/Cn),
-       except newline/tab/carriage-return which are normal in Markdown.
+    4. Unicode categories that can restructure rendering (Cc/Cf/Cs/Co/Cn) and
+       every other codepoint that ends a line (LINE_BREAK_CHARS, e.g. U+2028
+       LINE SEPARATOR is category Zl, U+2029 PARAGRAPH SEPARATOR is Zp -- these
+       are not control categories but still break a line), except
+       newline/tab/carriage-return which are normal in Markdown.
 
     Compatibility normalization is inspection-only. Persisted content keeps its
     original bytes so validation cannot silently rewrite a skill or memory.
@@ -2553,7 +2556,7 @@ def _skill_or_memory_injection_error(content: str) -> Optional[str]:
     for ch in content:
         if ch in ("\n", "\r", "\t"):
             continue
-        if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
+        if ch in LINE_BREAK_CHARS or unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
             return "Content contains control or non-character codepoints"
     return None
 

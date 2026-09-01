@@ -31,10 +31,10 @@ except ImportError:
 
 try:
     from . import config
-    from .sanitization import sanitize, scrub_text
+    from .sanitization import LINE_BREAK_RE, sanitize, scrub_text
 except ImportError:
     import config  # type: ignore
-    from sanitization import sanitize, scrub_text  # type: ignore
+    from sanitization import LINE_BREAK_RE, sanitize, scrub_text  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -1172,7 +1172,8 @@ def _valid_fingerprint(value: Any) -> str:
 
 def _overview_text(value: Any) -> str:
     """Sanitize untrusted host metadata into one physical prompt-line value."""
-    text = re.sub(r"[\x00-\x1f\x7f]+", " ", scrub_text(str(value))).strip()
+    text = LINE_BREAK_RE.sub(" ", scrub_text(str(value)))
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text).strip()
     return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
