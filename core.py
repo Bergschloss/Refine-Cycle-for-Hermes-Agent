@@ -15,11 +15,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from agent.plugin_llm import PluginLlm
 
 try:
-    from . import config, journal, ledger, llm as _llm, patterns
+    from . import config, journal, ledger, llm as _llm, notify as _notify, patterns
     from .sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE, sanitize, scrub_text
     from . import trace as _trace
 except ImportError:
-    import config, journal, ledger, llm as _llm, patterns  # noqa: F811
+    import config, journal, ledger, llm as _llm, notify as _notify, patterns  # noqa: F811
     from sanitization import (  # noqa: F811
         LINE_BREAK_CHARS,
         LINE_BREAK_RE,
@@ -3437,6 +3437,54 @@ def _set_subagent_lifecycle_provider(provider: Optional[Any]) -> None:
     _subagent_lifecycle_provider = provider
 
 
+# The slash command name lives in __init__ (it is /refine, or /refine-cycle when
+# the host already ships a built-in /refine). core.py cannot import __init__
+# without a cycle, so register() installs a resolver here the same way it
+# installs the subagent lifecycle provider. Until it does — bare imports, tests,
+# offline runs — the notification falls back to the default name rather than
+# guessing wrong.
+_command_display_provider: Optional[Any] = None
+
+
+def _set_command_display_provider(provider: Optional[Any]) -> None:
+    """Install __init__'s command-name resolver so notifications can name it."""
+    global _command_display_provider
+    _command_display_provider = provider
+
+
+def _command_display() -> str:
+    """The slash command name to render in a notification, e.g. '/refine'."""
+    provider = _command_display_provider
+    if provider is None:
+        return "/refine"
+    try:
+        name = provider()
+        return name if name else "/refine"
+    except Exception:
+        return "/refine"
+
+
+def _notify_lesson(*, kind: str, name: str, journal_id: str) -> None:
+    """Tell the user a refine edit landed. Only ever called for outcome=applied.
+
+    The durable journal entry is the source of truth and already exists by the
+    time this runs, so a message here can never imply an edit that was not
+    recorded. ``notify`` is failure-isolated and never raises, but the call is
+    still guarded: a cosmetic notification must not be able to change the applied
+    outcome the caller is about to return.
+    """
+    try:
+        label = f"{kind}: {name}" if name else str(kind)
+        body = (
+            "♾️ **Refine Cycle** — new lesson learned\n\n"
+            f"{label}\n"
+            f"↩ undo: {_command_display()} rollback {journal_id}"
+        )
+        _notify.notify(body)
+    except Exception:
+        logger.debug("refine notify: lesson message failed", exc_info=True)
+
+
 def _subagent_lifecycle() -> Optional[Any]:
     """Return the lifecycle service, or None when the host did not bind one."""
     provider = _subagent_lifecycle_provider
@@ -5007,6 +5055,14 @@ def _apply_edit(
                 "Ledger unreadable; edit was applied but attribution was skipped: %s",
                 scrub_text(str(exc)),
             )
+
+    if outcome == "applied":
+        # After the journal entry exists, never before: the durable record is
+        # the source of truth and a notification must not imply an edit that was
+        # not recorded. Only outcome=applied — a pending_approval edit has NOT
+        # landed, so "lesson learned" would be a lie. Failure is logged and
+        # ignored inside _notify_lesson.
+        _notify_lesson(kind=kind, name=name, journal_id=entry_id)
 
     message = (
         f"done ({time.time() - started:.1f}s) | action={action} kind={kind} "

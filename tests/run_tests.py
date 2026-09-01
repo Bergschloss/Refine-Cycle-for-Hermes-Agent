@@ -19175,5 +19175,145 @@ class SubagentProposerTests(unittest.TestCase):
         self.assertIn("Git Bash forms", request.context)
 
 
+class NotifyModuleTests(unittest.TestCase):
+    """notify.notify is failure-isolated, disabled-cheap, scrubbing, time-boxed.
+
+    Part A A2. The coupling to hermes_cli.send_cmd.cmd_send is undocumented and
+    expected to break someday, so the contract these tests pin is: a broken or
+    slow send is never allowed to raise, block, or leak, and a disabled switch
+    never touches the fragile import at all.
+    """
+
+    def setUp(self):
+        import notify
+        self.notify = notify
+        # A fake hermes_cli.send_cmd whose cmd_send records the Namespace it
+        # receives, so the tests can assert what actually reached the CLI entry.
+        self._captured = []
+        self._send_module = types.ModuleType("hermes_cli.send_cmd")
+
+        def cmd_send(args):
+            self._captured.append(args)
+
+        self._send_module.cmd_send = cmd_send
+        self._saved_send = sys.modules.get("hermes_cli.send_cmd")
+        sys.modules["hermes_cli.send_cmd"] = self._send_module
+
+    def tearDown(self):
+        if self._saved_send is None:
+            sys.modules.pop("hermes_cli.send_cmd", None)
+        else:
+            sys.modules["hermes_cli.send_cmd"] = self._saved_send
+
+    def test_notify_never_raises(self):
+        """A cmd_send that raises must be swallowed; notify returns False."""
+        def boom(args):
+            raise RuntimeError("host coupling broke")
+
+        self._send_module.cmd_send = boom
+        with patch.object(self.notify.config, "notify_enabled", return_value=True):
+            self.assertFalse(self.notify.notify("hello"))
+
+    def test_notify_disabled_returns_false_without_import(self):
+        """A disabled switch must not reach cmd_send at all."""
+        with patch.object(self.notify.config, "notify_enabled", return_value=False):
+            self.assertFalse(self.notify.notify("hello"))
+        self.assertEqual(self._captured, [])
+
+    def test_notify_scrubs_before_sending(self):
+        """A credential in the text must arrive redacted, never raw."""
+        secret = "ghp_" + "A" * 36
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            self.assertTrue(self.notify.notify(f"token {secret} here"))
+        self.assertEqual(len(self._captured), 1)
+        self.assertNotIn(secret, self._captured[0].message)
+
+    def test_notify_sets_every_namespace_attribute(self):
+        """cmd_send is a CLI entry: the Namespace must carry all it reads."""
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            self.assertTrue(self.notify.notify("body"))
+        args = self._captured[0]
+        for attr in ("to", "message", "file", "subject", "list", "quiet", "json"):
+            self.assertTrue(hasattr(args, attr), f"Namespace missing {attr}")
+        self.assertEqual(args.to, "telegram")
+        self.assertTrue(args.quiet)
+
+    def test_notify_timeout_does_not_block(self):
+        """A blocked cmd_send must not hang refine: return False within ~6s."""
+        def hang(args):
+            time.sleep(30)
+
+        self._send_module.cmd_send = hang
+        with patch.object(self.notify, "_SEND_TIMEOUT_SECONDS", 0.3), \
+                patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            started = time.time()
+            result = self.notify.notify("body")
+            elapsed = time.time() - started
+        self.assertFalse(result)
+        self.assertLess(elapsed, 6.0)
+
+
+class NotifyCallSiteTests(unittest.TestCase):
+    """core notifies exactly once on an applied edit, never on any other outcome.
+
+    Uses the same synthetic host every core test uses, but as its own class so
+    it does not re-run RefineTests' whole body through inheritance.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        FakeHost.reset(self.root)
+        config._set_runtime_journal_dir(None)
+        core._LAST_SESSION_ID = "session"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_proposal(self, proposal, **kwargs):
+        with patch.object(core._llm, "propose", return_value=proposal):
+            return core.refine_run(MockLlm(), **kwargs)
+
+    def test_applied_edit_notifies_once(self):
+        """A real applied edit fires exactly one lesson notification."""
+        calls = []
+        with patch.object(core._notify, "notify", side_effect=lambda text: calls.append(text) or True):
+            result = self.run_proposal(skill_proposal("notify-applied"))
+        self.assertEqual(result["outcome"], "applied")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("\u267e\ufe0f **Refine Cycle** \u2014 new lesson learned", calls[0])
+        self.assertIn("skill: notify-applied", calls[0])
+        self.assertIn("rollback", calls[0])
+
+    def test_non_applied_outcomes_do_not_notify(self):
+        """Only outcome=applied notifies; every other outcome stays silent."""
+        # no_op: the proposer declines to act.
+        with patch.object(core._notify, "notify") as no_op_notify:
+            self.run_proposal({"action": "no_op", "reason": "nothing repeated"})
+        self.assertEqual(no_op_notify.call_count, 0)
+
+        # dry_run: preview only, no mutation.
+        with patch.object(core._notify, "notify") as dry_notify:
+            self.run_proposal(skill_proposal("notify-dry"), dry_run=True)
+        self.assertEqual(dry_notify.call_count, 0)
+
+        # error: the host refuses the write.
+        FakeHost.fail_next = "host refused the write"
+        with patch.object(core._notify, "notify") as error_notify:
+            self.run_proposal(skill_proposal("notify-error"))
+        self.assertEqual(error_notify.call_count, 0)
+
+        # pending_approval: staged, NOT landed. "lesson learned" would be a lie.
+        FakeHost.stage_writes = True
+        with patch.object(core._notify, "notify") as pending_notify:
+            staged = self.run_proposal(skill_proposal("notify-pending"))
+        FakeHost.stage_writes = False
+        self.assertEqual(staged["outcome"], "pending_approval")
+        self.assertEqual(pending_notify.call_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

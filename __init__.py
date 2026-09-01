@@ -1276,6 +1276,10 @@ def register(ctx) -> None:
     # path. Accessor, not the service itself: the service resolves the active
     # parent lazily, which is only ever correct at proposal time.
     core._set_subagent_lifecycle_provider(lambda: ctx.subagent_lifecycle)
+    # Let core name the command in the applied-edit notification. The name is
+    # only known here (it may be /refine or /refine-cycle), and core cannot
+    # import __init__ without a cycle, so hand it a resolver the same way.
+    core._set_command_display_provider(_command_display_name)
     # One-time migration of runtime data out of the plugin install directory.
     # Must not fail registration — a broken migration just leaves data in place.
     try:

@@ -744,3 +744,21 @@ def prompt_notes_default_scope() -> str:
     """Default lifetime for new prompt notes; invalid values fail closed to global."""
     scope = get_str("prompt_notes_default_scope", "global").strip().lower()
     return scope if scope in ("global", "session") else "global"
+
+
+def notify_enabled() -> bool:
+    """Whether refine sends the user a message when an edit is applied.
+
+    Defaults to True so the feature works right after install. Unlike the trust
+    switches, this is not fail-closed: it governs a cosmetic notification, not a
+    privacy or model-call decision, and an unreadable config falling back to the
+    default here can at worst send a message the operator wanted off — never the
+    reverse of a security guarantee. The notification itself is failure-isolated
+    in ``notify.py``, so the default cannot affect a refine outcome either way.
+    """
+    return get_bool("notify_enabled", True)
+
+
+def notify_target() -> str:
+    """Messaging target for user notifications; the reference host uses telegram."""
+    return get_str("notify_target", "telegram")
