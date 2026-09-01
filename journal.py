@@ -2794,6 +2794,23 @@ def _restore_applied(entry_id: str, error: str) -> None:
 
 
 def rollback_skill(entry_id: str) -> Dict[str, Any]:
+    """Undo refine's own skill edit as one serialized transaction.
+
+    Held under mutation_lock so the read-verify-prepare-apply-finalize sequence
+    is atomic against concurrent passes, matching rollback_memory and
+    rollback_prompt_note (rollback_skill was the one that never took it).
+    on_session_end spawns a thread per session and the gateway runs several
+    channels at once, so two rollbacks — or a rollback racing an apply — could
+    otherwise interleave between the conflict check and the host write. The lock
+    is re-entrant (RLock + depth tracking), so the sole production caller,
+    core.refine_rollback, already holding it is fine; the inner finalize/
+    _restore_applied calls re-enter it as they already did.
+    """
+    with mutation_lock():
+        return _rollback_skill_locked(entry_id)
+
+
+def _rollback_skill_locked(entry_id: str) -> Dict[str, Any]:
     entry = get_entry(entry_id)
     if not is_reversible(entry):
         return {"success": False, "error": f"Journal entry {entry_id} is not a reversible skill edit"}

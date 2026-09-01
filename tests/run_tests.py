@@ -3808,6 +3808,74 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(conflict["success"])
         self.assertEqual(FakeHost.skills["changed-after-create"], later)
 
+    def test_rollback_skill_serializes_on_mutation_lock(self):
+        """B6: rollback_skill must hold mutation_lock like its siblings.
+
+        on_session_end spawns a thread per session and the gateway runs several
+        channels at once, so a rollback could interleave with another pass
+        between its conflict check and the host write. rollback_memory and
+        rollback_prompt_note already take the lock; rollback_skill was the one
+        that did not. The lock is re-entrant, so the sole production caller
+        (refine_rollback) already holding it is fine.
+
+        A concurrency test must start two threads (AGENTS.md): one holds the
+        lock, the other must block inside rollback_skill until it is released.
+        """
+        result = self.run_proposal(skill_proposal("lock-rollback"))
+        self.assertTrue(result["reversible"])
+        entry_id = result["journal_id"]
+
+        held = threading.Event()
+        release = threading.Event()
+        rollback_started = threading.Event()
+        rollback_done = threading.Event()
+        reached_conflict_check = threading.Event()
+        outcome = {}
+
+        # The conflict check (read_skill_content) is the read that must be inside
+        # the same lock as the host write. On the parent it ran BEFORE any inner
+        # lock acquisition, so a held lock did not stop it — that is the exact
+        # unguarded read-verify window the fix closes.
+        real_read = journal.read_skill_content
+
+        def watched_read(name):
+            reached_conflict_check.set()
+            return real_read(name)
+
+        def hold():
+            with journal.mutation_lock():
+                held.set()
+                release.wait(10)
+
+        def do_rollback():
+            rollback_started.set()
+            outcome["result"] = journal.rollback_skill(entry_id)
+            rollback_done.set()
+
+        holder = threading.Thread(target=hold, daemon=True)
+        rollbacker = threading.Thread(target=do_rollback, daemon=True)
+        with patch.object(journal, "read_skill_content", side_effect=watched_read):
+            holder.start()
+            try:
+                self.assertTrue(held.wait(2), "holder must acquire the lock first")
+                rollbacker.start()
+                self.assertTrue(rollback_started.wait(2))
+                # While another thread holds the lock, rollback_skill must NOT
+                # even reach its conflict-check read: it must block on the lock
+                # first. On the parent the read ran unguarded here.
+                self.assertFalse(
+                    reached_conflict_check.wait(0.5),
+                    "rollback_skill ran its conflict check outside the mutation lock",
+                )
+            finally:
+                release.set()
+                holder.join(10)
+            # Once the lock frees, the rollback proceeds and completes.
+            self.assertTrue(rollback_done.wait(5))
+        rollbacker.join(5)
+        self.assertTrue(outcome["result"]["success"])
+        self.assertNotIn("lock-rollback", FakeHost.skills)
+
     def test_patch_rollback_restores_backup_without_overwriting_later_edit(self):
         name = "patch-rollback"
         old = skill_content(name, "# Old\n\nPreserve me.")
