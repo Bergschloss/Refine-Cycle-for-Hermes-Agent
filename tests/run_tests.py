@@ -11845,6 +11845,23 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn("~", str(result), "the ~ must be expanded, not literal")
         self.assertEqual(result, Path("~/test_hermes_probe").expanduser().resolve())
 
+    def test_hermes_home_expands_tilde_from_host_helper_too(self):
+        """B4 gap: the fix must cover the hermes_constants branch, not only the fallback.
+
+        The first B4 pass only guarded the env-var fallback. But a host
+        get_hermes_home() can itself hand back a literal '~' -- measured on a dev
+        box where a stray hermes_constants returned '~\\probe_x' verbatim -- and
+        that branch wins whenever hermes_constants imports. Both exits of
+        hermes_home() must yield an absolute, ~-free path.
+        """
+        fake = types.ModuleType("hermes_constants")
+        fake.get_hermes_home = lambda: "~/from_host_helper"
+        with patch.dict(sys.modules, {"hermes_constants": fake}):
+            result = config.hermes_home()
+        self.assertTrue(result.is_absolute())
+        self.assertNotIn("~", str(result))
+        self.assertEqual(result, Path("~/from_host_helper").expanduser().resolve())
+
     def test_source_read_failure_does_not_block_the_pass(self):
         # If the source cannot be read (missing column, etc.), the pass proceeds.
         with patch.object(core, "_get_session_source_status", return_value=("", "error")):

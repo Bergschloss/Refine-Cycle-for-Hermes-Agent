@@ -25,7 +25,12 @@ def hermes_home() -> Path:
     """
     try:
         from hermes_constants import get_hermes_home
-        return Path(get_hermes_home())
+        # expanduser()/resolve() here too, not only on the fallback: the host
+        # helper can itself hand back a literal "~" (measured -- a stray
+        # hermes_constants on a dev box returned "~\\probe_x" verbatim), and the
+        # tilde defect must not survive just because this branch won. Both paths
+        # out of this function now yield an absolute, ~-free path.
+        return Path(get_hermes_home()).expanduser().resolve()
     except Exception:
         env_home = os.environ.get("HERMES_HOME", "").strip()
         if env_home:
