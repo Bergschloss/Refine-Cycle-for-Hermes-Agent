@@ -20,10 +20,10 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 try:
     from .config import journal_dir, max_edits_per_day
-    from .sanitization import sanitize, scrub_text
+    from .sanitization import LINE_BREAK_CHARS, sanitize, scrub_text
 except ImportError:
     from config import journal_dir, max_edits_per_day  # noqa: F811
-    from sanitization import sanitize, scrub_text  # noqa: F811
+    from sanitization import LINE_BREAK_CHARS, sanitize, scrub_text  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
@@ -97,13 +97,26 @@ _ABANDONED_PREPARED_SECONDS = 900.0
 
 
 def prompt_note_content_is_structurally_safe(content: Any) -> bool:
-    """Reject markup/control characters that can restructure future context."""
+    """Reject markup/control characters that can restructure future context.
+
+    ``\\n`` is the one exempt line break, because a note may hold two policy
+    lines and the injection renderer keeps them inside their bullet with
+    ``content.replace("\\n", "\\n  ")``. Any other codepoint that ends a line
+    (LINE_BREAK_CHARS -- U+2028 is category Zl and U+2029 is Zp, so neither is
+    caught by the control-category test below) would render unindented, outside
+    the record the bullet exists to delimit. Refusing the class here keeps that
+    ``\\n``-only indent complete, and the injection path re-validates, so a note
+    already in the store is refused too.
+    """
     if not isinstance(content, str) or "<" in content or ">" in content:
         return False
     for character in content:
         if character == "\n":
             continue
-        if unicodedata.category(character) in {"Cc", "Cf", "Cs", "Co", "Cn"}:
+        if (
+            character in LINE_BREAK_CHARS
+            or unicodedata.category(character) in {"Cc", "Cf", "Cs", "Co", "Cn"}
+        ):
             return False
     return True
 

@@ -14944,6 +14944,52 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("[REDACTED]", scrubbed)
         self.assertNotIn("sk-abcdefghijklmnopqrstuvwx", scrubbed)
 
+    def test_prompt_note_refuses_every_line_break_except_newline(self):
+        """Site C: the note gate is the same loop as site A and had the same gap.
+
+        ``journal.prompt_note_content_is_structurally_safe`` exempts ``\\n`` and
+        then refuses Cc/Cf/Cs/Co/Cn, so eight of the ten line breaks were already
+        refused as Cc -- but U+2028 (Zl) and U+2029 (Zp) were accepted at both
+        note boundaries. That matters because the injection renderer keeps a
+        multi-line note inside its bullet with ``content.replace("\\n", "\\n  ")``:
+        a line break it does not know about renders unindented, outside the
+        record the bullet exists to delimit. Refusing the class at the gate makes
+        that ``\\n``-only indent complete by construction, for stored notes too,
+        because the injection path re-validates.
+        """
+        from sanitization import LINE_BREAK_CHARS
+
+        for separator in sorted(LINE_BREAK_CHARS - {"\n"}):
+            note = (
+                "When retrying a request, verify the endpoint."
+                f"{separator}When the retry fails, log the error."
+            )
+            with self.subTest(codepoint=f"U+{ord(separator):04X}"):
+                self.assertFalse(
+                    journal.prompt_note_content_is_structurally_safe(note)
+                )
+                self.assertIsNotNone(
+                    core._prompt_note_content_error(note, check_rendered_size=False)
+                )
+                self.assertIsNotNone(core._stored_prompt_note_content_error(note))
+
+    def test_two_line_prompt_note_with_newline_still_passes(self):
+        """Site C, the other direction: ``\\n`` is still the one exempt break.
+
+        A two-line policy note is a supported shape, and the renderer indents its
+        continuation. Must pass before and after the fix; if it only passes
+        before, the fix is too wide.
+        """
+        note = (
+            "When retrying a request, verify the endpoint.\n"
+            "When the retry fails, log the error."
+        )
+        self.assertTrue(journal.prompt_note_content_is_structurally_safe(note))
+        self.assertIsNone(
+            core._prompt_note_content_error(note, check_rendered_size=False)
+        )
+        self.assertIsNone(core._stored_prompt_note_content_error(note))
+
     def test_user_corrections_cannot_create_prompt_sections(self):
         """Correction records must stay data even with physical line separators."""
         secret = "correction-secret-123456"
