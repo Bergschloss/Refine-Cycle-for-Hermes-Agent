@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# install.sh — install the Refine-Cycle plugin AND its Hermes core patch
+# install.sh — apply the Refine-Cycle Hermes core patch
 # ("Bind plugin LLM calls to the active invocation route").
+#
+# This script patches the HOST ONLY. It does not copy the plugin anywhere; see
+# "Next steps" at the end of a successful run, or use install.py, which does
+# both. The header used to claim it installed the plugin too.
 #
 # The core patch is REQUIRED for refine_run to work: without it the plugin
 # cannot see the invocation-bound LLM route and every proposal run stops with
@@ -20,8 +24,12 @@
 #                fine outcome; "refused without trying" is not.
 #
 # Usage:
-#   ./install.sh              # install plugin + apply core patch (with backup)
-#   ./install.sh --patch-only # only apply/verify the core patch
+#   ./install.sh                       # apply/verify the core patch (with backup)
+#   HERMES_SRC=/path/to/checkout ./install.sh
+#
+# The checkout is otherwise taken from the running hermes-gateway unit. Arguments
+# are not parsed: there is only one mode. `--patch-only` was documented and never
+# implemented; it was silently ignored, which read as if it had been honoured.
 #
 # Patch base: the patch was built against stock Hermes v2026.8.16 (commit
 # df4b65147d). The script does not refuse other commits — it tries, and only
@@ -40,21 +48,69 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Locate the Hermes checkout
+#
+# The checkout is found by walking UP from the binary the gateway actually
+# executes, never by pattern-matching its path. ExecStart points at the venv
+# launcher (.../releases/<name>/.venv/bin/hermes) — the venv is `.venv` on some
+# installs and `venv` on others, and the release directory carries no fixed
+# name — so only an ancestor walk that tests for the source layout can identify
+# the root.
+#
+# This is not a tidy-up. Matching a `releases/` fragment returned
+# `.../<name>/.venv/bin/`, which is not a checkout and was rejected; the search
+# then fell through to a hardcoded older release that still existed on disk.
+# install.sh patched that dead tree, verified it, printed success, and left the
+# running gateway unpatched — refine_run kept returning
+# llm_invocation_unavailable with nothing anywhere saying why. A version-pinned
+# fallback path cannot be a fallback for "which Hermes is running".
 # ---------------------------------------------------------------------------
-HERMES_SRC="${HERMES_SRC:-}"
-if [ -z "$HERMES_SRC" ]; then
-    for cand in \
-        "$(systemctl show hermes-gateway -p ExecStart --value 2>/dev/null | grep -oE '/[^ ]*releases[^ ]*/' | head -1)" \
-        "$HOME/releases/hermes-agent-v2026.8.16-clean" \
-        "$HOME/hermes-agent"; do
-        if [ -n "$cand" ] && [ -d "$cand" ] && [ -f "$cand/agent/plugin_llm.py" ]; then
-            HERMES_SRC="$(cd "$cand" && pwd)"
-            break
+hermes_root_from() {
+    local dir="${1:-}" prev=""
+    [ -n "$dir" ] || return 1
+    while [ -n "$dir" ] && [ "$dir" != "$prev" ]; do
+        if [ -f "$dir/agent/plugin_llm.py" ] && [ -f "$dir/hermes_cli/plugins.py" ]; then
+            (cd "$dir" && pwd)
+            return 0
         fi
+        prev="$dir"
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# The executable from `ExecStart={ path=/... ; argv[]=... }`, parsed as a field
+# rather than scraped, so a path containing `releases` or spaces cannot skew it.
+gateway_exec_path() {
+    systemctl show hermes-gateway -p ExecStart --value 2>/dev/null \
+        | sed -nE 's/.*[{[:space:]]path=([^;]+);.*/\1/p' \
+        | sed -E 's/[[:space:]]+$//' \
+        | head -1
+}
+
+GATEWAY_SRC="$(hermes_root_from "$(gateway_exec_path)" || true)"
+
+HERMES_SRC="${HERMES_SRC:-}"
+if [ -n "$HERMES_SRC" ]; then
+    HERMES_SRC="$(hermes_root_from "$HERMES_SRC" || true)"
+    [ -n "$HERMES_SRC" ] || fail "HERMES_SRC is set but no Hermes checkout was found at or above it
+  (looked for agent/plugin_llm.py + hermes_cli/plugins.py)"
+else
+    for cand in "$GATEWAY_SRC" "$HOME/hermes-agent"; do
+        HERMES_SRC="$(hermes_root_from "$cand" || true)"
+        [ -n "$HERMES_SRC" ] && break
     done
 fi
 [ -n "$HERMES_SRC" ] && [ -d "$HERMES_SRC" ] || fail "cannot locate a Hermes checkout; set HERMES_SRC=/path/to/hermes-agent"
 say "Hermes checkout: $HERMES_SRC"
+
+# Patching a checkout the gateway does not run from is the failure this script
+# used to produce silently. Say it out loud instead.
+if [ -n "$GATEWAY_SRC" ] && [ "$GATEWAY_SRC" != "$HERMES_SRC" ]; then
+    say "WARNING: the running hermes-gateway executes from $GATEWAY_SRC,"
+    say "         not from $HERMES_SRC. Patching the latter will not affect the"
+    say "         live gateway. Re-run with HERMES_SRC=$GATEWAY_SRC if that was"
+    say "         not deliberate."
+fi
 
 HOST_DESC="$(git -C "$HERMES_SRC" rev-parse --short=10 HEAD 2>/dev/null || echo "unknown")"
 
@@ -222,12 +278,21 @@ fi
 
 # Import smoke test with the checkout's own interpreter when one exists; a
 # stock interpreter (which sees no third-party deps) cannot prove the import.
+# `.venv` first: that is what the release layout the gateway runs from uses, and
+# checking only `venv` skipped the import test on every such host — the one
+# verification step that can prove the patched core still loads was reported as
+# "skipped" and read as "passed".
 VENV_PY=""
-if [ -x "$HERMES_SRC/venv/bin/python" ]; then
-    VENV_PY="$HERMES_SRC/venv/bin/python"
-elif [ -x "$HERMES_SRC/venv/Scripts/python.exe" ]; then
-    VENV_PY="$HERMES_SRC/venv/Scripts/python.exe"
-fi
+for cand in \
+    "$HERMES_SRC/.venv/bin/python" \
+    "$HERMES_SRC/venv/bin/python" \
+    "$HERMES_SRC/.venv/Scripts/python.exe" \
+    "$HERMES_SRC/venv/Scripts/python.exe"; do
+    if [ -x "$cand" ]; then
+        VENV_PY="$cand"
+        break
+    fi
+done
 if [ -n "$VENV_PY" ]; then
     if PYTHONPATH="$HERMES_SRC" "$VENV_PY" -c "import hermes_cli.plugins" >/dev/null 2>&1; then
         say "import check: hermes_cli.plugins imports cleanly."
@@ -235,7 +300,7 @@ if [ -n "$VENV_PY" ]; then
         verify_fail "hermes_cli.plugins failed to import after applying the patch"
     fi
 else
-    say "import check skipped (no venv interpreter at $HERMES_SRC/venv; symbol + compile checks passed)."
+    say "import check skipped (no venv interpreter under $HERMES_SRC/{.venv,venv}; symbol + compile checks passed)."
 fi
 
 say "core patch applied + verified (host HEAD $HOST_DESC)."
