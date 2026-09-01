@@ -124,18 +124,41 @@ def _turn_interval_reached(session_id: str, assistant_turns: int) -> bool:
     if interval <= 0:
         return False
     with _AUTO_TURN_MARKS_LOCK:
-        return assistant_turns - _AUTO_TURN_MARKS.get(session_id, 0) >= interval
+        mark = _AUTO_TURN_MARKS.get(session_id)
+        if mark is None:
+            # A missing mark means "unknown", never "zero turns so far". The mark
+            # table is an LRU capped at _AUTO_TURN_MARKS_MAX, so a busy host
+            # evicts sessions that are still live; defaulting to 0 made the very
+            # next turn of an evicted session look like a full interval of
+            # unrefined progress and fired a pass immediately, on every
+            # eviction. Baseline the session here and let the interval elapse
+            # from this point instead. Being at most one interval late costs
+            # nothing; a spurious pass spends the daily edit budget.
+            _set_turn_mark_locked(session_id, assistant_turns)
+            return False
+        return assistant_turns - mark >= interval
+
+
+def _set_turn_mark_locked(session_id: str, assistant_turns: int) -> None:
+    """Write one mark with _AUTO_TURN_MARKS_LOCK already held.
+
+    Split out so the baseline write above shares the LRU bookkeeping instead of
+    reaching into the dict directly. ``_AUTO_TURN_MARKS_LOCK`` is a plain
+    non-reentrant ``threading.Lock``, so callers must hold it and must not call
+    ``_mark_turn_attempt``, which acquires it.
+    """
+    if session_id in _AUTO_TURN_MARKS:
+        # Re-insert at end so insertion order tracks recency (LRU).
+        del _AUTO_TURN_MARKS[session_id]
+    elif len(_AUTO_TURN_MARKS) >= _AUTO_TURN_MARKS_MAX:
+        _AUTO_TURN_MARKS.pop(next(iter(_AUTO_TURN_MARKS)), None)
+    _AUTO_TURN_MARKS[session_id] = assistant_turns
 
 
 def _mark_turn_attempt(session_id: str, assistant_turns: int) -> None:
     """Record the attempt point, keeping the per-session marks bounded."""
     with _AUTO_TURN_MARKS_LOCK:
-        if session_id in _AUTO_TURN_MARKS:
-            # Re-insert at end so insertion order tracks recency (LRU).
-            del _AUTO_TURN_MARKS[session_id]
-        elif len(_AUTO_TURN_MARKS) >= _AUTO_TURN_MARKS_MAX:
-            _AUTO_TURN_MARKS.pop(next(iter(_AUTO_TURN_MARKS)), None)
-        _AUTO_TURN_MARKS[session_id] = assistant_turns
+        _set_turn_mark_locked(session_id, assistant_turns)
 
 
 def _forget_turn_marks(session_id: str) -> None:

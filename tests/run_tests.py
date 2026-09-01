@@ -6117,8 +6117,23 @@ class RefineTests(unittest.TestCase):
         FakeHost.entry_config()["auto_turn_interval"] = -3
         self.assertEqual(config.auto_turn_interval(), 0)
 
+    def _observe_session_from_its_start(self, session_id="session"):
+        """Record the turn-0 mark a live session reaches on its own.
+
+        B11 made an unknown session baseline at its current turn count instead of
+        counting from zero, because a missing mark means "evicted", not "no
+        progress yet". In production the post-LLM hook observes a new session on
+        its first assistant turn, so the mark exists long before the interval can
+        be crossed. These tests start from a cleared mark table and jump straight
+        to a count at or past the interval, which is indistinguishable from an
+        eviction, so they state the observation explicitly. This only restores
+        the state they used to get implicitly; no assertion below changes.
+        """
+        plugin_init._mark_turn_attempt(session_id, 0)
+
     def test_post_llm_hook_uses_turn_boundaries_and_honors_disabled_setting(self):
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 3})
+        self._observe_session_from_its_start()
         history = [{"role": "assistant"}] * 4
         called = threading.Event()
 
@@ -6144,6 +6159,7 @@ class RefineTests(unittest.TestCase):
 
     def test_turn_trigger_fires_when_a_turn_adds_several_assistant_messages(self):
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 3})
+        self._observe_session_from_its_start()
         called = threading.Event()
 
         def run(**kwargs):
@@ -6203,6 +6219,7 @@ class RefineTests(unittest.TestCase):
                 self.hooks[name] = callback
 
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 2})
+        self._observe_session_from_its_start()
         context = RegisterContext()
         plugin_init.register(context)
         started = threading.Event()
@@ -6413,6 +6430,7 @@ class RefineTests(unittest.TestCase):
 
     def test_session_end_race_preserves_contextvar_routes_without_lost_wakeup(self):
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
+        self._observe_session_from_its_start()
         threshold = config.auto_min_messages()
         route_var = ContextVar("test_refine_invocation_route")
         turn_route = types.SimpleNamespace(invocation_bound=True, name="turn")
@@ -6508,6 +6526,8 @@ class RefineTests(unittest.TestCase):
     def test_gateway_style_concurrent_post_hooks_start_only_one_worker(self):
         """Concurrent gateway callback threads must coalesce to one auto worker."""
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
+        for index in range(16):
+            self._observe_session_from_its_start(f"gateway-session-{index}")
         barrier = threading.Barrier(17)
         started = threading.Event()
         release = threading.Event()
@@ -6563,6 +6583,7 @@ class RefineTests(unittest.TestCase):
 
     def test_held_mutation_lock_skips_concurrent_auto_triggers_without_stranding(self):
         FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
+        self._observe_session_from_its_start()
         attempted = threading.Event()
         finished = threading.Event()
         original_try_lock = journal.try_mutation_lock
@@ -15840,6 +15861,74 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("s0", plugin_init._AUTO_TURN_MARKS)
         self.assertNotIn("s1", plugin_init._AUTO_TURN_MARKS)
         self.assertIn("new_session", plugin_init._AUTO_TURN_MARKS)
+        plugin_init._AUTO_TURN_MARKS.clear()
+
+    # ── B11: an evicted session must not fire refine on its next turn ─────
+
+    def test_evicted_session_baselines_instead_of_firing_immediately(self):
+        """B11: no mark means unknown, not zero turns of progress."""
+        FakeHost.entry_config()["auto_turn_interval"] = 25
+        plugin_init._AUTO_TURN_MARKS.clear()
+        # The LRU caps at 64 entries, so a busy host evicts sessions that are
+        # still live. Reading a missing mark as 0 made the very next turn of an
+        # evicted session look like 50 turns of unrefined progress.
+        self.assertFalse(plugin_init._turn_interval_reached("evicted_probe", 50))
+        self.assertEqual(plugin_init._AUTO_TURN_MARKS.get("evicted_probe"), 50)
+        # Still not due one turn later.
+        self.assertFalse(plugin_init._turn_interval_reached("evicted_probe", 51))
+        # Due once the interval has genuinely elapsed from the new baseline.
+        self.assertTrue(plugin_init._turn_interval_reached("evicted_probe", 75))
+        plugin_init._AUTO_TURN_MARKS.clear()
+
+    def test_baselining_an_unknown_session_respects_the_lru_cap(self):
+        """B11: the baseline write goes through the bounded insert, not around it."""
+        FakeHost.entry_config()["auto_turn_interval"] = 25
+        plugin_init._AUTO_TURN_MARKS.clear()
+        for index in range(plugin_init._AUTO_TURN_MARKS_MAX + 10):
+            plugin_init._turn_interval_reached(f"baseline_probe_{index}", 1)
+        self.assertLessEqual(
+            len(plugin_init._AUTO_TURN_MARKS), plugin_init._AUTO_TURN_MARKS_MAX
+        )
+        plugin_init._AUTO_TURN_MARKS.clear()
+
+    def test_disabled_turn_interval_records_no_baseline(self):
+        """B11: with the trigger off the predicate must not touch the marks."""
+        FakeHost.entry_config()["auto_turn_interval"] = 0
+        plugin_init._AUTO_TURN_MARKS.clear()
+        self.assertFalse(plugin_init._turn_interval_reached("disabled_probe", 50))
+        self.assertEqual(plugin_init._AUTO_TURN_MARKS, {})
+
+    def test_known_session_mark_is_not_overwritten_by_the_baseline(self):
+        """B11: an existing mark still decides, and keeps its value."""
+        FakeHost.entry_config()["auto_turn_interval"] = 25
+        plugin_init._AUTO_TURN_MARKS.clear()
+        plugin_init._mark_turn_attempt("known_probe", 10)
+        self.assertFalse(plugin_init._turn_interval_reached("known_probe", 20))
+        self.assertEqual(plugin_init._AUTO_TURN_MARKS["known_probe"], 10)
+        self.assertTrue(plugin_init._turn_interval_reached("known_probe", 35))
+        self.assertEqual(plugin_init._AUTO_TURN_MARKS["known_probe"], 10)
+        plugin_init._AUTO_TURN_MARKS.clear()
+
+    def test_concurrent_first_calls_baseline_one_session_once(self):
+        """B11: two threads racing a first call must not both see it as due."""
+        FakeHost.entry_config()["auto_turn_interval"] = 25
+        plugin_init._AUTO_TURN_MARKS.clear()
+        barrier = threading.Barrier(2)
+        verdicts = []
+
+        def probe():
+            barrier.wait(timeout=5)
+            verdicts.append(plugin_init._turn_interval_reached("race_probe", 50))
+
+        threads = [threading.Thread(target=probe) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        # Whoever wins baselines the session; neither may report it as due,
+        # because the second caller now reads the mark the first one wrote.
+        self.assertEqual(verdicts, [False, False])
+        self.assertEqual(plugin_init._AUTO_TURN_MARKS.get("race_probe"), 50)
         plugin_init._AUTO_TURN_MARKS.clear()
 
     # ── §10 Round 10: sanitize bytes surrogateescape ──────────────────────
