@@ -17708,18 +17708,41 @@ class TraceContractTests(unittest.TestCase):
         self.assertIsNotNone(finalized["end_ts"])
 
     def test_trace_does_not_mutate_journal(self):
-        from trace import build_trace, emit_trace, finalize_trace
+        import logging as _logging
+        import trace as _trace_mod
         import journal
-        # Trace emission must not write to mutation journal
-        # This is verified by emit_trace's explicit refusal to call journal_append
-        # and by the invariant check
-        t = build_trace(session_id="s", source="hook", operation="refine_run", route_state="bound")
-        finalized = finalize_trace(t, result_code="success")
-        emit_trace(finalized)
-        # If emit_trace wrote to journal, this assertion would fail
-        # (journal entries contain mutation events, not trace events)
-        # The design guarantees trace stays out of mutation journal.
-        self.assertTrue(True)
+        # Isolate to a temp hermes_home so the read never touches a real journal
+        # and cannot be perturbed by ambient state; same rebinding the neighbouring
+        # trace-file tests use (SuiteDiscoveryContractTests re-imports this module
+        # and repoints get_hermes_home at Path('.')).
+        import sys as _sys
+        td = Path(tempfile.mkdtemp(prefix="tracejournal"))
+        old_root = FakeHost.root
+        _hc = _sys.modules.get("hermes_constants")
+        _old_get = getattr(_hc, "get_hermes_home", None)
+        FakeHost.reset(td)
+        if _hc is not None:
+            _hc.get_hermes_home = lambda: str(td)
+        try:
+            before = journal.entries()
+            t = _trace_mod.build_trace(
+                session_id="s", source="hook",
+                operation="refine_run", route_state="bound")
+            _trace_mod.emit_trace(_trace_mod.finalize_trace(t, result_code="success"))
+            # emit_trace writes the plugin-owned trace log, never the mutation
+            # journal. A regression that appended a trace event here would show
+            # up as a changed journal.
+            self.assertEqual(journal.entries(), before)
+        finally:
+            if _hc is not None and _old_get is not None:
+                _hc.get_hermes_home = _old_get
+            FakeHost.reset(old_root)
+            for h in list(_trace_mod.logger.handlers):
+                h.close()
+                _trace_mod.logger.removeHandler(h)
+            _trace_mod._trace_handler = None
+            _trace_mod.logger.setLevel(_logging.NOTSET)
+            _trace_mod.logger.propagate = True
 
     def test_trace_no_raw_identity_in_output(self):
         from trace import build_trace
