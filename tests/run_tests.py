@@ -11030,16 +11030,60 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         FakeHost.entry_config()["skip_session_sources"] = "not a list"
         self.assertEqual(config.skip_session_sources(), ["cron"])
 
-    def test_config_has_no_duplicate_function_definitions(self):
-        """A duplicate top-level def is a silent trap: Python keeps the last,
-        so editing an earlier copy is a no-op. Guard against it re-appearing."""
+    @staticmethod
+    def _duplicate_definitions(source: str, label: str):
+        """Every name a module rebinds by defining it twice, module or class."""
         import ast
+        funcs = (ast.FunctionDef, ast.AsyncFunctionDef)
+        tree = ast.parse(source)
+        found = []
+
+        def _report(names, scope):
+            for name in sorted({n for n in names if names.count(n) > 1}):
+                found.append(f"{label}: {scope} redefines {name}")
+
+        _report([n.name for n in tree.body if isinstance(n, funcs)], "module")
+        _report([n.name for n in tree.body if isinstance(n, ast.ClassDef)],
+                "module")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                _report([n.name for n in node.body if isinstance(n, funcs)],
+                        f"class {node.name}")
+        return found
+
+    def test_no_duplicate_definitions_anywhere_in_the_plugin(self):
+        """A duplicate def is a silent trap: Python keeps the last one, so
+        editing an earlier copy changes nothing and says nothing. config.py
+        shipped two prompt_notes_max_chars() this way.
+
+        Widened past config.py because the worst case is in here: two test
+        methods with one name means the first is discarded and its coverage
+        is gone with no failure to notice. Classes too -- a redefined class
+        silently drops the first body's tests."""
         import pathlib
-        src = pathlib.Path(config.__file__).read_text(encoding="utf-8")
-        names = [n.name for n in ast.parse(src).body
-                 if isinstance(n, ast.FunctionDef)]
-        dupes = sorted({n for n in names if names.count(n) > 1})
-        self.assertEqual(dupes, [], f"duplicate defs: {dupes}")
+        root = pathlib.Path(config.__file__).resolve().parent
+        modules = sorted(root.glob("*.py")) + sorted((root / "tests").glob("*.py"))
+        self.assertGreater(len(modules), 5, f"module scan found nothing in {root}")
+        dupes = []
+        for path in modules:
+            dupes += self._duplicate_definitions(
+                path.read_text(encoding="utf-8"), path.name)
+        self.assertEqual(dupes, [], "; ".join(dupes))
+
+    def test_duplicate_definition_guard_detects_each_scope(self):
+        """The scan above passes today, so prove it is not vacuous: it must
+        catch a duplicate at module, class-method and class scope."""
+        module_dupe = "def f():\n    pass\n\n\ndef f():\n    pass\n"
+        method_dupe = "class C:\n    def m(self):\n        pass\n\n    def m(self):\n        pass\n"
+        class_dupe = "class C:\n    pass\n\n\nclass C:\n    pass\n"
+        clean = "def f():\n    pass\n\n\nclass C:\n    def m(self):\n        pass\n"
+        self.assertEqual(self._duplicate_definitions(module_dupe, "x"),
+                         ["x: module redefines f"])
+        self.assertEqual(self._duplicate_definitions(method_dupe, "x"),
+                         ["x: class C redefines m"])
+        self.assertEqual(self._duplicate_definitions(class_dupe, "x"),
+                         ["x: module redefines C"])
+        self.assertEqual(self._duplicate_definitions(clean, "x"), [])
 
     def test_recurrence_horizon_accepts_documented_alias(self):
         """The README documents recurrence_horizon_days; an operator who sets it
