@@ -1,0 +1,1322 @@
+diff -ruN --strip-trailing-cr orig/agent/auxiliary_client.py work/agent/auxiliary_client.py
+--- a/agent/auxiliary_client.py	2026-08-31 21:29:27.000000000 +0200
++++ b/agent/auxiliary_client.py	2026-09-01 02:28:09.670828200 +0200
+@@ -44,6 +44,7 @@
+   their OpenRouter balance but has Codex OAuth or another provider available.
+ """
+ 
++import asyncio
+ import contextlib
+ import contextvars
+ import copy
+@@ -7802,16 +7803,37 @@
+     return _nous_extra_body() if auxiliary_is_nous else {}
+ 
+ 
+-def auxiliary_max_tokens_param(value: int, *, model: Optional[str] = None) -> dict:
+-    """Return the correct max tokens kwarg for the auxiliary client's provider.
++def auxiliary_max_tokens_param(
++    value: int,
++    *,
++    model: Optional[str] = None,
++    provider: Optional[str] = None,
++    base_url: Optional[str] = None,
++    api_mode: Optional[str] = None,
++) -> dict:
++    """Return the correct max-token kwarg for an auxiliary client.
+ 
+-    OpenRouter and local models use 'max_tokens'. Direct OpenAI with newer
+-    models (gpt-4o, gpt-4.1, gpt-5+, o-series) requires 'max_completion_tokens'.
+-    The Codex adapter translates max_tokens internally, so we use max_tokens
+-    for it as well. Pass ``model`` so third-party OpenAI-compatible endpoints
+-    fronting the newer families are also recognised — URL-only detection
+-    misses the case where a custom base URL serves e.g. ``gpt-5.4``.
++    When route fields are supplied, selection is derived only from that
++    captured route. Calls that omit them retain the legacy ambient behavior.
+     """
++    explicit_route = any(
++        item is not None for item in (provider, base_url, api_mode)
++    )
++    if explicit_route:
++        normalized_mode = str(api_mode or "").strip().lower()
++        if normalized_mode in {"codex_responses", "anthropic_messages"}:
++            return {"max_tokens": value}
++        route_host = base_url_hostname(base_url or "") or ""
++        if (
++            route_host == "api.openai.com"
++            or route_host == "api.githubcopilot.com"
++            or route_host.endswith(".githubcopilot.com")
++        ):
++            return {"max_completion_tokens": value}
++        if model_forces_max_completion_tokens(model):
++            return {"max_completion_tokens": value}
++        return {"max_tokens": value}
++
+     custom_base = _current_custom_base_url()
+     or_key = _scoped_key_env("OPENROUTER_API_KEY")
+     # Use max_completion_tokens for direct OpenAI-compatible providers that reject
+@@ -8973,6 +8995,8 @@
+     reasoning_config: Optional[dict] = None,
+     base_url: Optional[str] = None,
+     task: Optional[str] = None,
++    require_max_tokens: bool = False,
++    api_mode: Optional[str] = None,
+ ) -> dict:
+     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
+     kwargs: Dict[str, Any] = {
+@@ -9000,6 +9024,18 @@
+         kwargs["temperature"] = temperature
+ 
+     if max_tokens is not None:
++        if require_max_tokens:
++            # Invocation-bound calls must carry the caller's output cap on the
++            # one permitted request; derive its wire name only from that route.
++            kwargs.update(
++                auxiliary_max_tokens_param(
++                    max_tokens,
++                    model=model,
++                    provider=provider,
++                    base_url=base_url,
++                    api_mode=api_mode,
++                )
++            )
+         # We do NOT cap output by default. Most chat-completions providers treat
+         # an omitted max_tokens as "use the model's max output", which is what we
+         # want for auxiliary tasks (compression summaries, titles, vision, etc.) —
+@@ -9048,7 +9084,7 @@
+             from hermes_cli.providers import nous_api_mode
+ 
+             _nous_on_messages = nous_api_mode(model) == "anthropic_messages"
+-        if (
++        if not require_max_tokens and (
+             _is_anthropic_compat_endpoint(provider, _effective_base)
+             or _nous_on_messages
+             or _is_nvidia_nim
+@@ -9725,6 +9761,114 @@
+     )
+ 
+ 
++class RouteLockedCallError(RuntimeError):
++    """Fail-closed route error safe for plugin-facing classification."""
++
++    def __init__(self, code: str, message: str) -> None:
++        super().__init__(message)
++        self.code = code
++
++
++def classify_route_locked_error(exc: Exception) -> str:
++    """Map a bound-call failure to a stable code without exposing its text."""
++    if _is_auth_error(exc):
++        return "authentication_error"
++    if _is_timeout_error(exc):
++        return "timeout"
++    if _is_connection_error(exc):
++        return "transport_error"
++    if _is_invalid_aux_response_error(exc):
++        return "invalid_response"
++    return "provider_error"
++
++
++def _call_route_locked_once(
++    *,
++    provider: str,
++    model: str,
++    base_url: str,
++    api_key: Any,
++    api_mode: str,
++    bound_client: Any,
++    messages: list,
++    temperature: Optional[float],
++    max_tokens: Optional[int],
++    tools: Optional[list],
++    timeout: Optional[float],
++    extra_body: Optional[dict],
++    async_mode: bool,
++) -> Any:
++    """Issue exactly one request through the already configured live client."""
++    if not provider or provider == "auto" or not model or not base_url or not api_mode:
++        raise RouteLockedCallError(
++            "incomplete_route",
++            "route-locked plugin call requires a complete explicit route",
++        )
++    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
++        raise RouteLockedCallError(
++            "invalid_output_cap",
++            "route-locked plugin call requires a positive output cap",
++        )
++    if api_mode not in {
++        "chat_completions",
++        "codex_responses",
++        "anthropic_messages",
++    }:
++        raise RouteLockedCallError(
++            "unsupported_api_mode",
++            f"route-locked plugin calls do not support {api_mode!r}",
++        )
++    if provider.strip().lower() == "moa" or base_url.strip().lower().startswith(
++        "moa://"
++    ):
++        raise RouteLockedCallError(
++            "unsupported_composite_route",
++            "route-locked plugin calls cannot use a composite provider",
++        )
++    if bound_client is None:
++        raise RouteLockedCallError(
++            "exact_transport_unavailable",
++            "the active route has no reusable exact transport client",
++        )
++
++    if api_mode == "anthropic_messages":
++        is_oauth = isinstance(api_key, str) and api_key.startswith("sk-ant-oat")
++        request_client: Any = AnthropicAuxiliaryClient(
++            bound_client, model, api_key, base_url, is_oauth=is_oauth
++        )
++    elif api_mode == "codex_responses":
++        request_client = CodexAuxiliaryClient(bound_client, model)
++    else:
++        request_client = bound_client
++
++    kwargs = _build_call_kwargs(
++        provider,
++        model,
++        messages,
++        temperature=temperature,
++        max_tokens=max_tokens,
++        tools=tools,
++        timeout=timeout if timeout is not None else _DEFAULT_AUX_TIMEOUT,
++        extra_body=extra_body,
++        base_url=base_url,
++        require_max_tokens=True,
++        api_mode=api_mode,
++    )
++    if _is_anthropic_compat_endpoint(provider, base_url):
++        kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
++
++    if async_mode:
++        async def _call() -> Any:
++            response = await asyncio.to_thread(
++                request_client.chat.completions.create, **kwargs
++            )
++            return _validate_llm_response(response, "plugin_invocation")
++
++        return _call()
++    response = request_client.chat.completions.create(**kwargs)
++    return _validate_llm_response(response, "plugin_invocation")
++
++
+ @_relay_auxiliary_call
+ def call_llm(
+     task: str = None,
+@@ -9743,12 +9887,35 @@
+     reasoning_config: Optional[dict] = None,
+     extra_headers: Optional[Dict[str, str]] = None,
+     api_mode: str = None,
++    bound_client: Any = None,
+     stream: bool = False,
+     stream_options: dict = None,
+     route_info: Optional[Dict[str, str]] = None,
+     latency_info: Optional[Dict[str, int]] = None,
++    single_attempt: bool = False,
+ ) -> Any:
+     """Run an auxiliary LLM request, applying the configured task limit."""
++    if single_attempt:
++        if task is not None or stream:
++            raise RouteLockedCallError(
++                "invalid_route_request",
++                "route-locked plugin calls cannot use task routing or streaming",
++            )
++        return _call_route_locked_once(
++            provider=provider or "",
++            model=model or "",
++            base_url=base_url or "",
++            api_key=api_key,
++            api_mode=api_mode or "",
++            bound_client=bound_client,
++            messages=messages,
++            temperature=temperature,
++            max_tokens=max_tokens,
++            tools=tools,
++            timeout=timeout,
++            extra_body=extra_body,
++            async_mode=False,
++        )
+     queue_started_at = time.monotonic()
+     semaphore = _acquire_sync_aux_semaphore(task)
+     if semaphore is not None:
+@@ -10701,8 +10868,32 @@
+     extra_body: dict = None,
+     reasoning_config: Optional[dict] = None,
+     route_info: Optional[Dict[str, str]] = None,
++    api_mode: str = None,
++    bound_client: Any = None,
++    single_attempt: bool = False,
+ ) -> Any:
+     """Run an asynchronous auxiliary LLM request under the configured limit."""
++    if single_attempt:
++        if task is not None:
++            raise RouteLockedCallError(
++                "invalid_route_request",
++                "route-locked plugin calls cannot use task routing",
++            )
++        return await _call_route_locked_once(
++            provider=provider or "",
++            model=model or "",
++            base_url=base_url or "",
++            api_key=api_key,
++            api_mode=api_mode or "",
++            bound_client=bound_client,
++            messages=messages,
++            temperature=temperature,
++            max_tokens=max_tokens,
++            tools=tools,
++            timeout=timeout,
++            extra_body=extra_body,
++            async_mode=True,
++        )
+     semaphore = _acquire_async_aux_semaphore(task)
+     if semaphore is not None:
+         await semaphore.acquire()
+diff -ruN --strip-trailing-cr orig/agent/plugin_llm.py work/agent/plugin_llm.py
+--- a/agent/plugin_llm.py	2026-08-31 21:29:27.000000000 +0200
++++ b/agent/plugin_llm.py	2026-09-01 02:26:51.743940500 +0200
+@@ -164,6 +164,68 @@
+     audit: Dict[str, Any] = field(default_factory=dict)
+ 
+ 
++@dataclass(frozen=True)
++class PluginInvocationRoute:
++    """Immutable provider route captured from one active host invocation."""
++
++    provider: str
++    model: str
++    base_url: str
++    api_key: Any
++    api_mode: str
++    client: Any = field(default=None, compare=False, repr=False)
++
++    @classmethod
++    def from_agent(cls, agent: Any) -> "PluginInvocationRoute":
++        if agent is None:
++            raise RuntimeError("plugin invocation route requires a live agent")
++        api_mode = str(getattr(agent, "api_mode", "") or "").strip()
++        client = (
++            getattr(agent, "_anthropic_client", None)
++            if api_mode == "anthropic_messages"
++            else getattr(agent, "client", None)
++        )
++        return cls(
++            provider=str(getattr(agent, "provider", "") or "").strip(),
++            model=str(getattr(agent, "model", "") or "").strip(),
++            base_url=str(getattr(agent, "base_url", "") or "").strip(),
++            api_key=getattr(agent, "api_key", ""),
++            api_mode=api_mode,
++            client=client,
++        ).validated()
++
++    @classmethod
++    def from_runtime(
++        cls, model: str, runtime: Dict[str, Any]
++    ) -> "PluginInvocationRoute":
++        return cls(
++            provider=str(runtime.get("provider", "") or "").strip(),
++            model=str(model or "").strip(),
++            base_url=str(runtime.get("base_url", "") or "").strip(),
++            api_key=runtime.get("api_key", ""),
++            api_mode=str(runtime.get("api_mode", "") or "").strip(),
++        ).validated()
++
++    def validated(self) -> "PluginInvocationRoute":
++        if not self.provider or self.provider == "auto":
++            raise RuntimeError("plugin invocation route requires an explicit provider")
++        if not self.model:
++            raise RuntimeError("plugin invocation route requires an explicit model")
++        if not self.base_url:
++            raise RuntimeError("plugin invocation route requires an explicit base URL")
++        if not self.api_mode:
++            raise RuntimeError("plugin invocation route requires an explicit API mode")
++        return self
++
++
++class PluginLlmInvocationError(RuntimeError):
++    """Stable, route-safe failure from an invocation-bound plugin call."""
++
++    def __init__(self, code: str) -> None:
++        super().__init__(f"plugin invocation route failed: {code}")
++        self.code = code
++
++
+ # ---------------------------------------------------------------------------
+ # Trust gate
+ # ---------------------------------------------------------------------------
+@@ -729,11 +791,56 @@
+         policy_loader: Optional[Callable[[str], _TrustPolicy]] = None,
+         sync_caller: Optional[Callable[..., Any]] = None,
+         async_caller: Optional[Callable[..., Awaitable[Any]]] = None,
++        bound_route: Optional[PluginInvocationRoute] = None,
++        bound_error_code: Optional[str] = None,
+     ) -> None:
+         self._plugin_id = plugin_id
+         self._policy_loader = policy_loader or _resolve_trust_policy
+         self._sync_caller = sync_caller
+         self._async_caller = async_caller
++        self._bound_route = bound_route
++        self._bound_error_code = bound_error_code
++
++    def bind_invocation(self, route: PluginInvocationRoute) -> "BoundPluginLlm":
++        """Return a route-locked facade for one host invocation."""
++        return BoundPluginLlm(
++            plugin_id=self._plugin_id,
++            policy_loader=self._policy_loader,
++            sync_caller=self._sync_caller,
++            async_caller=self._async_caller,
++            bound_route=route.validated(),
++        )
++
++    def bind_invocation_error(self, code: str) -> "BoundPluginLlm":
++        """Return a fail-closed facade when an active route is unavailable."""
++        return BoundPluginLlm(
++            plugin_id=self._plugin_id,
++            policy_loader=self._policy_loader,
++            sync_caller=self._sync_caller,
++            async_caller=self._async_caller,
++            bound_error_code=code,
++        )
++
++    @property
++    def invocation_bound(self) -> bool:
++        return self._bound_route is not None or self._bound_error_code is not None
++
++    def _reject_bound_overrides(
++        self,
++        *,
++        provider: Optional[str],
++        model: Optional[str],
++        agent_id: Optional[str],
++        profile: Optional[str],
++        task: Optional[str],
++    ) -> None:
++        if not self.invocation_bound:
++            return
++        if any(value is not None for value in (provider, model, agent_id, profile, task)):
++            raise PluginLlmTrustError(
++                "an invocation-bound plugin LLM cannot override its provider, "
++                "model, agent id, auth profile, or auxiliary task"
++            )
+ 
+     # -- public sync API ----------------------------------------------------
+ 
+@@ -766,6 +873,13 @@
+         registered itself resolves through ``auxiliary.<task>`` config,
+         and a foreign/unknown key is rejected (see :func:`_check_task`).
+         """
++        self._reject_bound_overrides(
++            provider=provider,
++            model=model,
++            agent_id=agent_id,
++            profile=profile,
++            task=task,
++        )
+         policy = self._policy_loader(self._plugin_id)
+         eff_task = _check_task(policy, plugin_id=self._plugin_id, requested_task=task)
+         eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
+@@ -847,6 +961,13 @@
+         if not input:
+             raise ValueError("complete_structured requires at least one input block")
+ 
++        self._reject_bound_overrides(
++            provider=provider,
++            model=model,
++            agent_id=agent_id,
++            profile=profile,
++            task=task,
++        )
+         policy = self._policy_loader(self._plugin_id)
+         eff_task = _check_task(policy, plugin_id=self._plugin_id, requested_task=task)
+         eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
+@@ -924,6 +1045,13 @@
+         task: Optional[str] = None,
+     ) -> PluginLlmCompleteResult:
+         """Async sibling of :meth:`complete`."""
++        self._reject_bound_overrides(
++            provider=provider,
++            model=model,
++            agent_id=agent_id,
++            profile=profile,
++            task=task,
++        )
+         policy = self._policy_loader(self._plugin_id)
+         eff_task = _check_task(policy, plugin_id=self._plugin_id, requested_task=task)
+         eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
+@@ -991,6 +1119,13 @@
+         if not input:
+             raise ValueError("acomplete_structured requires at least one input block")
+ 
++        self._reject_bound_overrides(
++            provider=provider,
++            model=model,
++            agent_id=agent_id,
++            profile=profile,
++            task=task,
++        )
+         policy = self._policy_loader(self._plugin_id)
+         eff_task = _check_task(policy, plugin_id=self._plugin_id, requested_task=task)
+         eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
+@@ -1093,6 +1228,50 @@
+         ``task`` (already trust-checked by the caller) routes through the
+         matching ``auxiliary.<task>`` slot; ``None`` keeps the main model.
+         """
++        if self._bound_error_code is not None:
++            raise PluginLlmInvocationError(self._bound_error_code)
++        if self._bound_route is not None:
++            route = self._bound_route
++            if self._sync_caller is not None:
++                return self._sync_caller(
++                    messages=messages,
++                    provider_override=route.provider,
++                    model_override=route.model,
++                    profile_override=None,
++                    temperature=temperature,
++                    max_tokens=max_tokens,
++                    timeout=timeout,
++                    extra_body=extra_body,
++                    task=None,
++                    bound_route=route,
++                    single_attempt=True,
++                )
++            from agent.auxiliary_client import RouteLockedCallError, call_llm
++            try:
++                response = call_llm(
++                    task=None,
++                    provider=route.provider,
++                    model=route.model,
++                    base_url=route.base_url,
++                    api_key=route.api_key,
++                    api_mode=route.api_mode,
++                    bound_client=route.client,
++                    messages=messages,
++                    temperature=temperature,
++                    max_tokens=max_tokens,
++                    timeout=timeout,
++                    extra_body=dict(extra_body or {}) or None,
++                    single_attempt=True,
++                )
++            except RouteLockedCallError as exc:
++                raise PluginLlmInvocationError(exc.code) from exc
++            except Exception as exc:
++                from agent.auxiliary_client import classify_route_locked_error
++                raise PluginLlmInvocationError(
++                    classify_route_locked_error(exc)
++                ) from exc
++            return route.provider, route.model, response
++
+         if self._sync_caller is not None:
+             return self._sync_caller(
+                 messages=messages,
+@@ -1142,6 +1321,50 @@
+         extra_body: Optional[Dict[str, Any]] = None,
+         task: Optional[str] = None,
+     ) -> tuple[str, str, Any]:
++        if self._bound_error_code is not None:
++            raise PluginLlmInvocationError(self._bound_error_code)
++        if self._bound_route is not None:
++            route = self._bound_route
++            if self._async_caller is not None:
++                return await self._async_caller(
++                    messages=messages,
++                    provider_override=route.provider,
++                    model_override=route.model,
++                    profile_override=None,
++                    temperature=temperature,
++                    max_tokens=max_tokens,
++                    timeout=timeout,
++                    extra_body=extra_body,
++                    task=None,
++                    bound_route=route,
++                    single_attempt=True,
++                )
++            from agent.auxiliary_client import RouteLockedCallError, async_call_llm
++            try:
++                response = await async_call_llm(
++                    task=None,
++                    provider=route.provider,
++                    model=route.model,
++                    base_url=route.base_url,
++                    api_key=route.api_key,
++                    api_mode=route.api_mode,
++                    bound_client=route.client,
++                    messages=messages,
++                    temperature=temperature,
++                    max_tokens=max_tokens,
++                    timeout=timeout,
++                    extra_body=dict(extra_body or {}) or None,
++                    single_attempt=True,
++                )
++            except RouteLockedCallError as exc:
++                raise PluginLlmInvocationError(exc.code) from exc
++            except Exception as exc:
++                from agent.auxiliary_client import classify_route_locked_error
++                raise PluginLlmInvocationError(
++                    classify_route_locked_error(exc)
++                ) from exc
++            return route.provider, route.model, response
++
+         if self._async_caller is not None:
+             return await self._async_caller(
+                 messages=messages,
+@@ -1179,6 +1402,10 @@
+         return provider, model, response
+ 
+ 
++class BoundPluginLlm(PluginLlm):
++    """Route-locked facade returned only inside an invocation scope."""
++
++
+ # ---------------------------------------------------------------------------
+ # Test helpers
+ # ---------------------------------------------------------------------------
+@@ -1206,6 +1433,9 @@
+ 
+ __all__ = [
+     "PluginLlm",
++    "BoundPluginLlm",
++    "PluginInvocationRoute",
++    "PluginLlmInvocationError",
+     "PluginLlmTextInput",
+     "PluginLlmImageInput",
+     "PluginLlmInput",
+diff -ruN --strip-trailing-cr orig/agent/turn_context.py work/agent/turn_context.py
+--- a/agent/turn_context.py	2026-08-31 21:29:27.000000000 +0200
++++ b/agent/turn_context.py	2026-09-01 02:26:51.756495300 +0200
+@@ -600,6 +600,15 @@
+     # Restore the primary runtime if the previous turn activated fallback.
+     agent._restore_primary_runtime()
+ 
++    # Bind plugin LLM access only after primary restoration settles the exact
++    # provider route. The enclosing AIAgent scope starts fail-closed, so a route
++    # that cannot be represented never falls back to ambient global config.
++    try:
++        from hermes_cli.plugins import set_plugin_invocation_agent
++        set_plugin_invocation_agent(agent)
++    except Exception:
++        logger.debug("Plugin invocation route binding unavailable", exc_info=True)
++
+     # Tell auxiliary_client what the live main provider/model are for this turn
+     # after primary restoration has settled the runtime.
+     try:
+diff -ruN --strip-trailing-cr orig/cli.py work/cli.py
+--- a/cli.py	2026-08-31 21:29:27.000000000 +0200
++++ b/cli.py	2026-09-01 02:26:51.769029400 +0200
+@@ -13107,15 +13107,17 @@
+             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
+                 from hermes_cli.plugins import (
+                     get_plugin_command_handler,
++                    plugin_invocation_scope_for_agent,
+                     resolve_plugin_command_result,
+                 )
+                 plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+                 if plugin_handler:
+                     user_args = cmd_original[len(base_cmd):].strip()
+                     try:
+-                        result = resolve_plugin_command_result(
+-                            plugin_handler(user_args)
+-                        )
++                        with plugin_invocation_scope_for_agent(self.agent or self):
++                            result = resolve_plugin_command_result(
++                                plugin_handler(user_args)
++                            )
+                         if result:
+                             _cprint(str(result))
+                     except Exception as e:
+diff -ruN --strip-trailing-cr orig/gateway/run.py work/gateway/run.py
+--- a/gateway/run.py	2026-08-31 21:29:27.000000000 +0200
++++ b/gateway/run.py	2026-09-01 02:26:51.786114400 +0200
+@@ -19381,16 +19381,28 @@
+         # Plugin-registered slash commands
+         if command:
+             try:
+-                from hermes_cli.plugins import get_plugin_command_handler
++                from hermes_cli.plugins import (
++                    get_plugin_command_handler,
++                    plugin_invocation_scope_for_agent,
++                )
+                 # Normalize underscores to hyphens so Telegram's underscored
+                 # autocomplete form matches plugin commands registered with
+                 # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
+                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
+                 if plugin_handler:
+                     user_args = event.get_command_args().strip()
+-                    result = plugin_handler(user_args)
+-                    if asyncio.iscoroutine(result):
+-                        result = await result
++                    command_agent = None
++                    cache_lock = getattr(self, "_agent_cache_lock", None)
++                    cache = getattr(self, "_agent_cache", None)
++                    if cache_lock is not None and cache is not None:
++                        with cache_lock:
++                            cached = cache.get(_quick_key)
++                            if isinstance(cached, tuple) and cached:
++                                command_agent = cached[0]
++                    with plugin_invocation_scope_for_agent(command_agent):
++                        result = plugin_handler(user_args)
++                        if asyncio.iscoroutine(result):
++                            result = await result
+                     return str(result) if result else None
+             except Exception as e:
+                 logger.warning("Plugin command dispatch failed: %s", e)
+diff -ruN --strip-trailing-cr orig/hermes_cli/plugins.py work/hermes_cli/plugins.py
+--- a/hermes_cli/plugins.py	2026-08-31 21:29:27.000000000 +0200
++++ b/hermes_cli/plugins.py	2026-09-01 02:26:51.800138300 +0200
+@@ -50,10 +50,11 @@
+ import time
+ import types
+ from contextlib import contextmanager
++from contextvars import ContextVar, copy_context
+ from dataclasses import dataclass, field
+ from functools import wraps
+ from pathlib import Path
+-from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type, Union)
++from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple, Type, Union)
+ 
+ from hermes_constants import (
+     get_hermes_home,
+@@ -107,6 +108,66 @@
+ logger = logging.getLogger(__name__)
+ 
+ 
++@dataclass(frozen=True)
++class _PluginInvocationBinding:
++    """Task-local route state for one active host invocation."""
++
++    route: Any = None
++    agent: Any = None
++    error_code: Optional[str] = "incomplete_route"
++
++
++_plugin_invocation_binding: ContextVar[Optional[_PluginInvocationBinding]] = ContextVar(
++    "plugin_invocation_binding", default=None
++)
++
++
++@contextmanager
++def plugin_invocation_scope(route: Any = None) -> Iterator[None]:
++    """Open a reset-safe invocation scope, failing closed until route assignment."""
++    binding = _PluginInvocationBinding(
++        route=route,
++        error_code=None if route is not None else "incomplete_route",
++    )
++    token = _plugin_invocation_binding.set(binding)
++    try:
++        yield
++    finally:
++        _plugin_invocation_binding.reset(token)
++
++
++def set_plugin_invocation_route(route: Any) -> bool:
++    """Assign a settled immutable route inside an active invocation scope."""
++    if _plugin_invocation_binding.get() is None:
++        return False
++    _plugin_invocation_binding.set(_PluginInvocationBinding(route=route, error_code=None))
++    return True
++
++
++def set_plugin_invocation_agent(agent: Any) -> bool:
++    """Bind the active agent so later fallback changes remain authoritative."""
++    if _plugin_invocation_binding.get() is None:
++        return False
++    _plugin_invocation_binding.set(_PluginInvocationBinding(agent=agent, error_code=None))
++    return True
++
++
++@contextmanager
++def plugin_invocation_scope_for_agent(agent: Any) -> Iterator[None]:
++    """Bind a direct command to its live agent, or expose a stable failure."""
++    route = None
++    try:
++        restore_primary = getattr(agent, "_restore_primary_runtime", None)
++        if callable(restore_primary):
++            restore_primary()
++        from agent.plugin_llm import PluginInvocationRoute
++        route = PluginInvocationRoute.from_agent(agent)
++    except Exception:
++        logger.debug("Plugin invocation route unavailable", exc_info=True)
++    with plugin_invocation_scope(route):
++        yield
++
++
+ # ---------------------------------------------------------------------------
+ # Plugin developer debug logging
+ # ---------------------------------------------------------------------------
+@@ -1654,7 +1715,22 @@
+             from agent.plugin_llm import PluginLlm
+             plugin_id = self.manifest.key or self.manifest.name
+             self._llm = PluginLlm(plugin_id=plugin_id)
+-        return self._llm
++        binding = _plugin_invocation_binding.get()
++        if binding is None:
++            return self._llm
++        if binding.agent is not None:
++            try:
++                from agent.plugin_llm import PluginInvocationRoute
++                return self._llm.bind_invocation(
++                    PluginInvocationRoute.from_agent(binding.agent)
++                )
++            except Exception:
++                return self._llm.bind_invocation_error("incomplete_route")
++        if binding.route is not None:
++            return self._llm.bind_invocation(binding.route)
++        return self._llm.bind_invocation_error(
++            binding.error_code or "incomplete_route"
++        )
+ 
+     @property
+     def subagent_lifecycle(self) -> Any:
+@@ -7081,8 +7157,9 @@
+         finally:
+             done.set()
+ 
++    invocation_context = copy_context()
+     thread = threading.Thread(
+-        target=_runner,
++        target=lambda: invocation_context.run(_runner),
+         name="hermes-plugin-command-await",
+         daemon=True,
+     )
+diff -ruN --strip-trailing-cr orig/run_agent.py work/run_agent.py
+--- a/run_agent.py	2026-08-31 21:29:27.000000000 +0200
++++ b/run_agent.py	2026-09-01 02:26:51.818221200 +0200
+@@ -9050,12 +9050,17 @@
+                 getattr(self, "session_id", None),
+             )
+             from agent.auxiliary_client import scoped_runtime_main
++            from hermes_cli.plugins import plugin_invocation_scope
+ 
+-            # The outer token restores the caller's Context even though turn setup
+-            # replaces the value with the live runtime after fallback restoration.
+-            # Keep the scope local instead of storing ContextVar tokens on the agent,
+-            # which may be observed from another thread.
+-            with bind_subagent_parent(self), scoped_runtime_main({}):
++            # The outer tokens restore the caller's Context even though turn setup
++            # replaces both values after fallback restoration. Keep the scopes
++            # local instead of storing ContextVar tokens on the agent, which may
++            # be observed from another thread.
++            with (
++                bind_subagent_parent(self),
++                scoped_runtime_main({}),
++                plugin_invocation_scope(),
++            ):
+                 try:
+                     if durable_turn_lease_thread is not None:
+                         with durable_turn_lease_activity_lock:
+diff -ruN --strip-trailing-cr orig/tests/agent/test_plugin_invocation_route.py work/tests/agent/test_plugin_invocation_route.py
+--- a/tests/agent/test_plugin_invocation_route.py	1970-01-01 01:00:00.000000000 +0100
++++ b/tests/agent/test_plugin_invocation_route.py	2026-09-01 02:26:51.850235200 +0200
+@@ -0,0 +1,471 @@
++"""Regression coverage for invocation-bound plugin LLM routing."""
++
++from __future__ import annotations
++
++import asyncio
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from agent.auxiliary_client import (
++    RouteLockedCallError,
++    async_call_llm,
++    call_llm,
++)
++from agent.plugin_llm import (
++    BoundPluginLlm,
++    PluginInvocationRoute,
++    PluginLlmInvocationError,
++    PluginLlmTrustError,
++    _TrustPolicy,
++    make_plugin_llm_for_test,
++)
++
++
++CAP_SENTINEL = 8173
++
++
++def _response(text: str = "ok") -> SimpleNamespace:
++    return SimpleNamespace(
++        choices=[SimpleNamespace(message=SimpleNamespace(content=text))],
++        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
++    )
++
++
++def _route(
++    *, model: str = "locked-model", client=None
++) -> PluginInvocationRoute:
++    return PluginInvocationRoute(
++        provider="custom",
++        model=model,
++        base_url="https://locked.example/v1",
++        api_key="test-key",
++        api_mode="chat_completions",
++        client=client,
++    )
++
++
++def _base(**kwargs):
++    return make_plugin_llm_for_test(
++        plugin_id="refine",
++        policy=_TrustPolicy(plugin_id="refine"),
++        **kwargs,
++    )
++
++
++def test_bound_facade_uses_captured_route_and_preserves_cap():
++    captured: dict = {}
++
++    def fake_caller(**kwargs):
++        captured.update(kwargs)
++        return kwargs["provider_override"], kwargs["model_override"], _response()
++
++    base = _base(sync_caller=fake_caller)
++    bound = base.bind_invocation(_route())
++    result = bound.complete(
++        [{"role": "user", "content": "private evidence"}],
++        max_tokens=CAP_SENTINEL,
++    )
++
++    assert isinstance(bound, BoundPluginLlm)
++    assert base.invocation_bound is False
++    assert bound.invocation_bound is True
++    assert (result.provider, result.model) == ("custom", "locked-model")
++    assert captured["bound_route"] == _route()
++    assert captured["single_attempt"] is True
++    assert captured["max_tokens"] == CAP_SENTINEL
++
++
++@pytest.mark.parametrize(
++    "override",
++    [
++        {"provider": "other"},
++        {"model": "other"},
++        {"agent_id": "other"},
++        {"profile": "other"},
++        {"task": "classifier"},
++    ],
++)
++def test_bound_facade_rejects_every_route_override_before_call(override):
++    caller = MagicMock()
++    bound = _base(sync_caller=caller).bind_invocation(_route())
++
++    with pytest.raises(PluginLlmTrustError, match="invocation-bound"):
++        bound.complete(
++            [{"role": "user", "content": "private evidence"}],
++            max_tokens=CAP_SENTINEL,
++            **override,
++        )
++
++    caller.assert_not_called()
++
++
++def test_plugin_scope_starts_fail_closed_then_accepts_settled_route_and_resets():
++    from hermes_cli.plugins import (
++        PluginContext,
++        PluginManifest,
++        PluginManager,
++        plugin_invocation_scope,
++        set_plugin_invocation_route,
++    )
++
++    context = PluginContext(
++        PluginManifest(name="refine", key="refine"), PluginManager()
++    )
++    base = context.llm
++    assert set_plugin_invocation_route(_route()) is False
++
++    with plugin_invocation_scope():
++        incomplete = context.llm
++        assert incomplete.invocation_bound is True
++        with pytest.raises(PluginLlmInvocationError) as raised:
++            incomplete.complete(
++                [{"role": "user", "content": "private evidence"}],
++                max_tokens=CAP_SENTINEL,
++            )
++        assert raised.value.code == "incomplete_route"
++
++        assert set_plugin_invocation_route(_route(model="settled")) is True
++        assert context.llm._bound_route.model == "settled"
++
++    assert context.llm is base
++    assert context.llm.invocation_bound is False
++
++
++def test_plugin_scopes_nest_and_restore_parent_route_after_child_error():
++    from hermes_cli.plugins import (
++        PluginContext,
++        PluginManifest,
++        PluginManager,
++        plugin_invocation_scope,
++    )
++
++    context = PluginContext(
++        PluginManifest(name="refine", key="refine"), PluginManager()
++    )
++    with plugin_invocation_scope(_route(model="parent")):
++        assert context.llm._bound_route.model == "parent"
++        with pytest.raises(RuntimeError, match="child failed"):
++            with plugin_invocation_scope(_route(model="child")):
++                assert context.llm._bound_route.model == "child"
++                raise RuntimeError("child failed")
++        assert context.llm._bound_route.model == "parent"
++    assert context.llm.invocation_bound is False
++
++
++def test_concurrent_async_scopes_cannot_observe_each_others_routes():
++    from hermes_cli.plugins import (
++        PluginContext,
++        PluginManifest,
++        PluginManager,
++        plugin_invocation_scope,
++    )
++
++    context = PluginContext(
++        PluginManifest(name="refine", key="refine"), PluginManager()
++    )
++
++    async def worker(model: str, ready: asyncio.Event, other: asyncio.Event):
++        with plugin_invocation_scope(_route(model=model)):
++            ready.set()
++            await other.wait()
++            await asyncio.sleep(0)
++            return context.llm._bound_route.model
++
++    async def run():
++        first = asyncio.Event()
++        second = asyncio.Event()
++        return await asyncio.gather(
++            worker("first", first, second),
++            worker("second", second, first),
++        )
++
++    assert asyncio.run(run()) == ["first", "second"]
++    assert context.llm.invocation_bound is False
++
++
++def test_single_attempt_sync_preserves_cap_and_never_retries_or_falls_back():
++    client = MagicMock()
++    client.chat.completions.create.return_value = _response()
++
++    with patch("agent.auxiliary_client.OpenAI") as factory, patch(
++        "agent.auxiliary_client._try_payment_fallback"
++    ) as fallback:
++        response = call_llm(
++            provider="custom",
++            model="locked-model",
++            base_url="https://locked.example/v1",
++            api_key="test-key",
++            api_mode="chat_completions",
++            bound_client=client,
++            messages=[{"role": "user", "content": "private evidence"}],
++            max_tokens=CAP_SENTINEL,
++            single_attempt=True,
++        )
++
++    assert response.choices[0].message.content == "ok"
++    assert client.chat.completions.create.call_count == 1
++    kwargs = client.chat.completions.create.call_args.kwargs
++    assert kwargs.get("max_tokens", kwargs.get("max_completion_tokens")) == CAP_SENTINEL
++    fallback.assert_not_called()
++    factory.assert_not_called()
++
++
++def test_single_attempt_sync_propagates_first_transport_error_without_fallback():
++    client = MagicMock()
++    client.chat.completions.create.side_effect = ConnectionError("network down")
++
++    with patch("agent.auxiliary_client.OpenAI") as factory, patch(
++        "agent.auxiliary_client._try_payment_fallback"
++    ) as fallback:
++        with pytest.raises(ConnectionError, match="network down"):
++            call_llm(
++                provider="custom",
++                model="locked-model",
++                base_url="https://locked.example/v1",
++                api_key="test-key",
++                api_mode="chat_completions",
++                bound_client=client,
++                messages=[{"role": "user", "content": "private evidence"}],
++                max_tokens=CAP_SENTINEL,
++                single_attempt=True,
++            )
++
++    assert client.chat.completions.create.call_count == 1
++    fallback.assert_not_called()
++    factory.assert_not_called()
++
++
++def test_single_attempt_async_preserves_cap_and_never_retries():
++    client = MagicMock()
++    client.chat.completions.create.return_value = _response()
++
++    async def run():
++        with patch("agent.auxiliary_client._to_async_client") as rebuild:
++            response = await async_call_llm(
++                provider="custom",
++                model="locked-model",
++                base_url="https://locked.example/v1",
++                api_key="test-key",
++                api_mode="chat_completions",
++                bound_client=client,
++                messages=[{"role": "user", "content": "private evidence"}],
++                max_tokens=CAP_SENTINEL,
++                single_attempt=True,
++            )
++            rebuild.assert_not_called()
++            return response
++
++    response = asyncio.run(run())
++    assert response.choices[0].message.content == "ok"
++    assert client.chat.completions.create.call_count == 1
++    kwargs = client.chat.completions.create.call_args.kwargs
++    assert kwargs.get("max_tokens", kwargs.get("max_completion_tokens")) == CAP_SENTINEL
++
++
++def test_route_errors_are_stable_and_unsupported_modes_make_no_request():
++    client_factory = MagicMock()
++
++    with patch("agent.auxiliary_client.OpenAI", client_factory):
++        with pytest.raises(RouteLockedCallError) as raised:
++            call_llm(
++                provider="custom",
++                model="locked-model",
++                base_url="https://secret-endpoint.example/v1",
++                api_key="secret-key",
++                api_mode="codex_app_server",
++                messages=[{"role": "user", "content": "private evidence"}],
++                max_tokens=CAP_SENTINEL,
++                single_attempt=True,
++            )
++
++    assert raised.value.code == "unsupported_api_mode"
++    client_factory.assert_not_called()
++
++    bound = _base().bind_invocation(_route())
++    with patch(
++        "agent.auxiliary_client.call_llm",
++        side_effect=RouteLockedCallError(
++            "unsupported_api_mode", "secret internal route detail"
++        ),
++    ):
++        with pytest.raises(PluginLlmInvocationError) as public_error:
++            bound.complete(
++                [{"role": "user", "content": "private evidence"}],
++                max_tokens=CAP_SENTINEL,
++            )
++    assert public_error.value.code == "unsupported_api_mode"
++    assert "secret internal route detail" not in str(public_error.value)
++
++
++def test_route_preserves_callable_api_key_without_stringifying_it():
++    token_provider = lambda: "token"  # noqa: E731
++    route = PluginInvocationRoute.from_runtime(
++        "locked-model",
++        {
++            "provider": "custom",
++            "base_url": "https://locked.example/v1",
++            "api_key": token_provider,
++            "api_mode": "chat_completions",
++        },
++    )
++    assert route.api_key is token_provider
++
++    client = MagicMock()
++    client.chat.completions.create.return_value = _response()
++    with patch("agent.auxiliary_client.OpenAI") as factory:
++        call_llm(
++            provider=route.provider,
++            model=route.model,
++            base_url=route.base_url,
++            api_key=route.api_key,
++            api_mode=route.api_mode,
++            bound_client=client,
++            messages=[{"role": "user", "content": "private evidence"}],
++            max_tokens=CAP_SENTINEL,
++            single_attempt=True,
++        )
++    factory.assert_not_called()
++    assert client.chat.completions.create.call_count == 1
++
++
++def test_bound_facade_uses_live_client_and_maps_transport_failure_safely():
++    client = MagicMock()
++    client.chat.completions.create.side_effect = ConnectionError(
++        "secret endpoint transport detail"
++    )
++    bound = _base().bind_invocation(_route(client=client))
++
++    with pytest.raises(PluginLlmInvocationError) as raised:
++        bound.complete(
++            [{"role": "user", "content": "private evidence"}],
++            max_tokens=CAP_SENTINEL,
++        )
++
++    assert raised.value.code == "transport_error"
++    assert "secret endpoint transport detail" not in str(raised.value)
++    assert client.chat.completions.create.call_count == 1
++
++
++def test_route_locked_call_fails_closed_without_exact_live_transport():
++    with pytest.raises(RouteLockedCallError) as raised:
++        call_llm(
++            provider="custom",
++            model="locked-model",
++            base_url="https://locked.example/v1",
++            api_key="test-key",
++            api_mode="chat_completions",
++            messages=[{"role": "user", "content": "private evidence"}],
++            max_tokens=CAP_SENTINEL,
++            single_attempt=True,
++        )
++    assert raised.value.code == "exact_transport_unavailable"
++
++
++def test_active_agent_binding_tracks_settled_fallback_client_without_cross_talk():
++    from hermes_cli.plugins import (
++        PluginContext,
++        PluginManifest,
++        PluginManager,
++        plugin_invocation_scope,
++        set_plugin_invocation_agent,
++    )
++
++    first_client = MagicMock(name="first-client")
++    second_client = MagicMock(name="second-client")
++    agent = SimpleNamespace(
++        provider="custom",
++        model="primary",
++        base_url="https://primary.example/v1",
++        api_key="primary-key",
++        api_mode="chat_completions",
++        client=first_client,
++    )
++    context = PluginContext(
++        PluginManifest(name="refine", key="refine"), PluginManager()
++    )
++
++    with plugin_invocation_scope():
++        assert set_plugin_invocation_agent(agent) is True
++        first = context.llm
++        assert first._bound_route.model == "primary"
++        assert first._bound_route.client is first_client
++
++        agent.model = "fallback"
++        agent.base_url = "https://fallback.example/v1"
++        agent.client = second_client
++        second = context.llm
++        assert second._bound_route.model == "fallback"
++        assert second._bound_route.client is second_client
++
++    assert context.llm.invocation_bound is False
++
++
++def test_async_plugin_command_resolution_preserves_invocation_context():
++    from hermes_cli.plugins import (
++        PluginContext,
++        PluginManifest,
++        PluginManager,
++        plugin_invocation_scope,
++        resolve_plugin_command_result,
++    )
++
++    context = PluginContext(
++        PluginManifest(name="refine", key="refine"), PluginManager()
++    )
++
++    async def handler():
++        await asyncio.sleep(0)
++        return context.llm.invocation_bound
++
++    async def run():
++        with plugin_invocation_scope(_route()):
++            return resolve_plugin_command_result(handler())
++
++    assert asyncio.run(run()) is True
++    assert context.llm.invocation_bound is False
++
++
++def test_route_locked_call_rejects_composite_moa_before_fanout():
++    client = MagicMock()
++    with pytest.raises(RouteLockedCallError) as raised:
++        call_llm(
++            provider="moa",
++            model="default",
++            base_url="moa://local",
++            api_key="moa-virtual-provider",
++            api_mode="chat_completions",
++            bound_client=client,
++            messages=[{"role": "user", "content": "private evidence"}],
++            max_tokens=CAP_SENTINEL,
++            single_attempt=True,
++        )
++    assert raised.value.code == "unsupported_composite_route"
++    client.chat.completions.create.assert_not_called()
++
++
++def test_route_locked_cap_key_ignores_contradictory_ambient_endpoint():
++    from agent.auxiliary_client import _build_call_kwargs
++
++    with patch(
++        "agent.auxiliary_client._current_custom_base_url",
++        return_value="https://api.openai.com/v1",
++    ), patch(
++        "agent.auxiliary_client._scoped_key_env",
++        return_value=None,
++    ), patch(
++        "agent.auxiliary_client._read_nous_auth",
++        return_value=None,
++    ):
++        kwargs = _build_call_kwargs(
++            "custom",
++            "legacy-local-model",
++            [{"role": "user", "content": "private evidence"}],
++            max_tokens=CAP_SENTINEL,
++            base_url="https://local.example/anthropic",
++            require_max_tokens=True,
++            api_mode="chat_completions",
++        )
++    assert kwargs["max_tokens"] == CAP_SENTINEL
++    assert "max_completion_tokens" not in kwargs
+diff -ruN --strip-trailing-cr orig/tui_gateway/methods_tools.py work/tui_gateway/methods_tools.py
+--- a/tui_gateway/methods_tools.py	2026-08-31 21:29:27.000000000 +0200
++++ b/tui_gateway/methods_tools.py	2026-09-01 02:26:51.840234600 +0200
+@@ -519,12 +519,15 @@
+     try:
+         from hermes_cli.plugins import (
+             get_plugin_command_handler,
++            plugin_invocation_scope_for_agent,
+             resolve_plugin_command_result,
+         )
+ 
+         handler = get_plugin_command_handler(name)
+         if handler:
+-            result = resolve_plugin_command_result(handler(arg))
++            agent = session.get("agent") if session else None
++            with plugin_invocation_scope_for_agent(agent):
++                result = resolve_plugin_command_result(handler(arg))
+             return _ok(rid, {"type": "plugin", "output": str(result or "")})
+     except Exception:
+         pass
+@@ -1263,6 +1266,7 @@
+         try:
+             from hermes_cli.plugins import (
+                 get_plugin_command_handler,
++                plugin_invocation_scope_for_agent,
+                 resolve_plugin_command_result,
+             )
+ 
+@@ -1273,7 +1277,8 @@
+ 
+     if plugin_handler and resolve_plugin_command_result:
+         try:
+-            result = resolve_plugin_command_result(plugin_handler(_cmd_arg))
++            with plugin_invocation_scope_for_agent(session.get("agent")):
++                result = resolve_plugin_command_result(plugin_handler(_cmd_arg))
+             return _ok(rid, {"output": str(result or "(no output)")})
+         except Exception as e:
+             return _ok(rid, {"output": f"Plugin command error: {e}"})

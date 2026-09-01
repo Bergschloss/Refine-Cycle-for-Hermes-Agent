@@ -85,6 +85,34 @@ git -C "$HERMES_SRC" rev-parse HEAD >/dev/null 2>&1 || fail "$HERMES_SRC is not 
 # hardcodes a file list that drifts from the patch. (Only needed below DETECT:
 # a host that already carries the route is done before this point.)
 # ---------------------------------------------------------------------------
+# Which bundled patch fits THIS host is decided by trying them, not by comparing
+# version strings. Hermes moved 72 commits across these files between v2026.8.16
+# and v2026.8.31, yet the 8.16 patch still lands 39 of its 40 hunks on 8.31 — so a
+# version test would refuse hosts the patch fits and accept hosts it does not.
+# `git apply --check` answers the only question that matters, and changes nothing.
+select_patch() {
+    local candidate
+    for candidate in "$@"; do
+        [ -f "$candidate" ] || continue
+        if git -C "$HERMES_SRC" apply --check "$candidate" >/dev/null 2>&1; then
+            PATCH_FILE="$candidate"
+            say "Route patch    : $(basename "$candidate")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! select_patch \
+        "$REPO_DIR/assets/invocation-route-v2026.8.31.patch" \
+        "$REPO_DIR/assets/invocation-route-v2026.8.16.patch"; then
+    fail "every bundled route patch does not apply to this Hermes checkout.
+  Host HEAD   : $HOST_DESC
+  Patch base  : $PATCH_BASE_LONG (v2026.8.16) and v2026.8.31
+  Tried       : invocation-route-v2026.8.31.patch, invocation-route-v2026.8.16.patch
+  Nothing was modified. The patch needs rebasing onto this host's version."
+fi
+
 [ -f "$PATCH_FILE" ] || fail "patch file missing: $PATCH_FILE"
 mapfile -t TOUCHED_FILES < <(grep -E "^diff --git " "$PATCH_FILE" | sed -E 's#^diff --git a/([^ ]+) b/.*#\1#')
 [ "${#TOUCHED_FILES[@]}" -gt 0 ] || fail "could not parse touched files from $PATCH_FILE"
