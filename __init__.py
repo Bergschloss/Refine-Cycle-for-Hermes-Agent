@@ -1,5 +1,6 @@
 """Refine plugin registration and command handlers."""
 
+import difflib
 import json
 import logging
 import re
@@ -656,6 +657,11 @@ def _on_post_llm_call(
 _MODEL_SUBCOMMAND = "model"
 _SESSION_SUBCOMMAND = "session"
 
+# Every subcommand _handle_refine_command actually implements. Kept beside the
+# two names above so the list cannot drift from the branches that consume them.
+_KNOWN_SUBCOMMANDS = ("audit", "dry-run", _MODEL_SUBCOMMAND, "rollback",
+                      _SESSION_SUBCOMMAND, "status")
+
 
 def _explicit_session_status(value: Any) -> tuple[str, str]:
     """Validate one historical-session selector before any model call.
@@ -775,6 +781,38 @@ def _handle_model_subcommand(remainder: str) -> str:
             "will not be sent until plugins.entries.refine.llm.allow_provider_override is true."
         )
     return core.scrub_text("\n".join(lines))
+
+
+def _mistyped_subcommand_error(args: str) -> Optional[str]:
+    """Usage text when a lone token is a near-miss for a real subcommand.
+
+    Falling through to the proposal path meant ``/refine auditt`` started a
+    *mutation* run with "auditt" as its reason instead of reporting a typo.
+
+    Only a single leading token is judged, because arbitrary prose is a
+    legitimate reason (``/refine the tests keep failing``); anything containing
+    whitespace goes straight through. A lone token is refused only when it is
+    close enough to a real subcommand to be a typo of it, so an unrelated
+    one-word reason such as ``timeouts`` still runs. ``sessions`` and ``models``
+    do match, which is intended: they are subcommand attempts, not reasons, and
+    a usage line costs nothing next to spending an edit from the daily budget.
+    """
+    if not args or any(char.isspace() for char in args):
+        return None
+    if args in _KNOWN_SUBCOMMANDS:
+        # Each exact name is handled by its own branch above. Reaching here
+        # would be a routing bug, and reporting it as a typo would mislead.
+        return None
+    close = difflib.get_close_matches(args, _KNOWN_SUBCOMMANDS, n=1, cutoff=0.8)
+    if not close:
+        return None
+    name = _command_display_name()
+    return (
+        f"❌ Unknown subcommand '{core.scrub_text(args)}'. Did you mean '{close[0]}'?\n"
+        f"Usage: {name} [audit | status | dry-run | model | "
+        f"rollback <journal_id> | session <session_id>]\n"
+        f"Any other text is a reason, e.g. {name} the tests keep failing"
+    )
 
 
 def _handle_refine_command(raw_args: str) -> Optional[str]:
@@ -1062,6 +1100,13 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             f"Usage: {_command_display_name()} rollback <12-character journal_id>\n"
             f"Find ids in {journal.journal_read_path()}"
         )
+
+    # Last gate before the reason path: a lone mistyped subcommand must not be
+    # spent as a refine run. Checked here, after every real subcommand branch,
+    # so it can only see text that was already going to be treated as prose.
+    mistyped = _mistyped_subcommand_error(args)
+    if mistyped:
+        return mistyped
 
     try:
         result = core.refine_run(llm=_session_llm(), reason=args, auto=False)

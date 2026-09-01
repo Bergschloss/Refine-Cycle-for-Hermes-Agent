@@ -15931,6 +15931,65 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(plugin_init._AUTO_TURN_MARKS.get("race_probe"), 50)
         plugin_init._AUTO_TURN_MARKS.clear()
 
+    # ── B8: a mistyped subcommand must not run a mutation ─────────────────
+
+    def test_mistyped_subcommand_returns_usage_instead_of_running(self):
+        """B8: a typo'd subcommand must not reach refine_run."""
+        with patch.object(plugin_init.core, "refine_run") as refine:
+            for typo, suggestion in (
+                ("auditt", "audit"),
+                ("statuss", "status"),
+                ("rollbackk", "rollback"),
+                ("sessin", "session"),
+                ("dryrun", "dry-run"),
+                ("modle", "model"),
+            ):
+                with self.subTest(typo=typo):
+                    output = plugin_init._handle_refine_command(typo)
+                    self.assertIn("Unknown subcommand", output)
+                    self.assertIn(suggestion, output)
+            refine.assert_not_called()
+
+    def test_prose_reason_still_reaches_the_run_path(self):
+        """B8: arbitrary prose is a legitimate reason and must still run."""
+        reasons = [
+            "the tests keep failing",
+            "timeouts",
+            "gmail",
+            "model of gmail failures",
+            "session handling keeps failing",
+        ]
+        with patch.object(
+            plugin_init.core,
+            "refine_run",
+            return_value={"success": True, "message": "ok"},
+        ) as refine:
+            for reason in reasons:
+                with self.subTest(reason=reason):
+                    plugin_init._handle_refine_command(reason)
+        self.assertEqual(
+            [call.kwargs["reason"] for call in refine.call_args_list], reasons
+        )
+
+    def test_bare_refine_command_is_a_run_not_a_usage_error(self):
+        """B8: an empty argument string must still start a pass."""
+        with patch.object(
+            plugin_init.core,
+            "refine_run",
+            return_value={"success": True, "message": "ok"},
+        ) as refine:
+            output = plugin_init._handle_refine_command("")
+        refine.assert_called_once()
+        self.assertNotIn("Unknown subcommand", output)
+
+    def test_every_real_subcommand_survives_the_allowlist(self):
+        """B8: the guard must not shadow a subcommand's own branch."""
+        for args in ("audit", "status", "rollback", "session", "dry-run session"):
+            with self.subTest(args=args):
+                self.assertNotIn(
+                    "Unknown subcommand", plugin_init._handle_refine_command(args)
+                )
+
     # ── §10 Round 10: sanitize bytes surrogateescape ──────────────────────
 
     def test_sanitize_bytes_roundtrips_invalid_utf8(self):
