@@ -16,11 +16,16 @@ from agent.plugin_llm import PluginLlm
 
 try:
     from . import config, journal, ledger, llm as _llm, patterns
-    from .sanitization import LINE_BREAK_CHARS, sanitize, scrub_text
+    from .sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE, sanitize, scrub_text
     from . import trace as _trace
 except ImportError:
     import config, journal, ledger, llm as _llm, patterns  # noqa: F811
-    from sanitization import LINE_BREAK_CHARS, sanitize, scrub_text  # noqa: F811
+    from sanitization import (  # noqa: F811
+        LINE_BREAK_CHARS,
+        LINE_BREAK_RE,
+        sanitize,
+        scrub_text,
+    )
     _trace = None
 
 logger = logging.getLogger(__name__)
@@ -80,7 +85,6 @@ def _escape_foreign_tags(text: str) -> str:
     return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
-_RECORD_SEPARATOR = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
 # The forms that name something an instruction could act on. Naming one of
 # these is what turns a durable note from a statement into an operation, so both
 # durable-context paths refuse them.
@@ -653,7 +657,7 @@ PROMPT_NOTE_ACTION_EXAMPLES = _llm.PROMPT_NOTE_ACTION_EXAMPLES
 
 def _one_line(value: Any) -> str:
     """Normalize every Unicode line boundary before rendering one record."""
-    return _RECORD_SEPARATOR.sub(" ", str(value)).strip()
+    return LINE_BREAK_RE.sub(" ", str(value)).strip()
 
 
 def _has_host_context(text: str, match: re.Match) -> bool:

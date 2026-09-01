@@ -121,9 +121,7 @@ def _safe_trajectory_record(line: str) -> str:
     # Never manufacture a trusted opener around payload text. Current rendering
     # emits one complete physical line per record; any other reserved-tag shape
     # is foreign or legacy malformed input and is safer to omit than to repair.
-    preview = re.sub(
-        r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+", " ", scrub_text(line[:80])
-    )
+    preview = LINE_BREAK_RE.sub(" ", scrub_text(line[:80]))
     logger.warning(
         "Omitted malformed trajectory record containing boundary tags "
         "(len=%d, first 80 chars: %s)",

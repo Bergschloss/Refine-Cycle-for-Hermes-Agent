@@ -17,9 +17,9 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
-    from .sanitization import scrub_text
+    from .sanitization import LINE_BREAK_RE, scrub_text
 except ImportError:
-    from sanitization import scrub_text  # type: ignore
+    from sanitization import LINE_BREAK_RE, scrub_text  # type: ignore
 
 # Path normalization has to collapse volatile detail (``/users/8821`` and
 # ``/users/9134`` are one failure) *without* merging errors that only look alike
@@ -506,15 +506,11 @@ def format_patterns(
             "  [{count}x across {sessions} session(s)] {tool} — {sample} (fp:{fp})".format(
                 count=entry.get("count", 1),
                 sessions=entry.get("sessions_seen", 1),
-                tool=re.sub(
-                    r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+",
-                    " ",
-                    scrub_text(str(entry.get("tool") or "?")),
+                tool=LINE_BREAK_RE.sub(
+                    " ", scrub_text(str(entry.get("tool") or "?"))
                 ).replace("<", "&lt;").replace(">", "&gt;"),
-                sample=re.sub(
-                    r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+",
-                    " ",
-                    scrub_text(str(entry.get("sample") or "")),
+                sample=LINE_BREAK_RE.sub(
+                    " ", scrub_text(str(entry.get("sample") or ""))
                 )[:160].replace("<", "&lt;").replace(">", "&gt;"),
                 fp=scrub_text(str(entry.get("fingerprint", ""))),
             )
