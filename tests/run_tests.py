@@ -11694,10 +11694,35 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(str(result).startswith(str(Path.home())))
 
     def test_hermes_home_respects_env_variable(self):
-        """Wave 2.12: HERMES_HOME env var used when hermes_constants unavailable."""
+        """Wave 2.12: HERMES_HOME env var used when hermes_constants unavailable.
+
+        B4 now resolves the env value (expanduser().resolve()), so the result is
+        absolute and drive-anchored. An already-absolute value is unchanged in
+        MEANING — resolve() only anchors "/custom/hermes" to the current drive on
+        Windows, the same location — so this asserts meaning, not literal bytes.
+        """
         with patch.dict(os.environ, {"HERMES_HOME": "/custom/hermes"}), \
              patch.dict(sys.modules, {"hermes_constants": None}):
-            self.assertEqual(config.hermes_home(), Path("/custom/hermes"))
+            result = config.hermes_home()
+            self.assertTrue(result.is_absolute())
+            self.assertEqual(result, Path("/custom/hermes").expanduser().resolve())
+
+    def test_hermes_home_env_tilde_is_expanded_and_absolute(self):
+        """B4: HERMES_HOME with a literal ~ must not stay relative.
+
+        A shell that does not expand ~ (or a value quoted to keep it) otherwise
+        left hermes_home() returning "~/..." — not absolute — and mkdir() then
+        created a literal "~" directory in the CWD. Since hermes_home() is the
+        single place every path resolves through, a wrong home is a silent
+        inertness bug (the plugin has shipped one already). Cross-platform via
+        pathlib: assert absolute and no literal "~", no POSIX assumptions.
+        """
+        with patch.dict(os.environ, {"HERMES_HOME": "~/test_hermes_probe"}), \
+             patch.dict(sys.modules, {"hermes_constants": None}):
+            result = config.hermes_home()
+        self.assertTrue(result.is_absolute(), "home must be absolute")
+        self.assertNotIn("~", str(result), "the ~ must be expanded, not literal")
+        self.assertEqual(result, Path("~/test_hermes_probe").expanduser().resolve())
 
     def test_source_read_failure_does_not_block_the_pass(self):
         # If the source cannot be read (missing column, etc.), the pass proceeds.

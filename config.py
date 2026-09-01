@@ -29,7 +29,14 @@ def hermes_home() -> Path:
     except Exception:
         env_home = os.environ.get("HERMES_HOME", "").strip()
         if env_home:
-            return Path(env_home)
+            # A shell that does not expand ~ (or a value quoted to preserve it)
+            # otherwise leaves a literal "~" segment, so hermes_home() returns a
+            # relative path and mkdir() creates a "~" directory in the CWD. This
+            # is the single place every Hermes path resolves through, and a wrong
+            # home is exactly the silent-inertness bug this project already
+            # shipped once. expanduser() resolves ~, resolve() makes it absolute;
+            # both use pathlib so the behaviour holds on Windows and Linux.
+            return Path(env_home).expanduser().resolve()
         if os.name == "nt":
             local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
             if local_app_data:
