@@ -325,10 +325,33 @@ that is still needed elsewhere is worse than leaving a small unused helper.
 Four independent silent-failure gates. The plugin itself is the only component that knows it
 actually loaded.
 
+### Correction: it fires on the first *conversation*, not on load
+
+An earlier draft of this section fired the greeting at the end of `register()`. **That cannot
+deliver to the active chat, and the owner requires both messages to go there.** `register()` runs
+while the gateway boots, before any user has said anything, so there is no session context and no
+chat to reply into. Verified on the reference host — the gateway was restarted and the plugin
+registered in the same second, long before the first message:
+
+```
+14:14:37,342  WARNING  Refine plugin: built-in /refine detected; registering as /refine-cycle instead.
+```
+
+So the greeting fires from the **first hook callback that has a messaging surface**, reusing N1's
+capture exactly: the latch says "not greeted yet", the first turn with a real chat sends it there,
+and the latch closes. A run with no chat falls back to N1's tier 2 (`notify_target`) and, failing
+that, stays silent and leaves the latch open so a later chat turn still greets.
+
+This also makes the wording honest. Fired at load, the old text's
+`Please restart the gateway` was false and even "installed and active" was awkward. Fired on the
+first real turn, it is simply a greeting in the chat the user is already in.
+
 ### Implementation, in `__init__.py`
 
-Add a first-load notification fired at the **end** of `register()`, after registration has
-succeeded — never before, so a message can never claim a plugin that failed to register.
+Hook the greeting into the same hook callbacks N1 already touches (`_on_post_llm_call`,
+`_on_session_end`), after the chat capture and independent of whether a refine pass runs — a
+greeting must not wait for the signal gate, the turn interval, the cooldown or the daily budget,
+because those can hold a pass off for days.
 
 **Body:**
 
@@ -357,11 +380,12 @@ start, so an unlatched message would arrive on every restart.
 - Respect `config.notify_enabled()`. When it is False, do not send and do not create the marker —
   an operator who enables notifications later should still get the greeting.
 
-**`register()` must not block.** `notify.notify()` already runs `cmd_send` on a worker thread with
-a join timeout, but that join still costs up to the timeout. Fire the whole greeting from a
-`threading.Thread(daemon=True)` so registration returns immediately, and wrap it so nothing can
-escape into the host's plugin loader. A plugin that raises during `register()` may not register at
-all — the exact failure this must not cause.
+**The hook must not block.** `notify.notify()` already runs `cmd_send` on a worker thread with a
+join timeout, but that join still costs up to the timeout, and a hook callback runs on the turn's
+own path. Fire the greeting from a `threading.Thread(daemon=True)`, passing the captured chat
+values in as arguments (never re-reading the ContextVar inside it — N1's rule applies here too),
+and wrap it so nothing can escape into the host. An exception raised out of a hook can disrupt the
+turn; a greeting is not allowed to cost that.
 
 ### Remove the installer's copy
 
@@ -372,17 +396,23 @@ that `REFINE_NOTIFY_TARGET` becomes unused — remove its mention from any docs 
 
 ### Tests for N3
 
-- A first `register()` sends exactly one greeting whose body equals the required line exactly.
-- A second `register()` in the same or a new process sends **nothing** (marker present).
-- With `notify_enabled()` False: no send **and** no marker created, so a later enable still
-  greets.
+- The first hook callback with a messaging surface sends exactly one greeting, to the **active
+  chat**, whose body equals the required line exactly.
+- A second, third and later callback send **nothing** (marker present).
+- A callback with **no** chat falls back to a configured `notify_target`; with neither, it sends
+  nothing **and leaves the latch open**, so a later chat turn still greets. Assert the marker was
+  not created in that case — this is the bug that would otherwise burn the one greeting on a
+  silent CLI turn.
+- With `notify_enabled()` False: no send **and** no marker, so a later enable still greets.
 - A marker directory that cannot be written: no send, no raise.
-- `notify` raising inside the greeting does not propagate out of `register()`, and registration
-  still completes — assert the command and hooks are still registered.
-- `register()` returns without waiting for the send: patch `notify` to block and assert
-  `register()` completes promptly.
-- Two threads calling `register()` concurrently produce exactly one greeting. Per AGENTS.md a
-  concurrency test must actually start two threads.
+- `notify` raising inside the greeting does not propagate out of the hook, and the turn's normal
+  work still completes.
+- The hook returns without waiting for the send: patch `notify` to block and assert the callback
+  completes promptly.
+- Two concurrent hook callbacks produce exactly one greeting. Per AGENTS.md a concurrency test must
+  actually start two threads.
+- The greeting fires even when no refine pass runs — patch the gate so a pass is skipped and
+  assert the greeting still went out.
 
 ---
 
