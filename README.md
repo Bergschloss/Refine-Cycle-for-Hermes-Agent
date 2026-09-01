@@ -1048,11 +1048,15 @@ the same, and the gap is stated here rather than left for a user to discover.
   all have tests. What has never been done is pulling power from a real host
   mid-write and observing recovery on the resulting state.
 
-- **Every audit of this plugin so far was written by an agent that had also
-  written its code.** Two full audit passes and six defect fixes were produced
-  under that arrangement. The defects those passes found were real and are fixed
-  with both-direction tests; the point is only that no reviewer without a stake in
-  the code has yet formed an independent view.
+- **The independent review found five real defects, and they are fixed.** Every
+  audit before it was written by an agent that had also written the code. One
+  review was then run by a model with no part in writing it and no access to the
+  authors' reasoning: it produced five hypotheses, all five held on inspection,
+  and all five are fixed with regression tests proven to fail on the parent commit
+  and pass after — see [`docs/INDEPENDENT-REVIEW.md`](docs/INDEPENDENT-REVIEW.md).
+  Two of them (a poisoned timestamp consuming the whole query budget; a
+  session-scoped rule enforced against every session) were defects no amount of
+  self-review had surfaced.
 
 None of the above is a known defect. They are the places where confidence rests on
 construction and tests rather than on accumulated field use — which is exactly
