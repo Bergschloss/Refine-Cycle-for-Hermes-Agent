@@ -14,6 +14,7 @@ put that at risk.
 import argparse
 import logging
 import threading
+import time
 from typing import Optional, Tuple
 
 try:
@@ -32,44 +33,91 @@ logger = logging.getLogger(__name__)
 # failure rather than waiting.
 _SEND_TIMEOUT_SECONDS = 5.0
 
-# An undeliverable notification is reported once per process, then dropped to
-# debug. A misconfigured target fails on every single applied edit, and a
-# WARNING per edit teaches the operator to filter the log instead of reading it.
-_SEND_FAILURE_LOGGED = False
+# The sentinel target used when there is no active chat and nothing configured:
+# sending is impossible, not merely failing. A constant rather than a bare
+# literal so the call site and the branch that reads it cannot drift apart.
+_NO_TARGET = "(none)"
+
+# Failure reporting is throttled per CAUSE, not once per process.
+#
+# A single process-wide latch was the first shape of this, and it recreated the
+# failure mode the WARNING exists to prevent: the first undeliverable
+# notification silenced every LATER one -- including a different target failing
+# for a different reason -- for the life of a gateway that runs for weeks. That
+# is the silent-forever mode AGENTS.md names as this plugin's default way of
+# failing, and this module already shipped one invisible failure of exactly that
+# shape.
+#
+# Keyed by (target, detail) so a new cause always speaks, and re-armed after a
+# window so a persistent misconfiguration resurfaces instead of scrolling away on
+# day one. Identical failures stay at debug in between, which is what keeps an
+# operator reading the log rather than filtering it.
+_FAILURE_REPEAT_SECONDS = 3600.0
+_FAILURE_KEYS_MAX = 64
+_SEND_FAILURE_REPORTED: "dict[tuple, float]" = {}
 _SEND_FAILURE_LOCK = threading.Lock()
 
 
-def _report_send_failure_once(target: str, detail: object) -> None:
-    """Say once, at WARNING, that a notification could not be delivered.
+def _reset_failure_reports() -> None:
+    """Clear the throttle state. For tests that assert on WARNING emission."""
+    with _SEND_FAILURE_LOCK:
+        _SEND_FAILURE_REPORTED.clear()
+
+
+def _report_send_failure(target: str, detail: object) -> None:
+    """Say, at WARNING, that a notification could not be delivered.
 
     This failure used to be entirely invisible: notify() returned False and
     logged at debug, and cmd_send's own reason is suppressed because the
-    Namespace sets quiet=True. Measured on the reference host, every
-    notification had been failing: ``notify_target`` defaults to the bare
-    platform name ``telegram``, which Hermes can only route when that platform
-    has a home channel configured. None was, so send_message_tool returned "No
-    home channel set for telegram" and cmd_send exited 1 -- silently, forever.
+    Namespace sets quiet=True. Measured on the reference host, every notification
+    had been failing -- ``notify_target`` defaulted to the bare platform name
+    ``telegram``, which Hermes can only route when that platform has a home
+    channel, and none was set.
 
-    That is the silent-inertness failure mode this plugin already shipped once
-    with a hardcoded home path, so the remedy is named in the message rather
-    than left for someone to rediscover. Refine outcomes are untouched either
-    way; only the message was lost.
+    The remedy is chosen from the actual cause: telling an operator who
+    configured nothing to go check home channels sends them after the wrong
+    thing. Refine outcomes are untouched either way; only the message was lost.
     """
-    global _SEND_FAILURE_LOGGED
+    key = (target, str(detail))
+    now = time.monotonic()
     with _SEND_FAILURE_LOCK:
-        if _SEND_FAILURE_LOGGED:
+        last = _SEND_FAILURE_REPORTED.get(key)
+        if last is not None and (now - last) < _FAILURE_REPEAT_SECONDS:
             logger.debug("refine notify: send to %r failed again (%s)", target, detail)
             return
-        _SEND_FAILURE_LOGGED = True
+        # Purge expired entries before inserting, and hard-cap the dict so a
+        # rotating target cannot grow it without bound. detail is a short string
+        # (e.g. "exit 1"), so this stays tiny in practice.
+        stale = [k for k, ts in _SEND_FAILURE_REPORTED.items()
+                 if (now - ts) >= _FAILURE_REPEAT_SECONDS]
+        for k in stale:
+            del _SEND_FAILURE_REPORTED[k]
+        if len(_SEND_FAILURE_REPORTED) >= _FAILURE_KEYS_MAX:
+            oldest = min(_SEND_FAILURE_REPORTED, key=_SEND_FAILURE_REPORTED.get)
+            del _SEND_FAILURE_REPORTED[oldest]
+        _SEND_FAILURE_REPORTED[key] = now
+
+    if target == _NO_TARGET:
+        remedy = (
+            "There is no active chat to reply to and no address configured, so "
+            "nothing was sent. Set plugins.entries.refine.notify_target to an "
+            "explicit channel (for example 'telegram:123456789'); "
+            "`hermes send --list` shows the available targets."
+        )
+    else:
+        remedy = (
+            "Delivery to that address failed. Check it is still reachable and "
+            "spelled as `hermes send --list` reports it; a bare platform name "
+            "only routes when that platform has a home channel configured."
+        )
     logger.warning(
-        "refine notify: could not deliver to %r (%s). A bare platform name only "
-        "routes when that platform has a home channel; either set one, or point "
-        "plugins.entries.refine.notify_target at an explicit channel such as "
-        "'telegram:Name' -- `hermes send --list` shows the available targets. "
-        "Applied edits are unaffected; only the notification was lost. Further "
-        "failures are logged at debug.",
+        "refine notify: could not deliver to %r (%s). %s Applied edits are "
+        "unaffected; only the notification was lost. Identical failures are "
+        "logged at debug for the next %.0f minutes.",
         target,
         detail,
+        remedy,
+        _FAILURE_REPEAT_SECONDS / 60.0,
     )
 
 
@@ -174,8 +222,8 @@ def notify(text: str, chat: Optional[Tuple[str, str, str]] = None) -> bool:
             # not merely failing, so report once and never call cmd_send: a bare
             # platform guess here is the silent-forever bug documented in
             # docs/FINDING-notify-bare-target-undeliverable.md.
-            _report_send_failure_once(
-                "(none)", "no active chat and no notify_target configured"
+            _report_send_failure(
+                _NO_TARGET, "no active chat and no notify_target configured"
             )
             return False
         # Invariant 4: everything leaving for the user goes through the single
@@ -193,7 +241,7 @@ def notify(text: str, chat: Optional[Tuple[str, str, str]] = None) -> bool:
                 ok, detail = _send(target, safe_text)
                 result["ok"] = ok
                 if not ok:
-                    _report_send_failure_once(target, detail)
+                    _report_send_failure(target, detail)
             except KeyboardInterrupt:
                 raise
             except BaseException as exc:  # noqa: BLE001 - a broken send must not escape
@@ -201,7 +249,7 @@ def notify(text: str, chat: Optional[Tuple[str, str, str]] = None) -> bool:
                 # A broken coupling is exactly as invisible as a bad exit code,
                 # so it gets the same one-shot report. The traceback stays at
                 # debug; the WARNING only has to make the silence stop.
-                _report_send_failure_once(target, type(exc).__name__)
+                _report_send_failure(target, type(exc).__name__)
 
         thread = threading.Thread(target=worker, name="refine-notify", daemon=True)
         thread.start()
@@ -210,7 +258,7 @@ def notify(text: str, chat: Optional[Tuple[str, str, str]] = None) -> bool:
             # cmd_send is still blocked (network). Abandon it; refine will not
             # wait on a cosmetic message.
             logger.debug("refine notify: send timed out after %.1fs", _SEND_TIMEOUT_SECONDS)
-            _report_send_failure_once(target, f"timeout after {_SEND_TIMEOUT_SECONDS:.1f}s")
+            _report_send_failure(target, f"timeout after {_SEND_TIMEOUT_SECONDS:.1f}s")
             return False
         return bool(result["ok"])
     except (KeyboardInterrupt, SystemExit):

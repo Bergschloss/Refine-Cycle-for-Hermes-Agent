@@ -19913,16 +19913,16 @@ class NotifyModuleTests(unittest.TestCase):
         self._send_module.cmd_send = cmd_send
         self._saved_send = sys.modules.get("hermes_cli.send_cmd")
         sys.modules["hermes_cli.send_cmd"] = self._send_module
-        # The "report an undeliverable notification" latch is process-lifetime
-        # state; clear it so one test's warning cannot suppress the next test's.
-        notify._SEND_FAILURE_LOGGED = False
+        # The failure-report throttle is process-lifetime state; clear it so one
+        # test's warning cannot suppress or unblock the next test's.
+        notify._reset_failure_reports()
 
     def tearDown(self):
         if self._saved_send is None:
             sys.modules.pop("hermes_cli.send_cmd", None)
         else:
             sys.modules["hermes_cli.send_cmd"] = self._saved_send
-        self.notify._SEND_FAILURE_LOGGED = False
+        self.notify._reset_failure_reports()
 
     def test_notify_never_raises(self):
         """A cmd_send that raises must be swallowed; notify returns False."""
@@ -20006,13 +20006,62 @@ class NotifyModuleTests(unittest.TestCase):
                 patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             with self.assertLogs(self.notify.logger, level="WARNING") as captured:
                 self.assertFalse(self.notify.notify("body"))
-            # A misconfigured target fails on every applied edit, so the warning
-            # is latched: one report, then debug, or the log trains you to skip it.
+            # The SAME cause repeated is throttled: one WARNING, then debug, or
+            # the log trains you to skip it.
             self.notify.notify("body")
         self.assertEqual(len(captured.output), 1, captured.output)
         message = captured.output[0]
+        # A tried-and-failed address gets the delivery-failed remedy, not the
+        # no-address one; it must not send the operator after home channels as
+        # if they had configured nothing.
         self.assertIn("telegram", message)
-        self.assertIn("notify_target", message)
+        self.assertIn("Delivery to that address failed", message)
+
+    def test_a_new_failure_cause_is_not_silenced_by_an_earlier_one(self):
+        """The throttle is per-cause, not one latch for the whole process.
+
+        A single process-wide boolean silenced every later failure once the
+        first one had fired -- for the life of a gateway that runs for weeks --
+        so a second target failing for a second reason was invisible. Each
+        distinct (target, detail) must warn on its own.
+        """
+        with patch.object(self.notify.config, "notify_enabled", return_value=True):
+            with self.assertLogs(self.notify.logger, level="WARNING") as captured:
+                # cause A: an address that fails to deliver
+                def exit_fail(args):
+                    raise SystemExit(1)
+                self._send_module.cmd_send = exit_fail
+                with patch.object(self.notify.config, "notify_target_configured",
+                                  return_value="telegram:111"):
+                    self.assertFalse(self.notify.notify("a"))
+                # cause B: a different target failing
+                with patch.object(self.notify.config, "notify_target_configured",
+                                  return_value="telegram:222"):
+                    self.assertFalse(self.notify.notify("b"))
+                # cause C: no address configured at all -> the (none) branch
+                with patch.object(self.notify.config, "notify_target_configured",
+                                  return_value=""):
+                    self.assertFalse(self.notify.notify("c"))
+        self.assertEqual(len(captured.output), 3, captured.output)
+        # And the no-address cause must carry the OTHER remedy.
+        none_warning = [m for m in captured.output if "no address configured" in m
+                        or "no active chat" in m]
+        self.assertEqual(len(none_warning), 1, captured.output)
+
+    def test_a_persistent_failure_is_reported_again_after_the_window(self):
+        """A misconfiguration that outlives the throttle window must resurface,
+        not vanish after the first day."""
+        def exit_fail(args):
+            raise SystemExit(1)
+        self._send_module.cmd_send = exit_fail
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target_configured",
+                             return_value="telegram:111"), \
+                patch.object(self.notify, "_FAILURE_REPEAT_SECONDS", 0.0):
+            with self.assertLogs(self.notify.logger, level="WARNING") as captured:
+                self.assertFalse(self.notify.notify("a"))
+                self.assertFalse(self.notify.notify("a"))
+        self.assertEqual(len(captured.output), 2, captured.output)
 
     def test_a_broken_coupling_is_also_reported_not_only_a_bad_exit_code(self):
         """An exception from cmd_send is as invisible as a non-zero exit."""
