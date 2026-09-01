@@ -462,7 +462,7 @@ _CONTEXT_CONTROL_TAGS = re.compile(
     # writes, so widening that one costs nothing and a test already pins it.
     # A false positive here silently refuses a real improvement, which costs as
     # much as a miss.
-    r"|(?-i:\[\s*/?\s*(?:TOOL_CALLS|AVAILABLE_TOOLS)\s*\])"
+    r"|(?-i:\[\s*/?\s*(?:TOOL_CALLS|AVAILABLE_TOOLS|TOOL_RESULTS)\s*\])"
     r"|<<\s*/?\s*SYS\s*>>)"
 )
 _AGENT_IMPERSONATION = re.compile(

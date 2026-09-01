@@ -16177,7 +16177,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         """
         by_family = {
             "gemma": ("<start_of_turn>user", "<end_of_turn>"),
-            "mistral": ("[TOOL_CALLS]", "[AVAILABLE_TOOLS]", "[/TOOL_CALLS]"),
+            "mistral": (
+                "[TOOL_CALLS]", "[AVAILABLE_TOOLS]", "[/TOOL_CALLS]",
+                # B2: Mistral's result delimiter was missed while its call and
+                # available-tools siblings were covered.
+                "[TOOL_RESULTS]", "[/TOOL_RESULTS]",
+            ),
             "llama": ("<|eom_id|>", "<|python_tag|>"),
         }
         for family, payloads in by_family.items():
@@ -16209,6 +16214,9 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "See [tool_calls](#tool-calls) for the response field.",
             'Read response["message"]["tool_calls"] to get the calls.',
             "The [available_tools] section lists them.",
+            # B2: lowercase [tool_results] is a plausible Markdown link label,
+            # so it stays accepted just like [tool_calls].
+            "See [tool_results](#tool-results) for the parsed output.",
             "Turn handling: start_of_turn and end_of_turn are template names.",
         )
         for body in accepted:
