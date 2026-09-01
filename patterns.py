@@ -152,7 +152,6 @@ _NORMALIZERS = [
     (re.compile(r"\b\d+\b"), "N"),
 ]
 
-_TRACEBACK_MARKERS = ("Traceback (most recent call last)", 'File "', "  at ")
 _TRACEBACK_WRAPPER_LINE = re.compile(r"(?i)^(?:g?make|ninja):")
 _TRACEBACK_CHAIN_LINE = re.compile(
     r"(?i)^(?:during handling of the above exception|the above exception was the direct cause)"
