@@ -7893,6 +7893,44 @@ class RefineTests(unittest.TestCase):
             # control text. User records get the same boundary as tool/assistant.
             self.assertIn("[user] <untrusted_tool_result>", prompt_text)
 
+    def test_extract_binaries_sees_past_leading_env_assignments(self):
+        """Audit 04-02: a `VAR=value` prefix must not hide the real binary.
+
+        The old parser discarded a whole pipeline segment when its first token
+        contained `=`, so `FOO=1 git status` and `PYTHONPATH=. pytest` returned
+        no binaries at all and ran straight past any block rule. A shell reads
+        those as the binary run with an env var set, not as a command with no
+        binary. Both directions matter: the assignment is skipped, and a real
+        operand that merely contains `=` (a flag value) is not.
+        """
+        import __init__ as plugin_init
+
+        self.assertEqual(
+            plugin_init._extract_binaries("FOO=1 git status"), ["git"])
+        self.assertEqual(
+            plugin_init._extract_binaries("PYTHONPATH=. pytest"), ["pytest"])
+        self.assertEqual(
+            plugin_init._extract_binaries("A=1 B=2 sudo npm install"), ["npm"])
+        # An assignment prefix on one side of a pipe still resolves each side.
+        self.assertEqual(
+            plugin_init._extract_binaries("FOO=1 git log | grep x"),
+            ["git", "grep"])
+        # A flag value containing '=' is an operand, not an assignment head, so
+        # the binary is still the first token.
+        self.assertEqual(
+            plugin_init._extract_binaries("git commit -m msg=1"), ["git"])
+        # The whole point: the block rule now fires through the prefix.
+        plugin_init._update_block_rules([
+            {"content": "When calling git, use echo instead of git.",
+             "scope": "global", "session_id": ""}
+        ])
+        try:
+            blocked = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "FOO=1 git status"})
+            self.assertIsNotNone(blocked, "env-prefixed git must still be blocked")
+        finally:
+            plugin_init._update_block_rules([])
+
     def test_prompt_note_cannot_reroute_away_from_a_load_bearing_binary(self):
         """A reroute note is a live veto, so it must not disable the agent.
 

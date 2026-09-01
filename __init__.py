@@ -433,9 +433,6 @@ def _extract_binaries(cmd: str) -> list:
         segment = segment.strip()
         if not segment or segment.startswith("$"):
             continue
-        toks = segment.split()
-        if toks and "=" in toks[0]:
-            continue
         try:
             tokens = shlex.split(segment)
         except ValueError:
@@ -443,7 +440,16 @@ def _extract_binaries(cmd: str) -> list:
         if not tokens:
             continue
         idx = 0
-        while idx < len(tokens) and tokens[idx].lower() in ("sudo","env","nohup","time"):
+        # Skip leading VAR=value assignments rather than discarding the whole
+        # segment on the first one. `FOO=1 git ...` is `git` run with FOO set,
+        # not a segment with no binary -- treating the assignment as the whole
+        # command (the old `"=" in toks[0]: continue`) let `FOO=1 git status`
+        # and `PYTHONPATH=. pytest` run past a block rule untouched (audit 04-02).
+        # Match a real assignment head, `NAME=...`, so an operand that merely
+        # contains `=` (a flag value) does not skip a token.
+        while idx < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[idx]):
+            idx += 1
+        while idx < len(tokens) and tokens[idx].lower() in ("sudo", "env", "nohup", "time"):
             idx += 1
         if idx >= len(tokens):
             continue
