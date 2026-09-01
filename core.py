@@ -1168,6 +1168,21 @@ def _structured_error_status(
             return True
         if value.get("success") is False or value.get("ok") is False:
             return True
+        # MCP states failure as `isError: true`, not as an `error` field, and it
+        # is the standard shape for every MCP-backed tool. It was checked nowhere:
+        # `{"content": [...], "isError": true}` classified as plain success, so
+        # failures from every MCP server were invisible to pattern extraction and
+        # could never teach the agent anything (audit 12-01). Only the literal
+        # boolean counts -- a payload whose DATA happens to contain the word is
+        # not making a claim about its own call.
+        if value.get("isError") is True or value.get("is_error") is True:
+            return True
+        # A tool that states its own outcome in `status` is making the same claim
+        # `success: false` makes. `_FAILING_STATUS` existed already but was only
+        # ever used to revoke a benign-exit declaration, never to classify, so
+        # `{"status": "error", "message": "..."}` read as success (audit 12-02).
+        if str(value.get("status") or "").strip().lower() in _FAILING_STATUS:
+            return True
         # A declared success (exit 0, ``success: true``, ``ok: true``) is only
         # evidence about the CALL, not about what the tool printed while making
         # it. A wrapper that catches its own exception, prints the traceback to

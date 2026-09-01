@@ -7959,6 +7959,51 @@ class RefineTests(unittest.TestCase):
             # control text. User records get the same boundary as tool/assistant.
             self.assertIn("[user] <untrusted_tool_result>", prompt_text)
 
+    def test_mcp_is_error_flag_is_classified_as_failure(self):
+        """Audit 12-01: MCP states failure as `isError`, which was checked nowhere.
+
+        `{"content": [...], "isError": true}` is the standard MCP failure shape, so
+        every MCP-backed tool's failures read as plain success and never reached
+        pattern extraction. Only the literal boolean counts: a payload whose data
+        merely contains the word is not making a claim about its own call.
+        """
+        for key in ("isError", "is_error"):
+            with self.subTest(key=key):
+                payload = json.dumps(
+                    {"content": [{"type": "text", "text": "Tool failed"}], key: True})
+                self.assertTrue(
+                    core._is_error_content(payload, tool_name="mcp__server__run"))
+        # False, absent, and a string that merely mentions it are not failures.
+        self.assertFalse(core._is_error_content(
+            json.dumps({"content": [{"type": "text", "text": "ok"}], "isError": False}),
+            tool_name="mcp__server__run"))
+        self.assertFalse(core._is_error_content(
+            json.dumps({"content": [{"type": "text", "text": "the isError field"}]}),
+            tool_name="read_file"))
+
+    def test_self_declared_failure_status_is_classified_as_failure(self):
+        """Audit 12-02: `_FAILING_STATUS` only revoked a benign exit, never classified.
+
+        A tool stating `{"status": "error"}` makes the same claim `success: false`
+        makes, but it read as success. The other direction matters just as much:
+        a success status, and a payload that merely returns data, must not become
+        a failure.
+        """
+        for status in ("error", "failed", "failure", "timeout", "cancelled"):
+            with self.subTest(status=status):
+                payload = json.dumps({"status": status, "message": "Service down"})
+                self.assertTrue(
+                    core._is_error_content(payload, tool_name="custom_api"))
+        for status in ("ok", "success", "completed", "pending"):
+            with self.subTest(ok_status=status):
+                payload = json.dumps({"status": status, "output": "fine"})
+                self.assertFalse(
+                    core._is_error_content(payload, tool_name="custom_api"))
+        # A data-returning tool is still not reporting an outcome.
+        self.assertFalse(core._is_error_content(
+            json.dumps({"content": [{"type": "text", "text": "status: error in log"}]}),
+            tool_name="read_file"))
+
     def test_extract_binaries_sees_past_leading_env_assignments(self):
         """Audit 04-02: a `VAR=value` prefix must not hide the real binary.
 
