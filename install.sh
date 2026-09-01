@@ -170,8 +170,32 @@ if ! select_patch \
 fi
 
 [ -f "$PATCH_FILE" ] || fail "patch file missing: $PATCH_FILE"
-mapfile -t TOUCHED_FILES < <(grep -E "^diff --git " "$PATCH_FILE" | sed -E 's#^diff --git a/([^ ]+) b/.*#\1#')
+# Read the file list from the `+++` headers, the same lines `git apply` itself
+# uses, because not every patch here is a git patch. The 8.31 patch was produced
+# with `diff -ruN --strip-trailing-cr orig/ work/`, so it carries no
+# `diff --git` line at all: the previous parse found zero files and install.sh
+# aborted immediately after selecting that patch. `git apply --check` had always
+# passed on it, so the patch looked ready while the install path could never run.
+# `+++ b/path<TAB>timestamp` (diff -ruN) and `+++ b/path` (git) both parse; a
+# `+++ /dev/null` deletion falls back to the `---` side, and this patch set
+# deletes nothing.
+patch_touched_files() {
+    awk '
+        /^--- / { minus = $2 }
+        /^\+\+\+ / {
+            path = ($2 == "/dev/null") ? minus : $2
+            sub(/^[ab]\//, "", path)
+            if (path != "" && path != "/dev/null" && !(path in seen)) {
+                seen[path] = 1
+                print path
+            }
+        }
+    ' "$1"
+}
+
+mapfile -t TOUCHED_FILES < <(patch_touched_files "$PATCH_FILE")
 [ "${#TOUCHED_FILES[@]}" -gt 0 ] || fail "could not parse touched files from $PATCH_FILE"
+say "Touched files  : ${#TOUCHED_FILES[@]}"
 
 # ---------------------------------------------------------------------------
 # Backup every touched file before writing; restore() is the single undo step
