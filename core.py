@@ -590,6 +590,18 @@ _LOAD_BEARING_BINARIES = frozenset({
     "sh", "bash", "zsh", "cmd", "powershell", "pwsh",
     "ssh", "scp",
 })
+# A reroute note is a live veto, so the same protection binaries get must cover
+# the TOOLS the agent cannot work without. _LOAD_BEARING_BINARIES closed the
+# `git`/`python` path; `terminal` and `read_file` are reachable the same way and
+# were not covered, so one accepted note ("use cat instead of read_file tool")
+# disabled tool execution host-wide. `64428e6` fixed the binary path only; an
+# earlier verification probed `git`, saw it blocked, and read the whole finding
+# as closed. The tool path stayed open.
+_PROTECTED_CORE_TOOLS = frozenset({
+    "read_file", "write_file", "edit_file", "terminal", "skill_manage",
+    "skill_view", "skills_list", "memory", "memory_tool", "web_search",
+    "fetch_web_page", "patch", "search_files", "process",
+})
 # Mirrors ``__init__._parse_prompt_note_rule``'s reroute match. Kept beside the
 # denylist so the two are read together; the parser normalizes further (strips
 # articles, trailing "cli"/"tool"), and this check normalizes the same way so a
@@ -601,7 +613,15 @@ _REROUTE_TARGET = re.compile(
 
 
 def _reroute_target_is_load_bearing(action_text: str) -> str:
-    """The protected binary a reroute would veto, or "" when it vetoes nothing."""
+    """The protected binary or core tool a reroute would veto, or "".
+
+    Checks BOTH sets after one normalisation: `_LOAD_BEARING_BINARIES` (the
+    interpreter/VCS/package-manager/shell names) and `_PROTECTED_CORE_TOOLS`
+    (the tools the agent dispatches through). The same note shape reaches both
+    — "use echo instead of terminal tool" normalises `terminal tool` -> the
+    trailing `tool` is stripped -> `terminal`, a protected core tool — so one
+    normaliser and one membership test must cover the pair.
+    """
     match = _REROUTE_TARGET.search(action_text or "")
     if not match:
         return ""
@@ -611,7 +631,9 @@ def _reroute_target_is_load_bearing(action_text: str) -> str:
         r"\s+(?:cli|command|tool|binary|utility|mcp|api|sdk)$", "",
         target, flags=re.I,
     ).strip().lower()
-    return target if target in _LOAD_BEARING_BINARIES else ""
+    if target in _LOAD_BEARING_BINARIES or target in _PROTECTED_CORE_TOOLS:
+        return target
+    return ""
 
 
 # Long enough to be unambiguous as a substring: ``session_id`` and ``x_csrf`` are

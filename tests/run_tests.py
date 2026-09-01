@@ -8186,6 +8186,41 @@ class RefineTests(unittest.TestCase):
                     "ordinary reroute must still be accepted",
                 )
 
+    def test_prompt_note_cannot_reroute_away_from_a_core_tool(self):
+        """B1: a reroute veto reaches the TOOLS, not just binaries.
+
+        The binary path (_LOAD_BEARING_BINARIES) was closed by 64428e6; the tool
+        path was not. A note like "use cat instead of read_file tool" normalises
+        `read_file tool` -> `read_file`, which is not a binary, so it was
+        accepted and then refused `read_file` in every later session for as long
+        as it lived. `_PROTECTED_CORE_TOOLS` closes that path through the same
+        normaliser and membership test the binary guard uses; the refusal must
+        keep the same "needs it to work" wording an operator already knows.
+        """
+        for content in (
+            "When encountering timeouts, use echo instead of terminal tool.",
+            "When reading files, use cat instead of read_file tool.",
+            "When writing files, use patch instead of write_file tool.",
+            "When managing skills, use manual edit instead of skill_manage tool.",
+        ):
+            with self.subTest(content=content):
+                error = core._prompt_note_content_error(
+                    content, check_rendered_size=False
+                )
+                self.assertIsNotNone(error, "core-tool reroute must be refused")
+                self.assertIn("needs it to work", error)
+
+        # Same direction guard as the binary test: an ordinary tool-to-tool
+        # reroute is legitimate and must stay accepted. `curl`/`wget` are neither
+        # a protected binary nor a core tool.
+        self.assertIsNone(
+            core._prompt_note_content_error(
+                "When calling curl, use wget instead of curl.",
+                check_rendered_size=False,
+            ),
+            "an ordinary tool reroute must still be accepted",
+        )
+
     def test_prompt_note_second_line_must_match_when_pattern(self):
         """Wave 3.2: both lines of a 2-line prompt note must be conditional policies."""
         # Valid 2-line note
