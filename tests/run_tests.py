@@ -5,6 +5,7 @@ installs a fake Hermes host before importing the plugin and stores every file
 under a fresh TemporaryDirectory; it never reads or writes live Hermes state.
 """
 
+import ast
 import importlib.util
 import inspect
 import json
@@ -20479,20 +20480,66 @@ class InstallerPluginContentTests(unittest.TestCase):
         scratch = sorted(n for n in installed if n.startswith("_") and not n.startswith("__"))
         self.assertEqual(scratch, [], f"installer copied scratch files: {scratch}")
 
-    def test_installed_tree_imports_in_a_fresh_interpreter(self):
-        """The acceptance check the installer never made.
+    def test_every_plugin_owned_import_is_present_in_the_install(self):
+        """The real guard, and it must not depend on Hermes being importable.
 
-        A complete copy of the plugin imports standalone -- verified -- so a
-        failure here means the installer produced an incomplete tree, not that
-        the environment is missing something.
+        Importing the copied tree cannot serve as the guard. core.py imports the
+        host (``agent.*``) before it imports its own siblings, so on a machine
+        without Hermes the host failure comes first and masks a missing plugin
+        module -- measured: with notify.py deleted, the error is still
+        "No module named 'agent'" and the missing sibling is invisible. That is
+        precisely CI's situation, which is where the guard has to work.
+
+        So read the import graph instead. For every module the installed files
+        import, if the repository owns a module by that name, the install must
+        contain it. Deterministic everywhere, and it is the defect stated exactly:
+        a module the plugin imports that the installer did not copy.
         """
+        dest = self._install_into_temp()
+        repo_owned = {p.stem for p in ROOT.glob("*.py")}
+        installed = {p.stem for p in dest.glob("*.py")}
+        missing: dict[str, set[str]] = {}
+        for py in sorted(dest.rglob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            referenced = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    referenced.update(a.name.split(".")[0] for a in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        referenced.add(node.module.split(".")[0])
+                    # `from . import notify` -- the names are the modules.
+                    if node.level:
+                        referenced.update(a.name for a in node.names)
+            absent = (referenced & repo_owned) - installed
+            if absent:
+                missing[py.name] = absent
+        self.assertEqual(
+            missing, {},
+            f"installed files import plugin modules the installer did not copy: {missing}",
+        )
+
+    def test_installed_tree_imports_where_hermes_is_available(self):
+        """The outcome check, where the environment can actually exercise it.
+
+        Skipped rather than failed without Hermes: an environment that cannot
+        resolve ``agent`` is not a defect, and a suite that goes red for
+        environment reasons trains people to ignore red. This first read green
+        locally and red on CI for exactly that reason -- the local interpreter is
+        the Hermes virtualenv, where ``agent`` is an installed package.
+        """
+        if subprocess.run(
+            [sys.executable, "-c", "import agent.plugin_llm"],
+            capture_output=True, text=True, timeout=120,
+        ).returncode != 0:
+            self.skipTest("Hermes is not importable here; the static guard covers it")
         dest = self._install_into_temp()
         for module in ("core", "__init__"):
             r = subprocess.run(
                 [sys.executable, "-c", f"import {module}"],
                 cwd=str(dest), capture_output=True, text=True, timeout=120,
             )
-            detail = (r.stderr or "").strip().splitlines()
+            detail = [line for line in (r.stderr or "").strip().splitlines() if line.strip()]
             self.assertEqual(
                 r.returncode, 0,
                 f"installed plugin cannot import {module}: "

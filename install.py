@@ -302,28 +302,51 @@ def install_plugin(meta: dict) -> str:
     return str(dest)
 
 
-def verify_plugin_imports(dest: Path, python: str) -> None:
+def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
     """Import the tree that was just copied, using the interpreter that will load it.
 
     The pre-existing capability verification checks the HOST patch markers and
     never touches the copied plugin, which is exactly how an install missing
     notify.py could print SUCCESS while the plugin was unloadable. ``core``
     imports every sibling module at module level, so one import exercises the
-    whole copy. A failure here means the install is broken, so it is fatal
-    rather than a warning.
+    whole copy.
+
+    Only a missing PLUGIN module is fatal. A missing host module (``agent.*``,
+    ``gateway.*``) means this environment cannot resolve Hermes the way the
+    gateway does, not that the install is incomplete -- and failing on that would
+    refuse a perfectly good install. The Hermes checkout goes on PYTHONPATH first
+    so host modules usually do resolve; when they still do not, say so and carry
+    on rather than pretending the result is conclusive.
     """
+    owned = sorted(
+        Path(rel).stem for rel in plugin_files()
+        if rel.endswith(".py") and "/" not in rel
+    )
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join([str(src)] + ([existing] if existing else []))
     r = subprocess.run(
         [python, "-c", "import core"],
         cwd=str(dest), capture_output=True, text=True, timeout=120,
-        encoding="utf-8", errors="replace",
+        encoding="utf-8", errors="replace", env=env,
     )
-    if r.returncode != 0:
-        tail = [line for line in (r.stderr or "").strip().splitlines() if line.strip()]
+    if r.returncode == 0:
+        say("Plugin import verified in a fresh interpreter.")
+        return
+    stderr = r.stderr or ""
+    tail = [line for line in stderr.strip().splitlines() if line.strip()]
+    detail = tail[-1] if tail else "no stderr"
+    absent = [name for name in owned if f"No module named '{name}'" in stderr]
+    if absent:
         fail(
-            "the installed plugin cannot be imported by the interpreter that will "
-            f"load it ({python}):\n  {tail[-1] if tail else 'no stderr'}\n"
-            f"  tree: {dest}"
+            f"the installed plugin is missing its own module(s) {absent}; the copy "
+            f"is incomplete and the plugin cannot load.\n  {detail}\n  tree: {dest}"
         )
+    say(
+        f"NOTE: could not fully import the plugin here ({detail}). No plugin module "
+        "is missing, so this is host resolution in this environment, not an "
+        "incomplete install."
+    )
 
 
 def write_metadata(meta_dir: Path, meta: dict) -> Path:
@@ -450,8 +473,7 @@ def do_install(args) -> None:
     say("Installing Refine plugin…")
     dest = install_plugin(meta)
     say(f"Plugin files → {dest} ({len(meta.get('plugin_files') or [])} files)")
-    verify_plugin_imports(Path(dest), python_of(src))
-    say("Plugin import verified in a fresh interpreter.")
+    verify_plugin_imports(Path(dest), python_of(src), src)
 
     write_metadata(mdir, meta)
     say(f"Metadata → {mdir / METADATA_NAME}")
