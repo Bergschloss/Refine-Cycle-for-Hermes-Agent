@@ -808,7 +808,12 @@ def _resolve_crash_pending(root, decision):
 class RefineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # resolve() to match hermes_home(), which now canonicalizes its result
+        # (B4). Without this the fixture root stays in tempfile's raw form while
+        # state_db_path() comes back resolved, and on Windows CI the two differ
+        # (RUNNER~1 short name vs the long name), breaking a startswith() check
+        # that is really asking "is this path under the sandbox root".
+        self.root = Path(self.temp.name).resolve()
         FakeHost.reset(self.root)
         # Turn marks are process-lifetime state keyed by session id; clear them so
         # one test's attempt point cannot suppress the next test's trigger.
@@ -19522,15 +19527,44 @@ class NotifyModuleTests(unittest.TestCase):
         self.assertNotIn(secret, self._captured[0].message)
 
     def test_notify_sets_every_namespace_attribute(self):
-        """cmd_send is a CLI entry: the Namespace must carry all it reads."""
+        """cmd_send is a CLI entry: the Namespace must carry all it reads.
+
+        The dest name is `list_targets`, not `list` -- that is the argparse dest
+        of the `--list` flag, and getting it wrong made cmd_send read a missing
+        path and exit non-zero, so every real notification silently failed while
+        this test (which asserted `list`) stayed green. It now asserts the real
+        dest names, so a future spelling drift is caught here instead of in
+        production.
+        """
         with patch.object(self.notify.config, "notify_enabled", return_value=True), \
                 patch.object(self.notify.config, "notify_target", return_value="telegram"):
             self.assertTrue(self.notify.notify("body"))
         args = self._captured[0]
-        for attr in ("to", "message", "file", "subject", "list", "quiet", "json"):
+        for attr in ("to", "message", "file", "subject", "list_targets", "quiet", "json"):
             self.assertTrue(hasattr(args, attr), f"Namespace missing {attr}")
+        self.assertFalse(hasattr(args, "list"), "wrong dest: --list's dest is list_targets")
         self.assertEqual(args.to, "telegram")
         self.assertTrue(args.quiet)
+
+    def test_notify_reports_success_when_cmd_send_exits_zero(self):
+        """The real cmd_send is a CLI entry point: it calls sys.exit() on BOTH
+        success and failure. sys.exit(0) raises SystemExit(0), so "no exception"
+        cannot mean success. The first implementation set ok=True on no-exception
+        and re-raised SystemExit, so a successful send (which raises SystemExit(0))
+        was reported as failure. This pins the exit-code contract."""
+        def exit_ok(args):
+            raise SystemExit(0)
+        self._send_module.cmd_send = exit_ok
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            self.assertTrue(self.notify.notify("body"), "SystemExit(0) is a successful send")
+
+        def exit_fail(args):
+            raise SystemExit(1)
+        self._send_module.cmd_send = exit_fail
+        with patch.object(self.notify.config, "notify_enabled", return_value=True), \
+                patch.object(self.notify.config, "notify_target", return_value="telegram"):
+            self.assertFalse(self.notify.notify("body"), "SystemExit(1) is a failed send")
 
     def test_notify_timeout_does_not_block(self):
         """A blocked cmd_send must not hang refine: return False within ~6s."""

@@ -36,28 +36,39 @@ def _build_send_namespace(target: str, text: str) -> argparse.Namespace:
     """Every attribute hermes_cli.send_cmd.cmd_send reads, set explicitly.
 
     cmd_send is a CLI entry point, so it expects the full argparse.Namespace the
-    ``hermes send`` parser produces. The flags are ``--to``/``--file``/
-    ``--subject``/``--list``/``--quiet``/``--json`` plus the positional
-    ``message`` (Hermes send CLI reference); their argparse dest names are set
-    here so no attribute lookup inside cmd_send falls through to an
-    AttributeError.
+    ``hermes send`` parser produces. The dest names are taken from the real
+    parser (register_send_subparser), not from the flag spellings: the
+    ``--list`` flag's dest is ``list_targets``, not ``list``. Getting that wrong
+    made cmd_send read a missing attribute path and exit non-zero, so every
+    notification silently failed. Every attribute cmd_send reads is set here so no
+    lookup inside it falls through to an AttributeError.
     """
     return argparse.Namespace(
         to=target,
         message=text,
         file=None,
         subject=None,
-        list=False,
+        list_targets=False,
         quiet=True,
         json=False,
     )
 
 
-def _send(target: str, text: str) -> None:
-    """Import cmd_send lazily and deliver. Runs on a worker thread."""
+def _send(target: str, text: str) -> bool:
+    """Import cmd_send lazily and deliver. Runs on a worker thread.
+
+    cmd_send is a CLI entry point: it calls sys.exit() on BOTH success and
+    failure. sys.exit(0) raises SystemExit(0), so success cannot be inferred from
+    "no exception" -- the exit CODE is the only signal. Return True only on
+    SystemExit(0)/None; a non-zero code or a real exception is a failed send.
+    """
     from hermes_cli.send_cmd import cmd_send
 
-    cmd_send(_build_send_namespace(target, text))
+    try:
+        cmd_send(_build_send_namespace(target, text))
+    except SystemExit as exc:
+        return exc.code in (0, None)
+    return True
 
 
 def notify(text: str) -> bool:
@@ -82,10 +93,13 @@ def notify(text: str) -> bool:
         result: dict = {"ok": False}
 
         def worker() -> None:
+            # _send translates cmd_send's SystemExit into a bool; it only raises
+            # for a genuine control signal or an unexpected error. Do not re-raise
+            # SystemExit here -- cmd_send raises SystemExit(0) on SUCCESS, and
+            # re-raising it would drop the success on the floor (the original bug).
             try:
-                _send(target, safe_text)
-                result["ok"] = True
-            except (KeyboardInterrupt, SystemExit):
+                result["ok"] = _send(target, safe_text)
+            except KeyboardInterrupt:
                 raise
             except BaseException:  # noqa: BLE001 - a broken send must not escape
                 logger.debug("refine notify: send failed", exc_info=True)
