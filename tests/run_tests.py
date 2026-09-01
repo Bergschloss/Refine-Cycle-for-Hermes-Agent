@@ -7959,6 +7959,51 @@ class RefineTests(unittest.TestCase):
             # control text. User records get the same boundary as tool/assistant.
             self.assertIn("[user] <untrusted_tool_result>", prompt_text)
 
+    def test_merge_patterns_accumulates_across_disjoint_sessions(self):
+        """Audit 06-01: max() collapsed two disjoint sessions into one.
+
+        The same failure once in session A and once in session B is two
+        occurrences across two sessions. `merge_patterns` kept only
+        max(sessions_seen) and max(count), reporting 1 and 1, so the >=2 signal
+        gate stayed shut on exactly the chronic cross-session failures this
+        plugin exists to find.
+
+        The opposite direction is why max() was there and must survive: the
+        current-session window and the cross-session window can contain the SAME
+        rows, and summing those would double-count. Both are asserted here.
+        """
+        def window(session_id, occurrences=1):
+            return patterns.extract_patterns(
+                [{"tool": "bash", "content": "failed to connect",
+                  "session_id": session_id, "ts": 1000.0}] * occurrences,
+                limit=None,
+            )
+
+        # Disjoint: two sessions, one occurrence each -> 2 sessions, 2 occurrences.
+        merged = patterns.merge_patterns(window("s1"), window("s2"))
+        self.assertEqual(merged[0]["sessions_seen"], 2)
+        self.assertEqual(merged[0]["count"], 2)
+        self.assertTrue(patterns.has_signal(merged, [], min_count=2))
+
+        # Overlapping: the same window merged with itself must NOT double-count.
+        same = window("s1", 3)
+        overlapped = patterns.merge_patterns(same, same)
+        self.assertEqual(overlapped[0]["count"], 3)
+        self.assertEqual(overlapped[0]["sessions_seen"], 1)
+
+        # One window, one occurrence: still no signal.
+        self.assertFalse(
+            patterns.has_signal(patterns.merge_patterns(window("s1")), [],
+                                min_count=2))
+
+        # Entries from a caller that carries no session identities fall back to
+        # the conservative reading rather than inventing occurrences.
+        legacy = [{"fingerprint": "abc", "count": 1, "sessions_seen": 1}]
+        self.assertEqual(patterns.merge_patterns(legacy, legacy)[0]["count"], 1)
+
+        # These entries reach `evidence`, so they must stay JSON-serializable.
+        json.dumps(merged[0])
+
     def test_mcp_is_error_flag_is_classified_as_failure(self):
         """Audit 12-01: MCP states failure as `isError`, which was checked nowhere.
 

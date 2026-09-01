@@ -382,6 +382,14 @@ def extract_patterns(
     for entry in grouped.values():
         sessions = entry.pop("_sessions")
         entry["sessions_seen"] = max(1, len(sessions))
+        # Keep WHICH sessions, not just how many. ``merge_patterns`` has to know
+        # whether two windows describe the same occurrences or different ones, and
+        # a bare count cannot answer that: it fell back to max(), so the same
+        # failure seen once in each of two sessions merged to sessions_seen=1,
+        # count=1 and the >=2 gate stayed shut on a genuinely chronic failure
+        # (audit 06-01). Stored as a sorted list, not the working set, because
+        # these entries reach ``evidence`` and must stay JSON-serializable.
+        entry["_session_ids"] = sorted(sessions)
         out.append(entry)
 
     out.sort(key=lambda entry: (entry["sessions_seen"], entry["count"]), reverse=True)
@@ -400,10 +408,33 @@ def merge_patterns(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if current is None:
                 merged[fp] = dict(entry)
                 continue
-            current["count"] = max(current.get("count", 0), entry.get("count", 0))
-            current["sessions_seen"] = max(
-                current.get("sessions_seen", 1), entry.get("sessions_seen", 1)
-            )
+            # Session identities decide whether these two windows overlap.
+            #
+            # max() alone is right for OVERLAPPING windows -- the current-session
+            # window and the cross-session window can contain the same rows, and
+            # summing would double-count them. It is wrong for DISJOINT ones: a
+            # failure once in session A and once in session B is two occurrences
+            # across two sessions, and max() reported one of each, holding the
+            # >=2 gate shut on exactly the chronic cross-session failures this
+            # plugin exists to find (audit 06-01).
+            current_ids = current.get("_session_ids")
+            entry_ids = entry.get("_session_ids")
+            if isinstance(current_ids, list) and isinstance(entry_ids, list):
+                union = sorted(set(current_ids) | set(entry_ids))
+                current["_session_ids"] = union
+                current["sessions_seen"] = max(1, len(union))
+                if set(current_ids).isdisjoint(entry_ids):
+                    current["count"] = current.get("count", 0) + entry.get("count", 0)
+                else:
+                    current["count"] = max(
+                        current.get("count", 0), entry.get("count", 0))
+            else:
+                # An entry from an older caller carries no identities; the only
+                # safe read is the conservative one this function always used.
+                current["count"] = max(current.get("count", 0), entry.get("count", 0))
+                current["sessions_seen"] = max(
+                    current.get("sessions_seen", 1), entry.get("sessions_seen", 1)
+                )
             # None means "no believable time was ever observed", not 0 --
             # folding it into 0 would read as ancient/ended-silence. Only
             # take a real value from a side that has one; stay None when
