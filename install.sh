@@ -343,3 +343,15 @@ Next steps:
 To undo the core patch:
   git -C $HERMES_SRC apply -R $PATCH_FILE
 EOF
+
+# Tell the user the plugin landed. Never fail the install because a notification
+# could not be delivered: the install itself already succeeded by this point.
+notify_installed() {
+    command -v hermes >/dev/null 2>&1 || return 0
+    local target="${REFINE_NOTIFY_TARGET:-telegram}"
+    hermes send --to "$target" --quiet "$(printf '%s\n\n%s' \
+        '🔌♾️ **Refine Cycle Plugin** — installed' \
+        ' Please restart the gateway:  sudo systemctl restart hermes-gateway ')" \
+        >/dev/null 2>&1 || say "note: could not send the install notification (install is fine)."
+}
+notify_installed
