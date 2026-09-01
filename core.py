@@ -633,6 +633,15 @@ def _reroute_target_is_load_bearing(action_text: str) -> str:
     ).strip().lower()
     if target in _LOAD_BEARING_BINARIES or target in _PROTECTED_CORE_TOOLS:
         return target
+    # A versioned interpreter (`python3.11`, `python3.10`) is the same
+    # load-bearing binary as its unversioned base. B7 makes `_looks_like_cli`
+    # classify these as binaries, so a reroute away from one would be enforced
+    # as a real `block_binary` against the terminal pipeline; refuse it at
+    # proposal time too, matching the base. Only a trailing dotted numeric
+    # version is stripped, so `node.js` (a different binary) is left alone.
+    base = re.sub(r"\.\d+(?:\.\d+)*$", "", target)
+    if base != target and base in _LOAD_BEARING_BINARIES:
+        return target
     return ""
 
 

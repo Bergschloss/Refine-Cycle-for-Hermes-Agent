@@ -325,8 +325,14 @@ def _parse_prompt_note_rule(content):
 
 
 def _looks_like_cli(word):
-    """Whether a word looks like a CLI command name."""
-    return bool(re.match(r"^[a-z][a-z0-9_-]*$", word)) and len(word) <= 20
+    """Whether a word looks like a CLI command name.
+
+    Dots are allowed: real binaries carry version and extension dots
+    (``python3.11``, ``node.js``). Without them such a name was misclassified as
+    a tool rather than a binary, so the load-bearing protection (B1), which keys
+    on binaries reached through ``terminal``, never saw it.
+    """
+    return bool(re.match(r"^[a-z][a-z0-9_.-]*$", word)) and len(word) <= 20
 
 
 def _looks_like_tool(word):

@@ -9668,6 +9668,39 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(plugin_init._looks_like_tool("write_file"))
         self.assertFalse(plugin_init._looks_like_tool("9bad name"))
 
+    def test_looks_like_cli_allows_dotted_binaries(self):
+        """B7: a dotted binary is a binary, not a tool.
+
+        Version and extension dots (`python3.11`, `node.js`) are ordinary in
+        real command names. Without allowing them, such a name was classified as
+        a tool block instead of a binary block, so B1's load-bearing protection
+        — which keys on binaries reached through `terminal` — never covered it.
+        The uppercase-anchored host look-alike (`Collector.Evil`) must still be
+        rejected, so the leading `^[a-z]` anchor is unchanged.
+        """
+        self.assertTrue(plugin_init._looks_like_cli("python3.11"))
+        self.assertTrue(plugin_init._looks_like_cli("node.js"))
+        self.assertTrue(plugin_init._looks_like_cli("cargo-clippy"))
+        self.assertTrue(plugin_init._looks_like_cli("git"))
+        # Regression guard: dots did not open the uppercase host look-alike.
+        self.assertFalse(plugin_init._looks_like_cli("Collector.Evil"))
+
+        # Interaction with B1: a reroute away from a versioned interpreter is a
+        # reroute away from the load-bearing base and must be refused, while a
+        # genuinely different dotted binary (node.js) stays an ordinary reroute.
+        self.assertIsNotNone(
+            core._prompt_note_content_error(
+                "When calling python3.11, use python3.10 instead of python3.11.",
+                check_rendered_size=False,
+            )
+        )
+        self.assertIsNone(
+            core._prompt_note_content_error(
+                "When calling node.js, use deno instead of node.js.",
+                check_rendered_size=False,
+            )
+        )
+
     def test_status_reports_route_present_and_missing_both_ways(self):
         """Phase B: /refine status must say whether the invocation-route core
         patch is on this host. Both directions: a patched host sees
