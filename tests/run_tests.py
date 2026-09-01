@@ -8138,6 +8138,39 @@ class RefineTests(unittest.TestCase):
         finally:
             plugin_init._update_block_rules([])
 
+    def test_disabling_prompt_notes_stops_and_clears_stale_block_rules(self):
+        """B3: a disabled feature must not keep vetoing tool calls.
+
+        _BLOCK_RULES lives for the process, so turning prompt notes off left the
+        rules parsed on an earlier turn in memory and _on_pre_tool_call kept
+        refusing tool calls by a feature the operator disabled. With the config
+        off, the hook must return None AND empty the stale list.
+        """
+        plugin_init._update_block_rules([
+            {"content": "When calling curl, use wget instead of curl.",
+             "scope": "global", "session_id": ""}
+        ])
+        self.assertTrue(plugin_init._BLOCK_RULES, "precondition: a rule is loaded")
+        with patch.object(config, "prompt_notes_enabled", return_value=False):
+            result = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "curl http://x"}, session_id="s"
+            )
+        self.assertIsNone(result, "a disabled feature must not block")
+        self.assertEqual(plugin_init._BLOCK_RULES, [], "stale rules must be cleared")
+
+        # Second direction: with the feature enabled, an existing block still
+        # fires (B1's protection and the ordinary block path must survive).
+        plugin_init._update_block_rules([
+            {"content": "When calling curl, use wget instead of curl.",
+             "scope": "global", "session_id": ""}
+        ])
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            blocked = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "curl http://x"}, session_id="s"
+            )
+        self.assertIsNotNone(blocked, "an enabled block must still fire")
+        self.assertEqual(blocked["action"], "block")
+
     def test_prompt_note_cannot_reroute_away_from_a_load_bearing_binary(self):
         """A reroute note is a live veto, so it must not disable the agent.
 

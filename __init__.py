@@ -390,6 +390,17 @@ def _on_pre_tool_call(
                 ),
             }
 
+    # The block rules come only from prompt notes. When the operator turns the
+    # feature off, _BLOCK_RULES can still hold rules parsed on an earlier turn
+    # (the list lives for the process), so tool calls would keep being refused
+    # by a feature that is disabled. Clear the stale rules and stop enforcing
+    # them. The proposer read-only contract above is a separate concern and is
+    # intentionally left in force. Mind the global: this rebinds _BLOCK_RULES.
+    global _BLOCK_RULES
+    if not config.prompt_notes_enabled():
+        _BLOCK_RULES = []
+        return None
+
     # Same normalization _on_pre_llm_call uses before comparing against a
     # note's stored session_id, so a rule built from a session-scoped note
     # only ever fires inside that same session.
