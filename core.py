@@ -17,7 +17,10 @@ from agent.plugin_llm import PluginLlm
 try:
     from . import config, journal, ledger, llm as _llm, notify as _notify, patterns
     from .sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE, sanitize, scrub_text
-    from . import trace as _trace
+    # Renamed from `trace` to refine_trace: the repo root is on sys.path on the
+    # server, so `from . import trace` / `import trace` used to resolve to this
+    # plugin file and shadow the stdlib trace module process-wide.
+    from . import refine_trace as _trace
 except ImportError:
     import config, journal, ledger, llm as _llm, notify as _notify, patterns  # noqa: F811
     from sanitization import (  # noqa: F811

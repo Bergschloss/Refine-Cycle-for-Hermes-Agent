@@ -17929,7 +17929,7 @@ class TraceFileSinkTests(unittest.TestCase):
     def test_emit_trace_writes_the_plugin_owned_trace_log(self):
         import logging as _logging
         import tempfile as _tempfile
-        import trace as _trace_mod
+        import refine_trace as _trace_mod
 
         root = _logging.getLogger()
         handlers_before = list(root.handlers)
@@ -17977,7 +17977,7 @@ class TraceFileSinkTests(unittest.TestCase):
     def test_emit_trace_leaves_host_root_levels_untouched(self):
         import logging as _logging
         import tempfile as _tempfile
-        import trace as _trace_mod
+        import refine_trace as _trace_mod
 
         root = _logging.getLogger()
         levels_before = {id(h): h.level for h in root.handlers}
@@ -18008,10 +18008,10 @@ class TraceFileSinkTests(unittest.TestCase):
 
 
 class TraceContractTests(unittest.TestCase):
-    """Characterization: trace contract invariants verified against real trace.py."""
+    """Characterization: trace contract invariants verified against real refine_trace.py."""
 
     def test_trace_build_has_required_fields(self):
-        from trace import build_trace, validate_trace_invariants
+        from refine_trace import build_trace, validate_trace_invariants
         t = build_trace(
             session_id="s",
             source="tool",
@@ -18027,7 +18027,7 @@ class TraceContractTests(unittest.TestCase):
         self.assertTrue(t["trace_id"])  # non-empty UUID
 
     def test_trace_validate_sequence_strict(self):
-        from trace import validate_trace_invariants
+        from refine_trace import validate_trace_invariants
         valid = [
             {"sequence": 1, "event_type": "invocation_started"},
             {"sequence": 2, "event_type": "llm_attempt_started"},
@@ -18037,7 +18037,7 @@ class TraceContractTests(unittest.TestCase):
         self.assertEqual(validate_trace_invariants(valid), "valid")
 
     def test_trace_validate_rejects_duplicate_sequence(self):
-        from trace import validate_trace_invariants
+        from refine_trace import validate_trace_invariants
         bad = [
             {"sequence": 1, "event_type": "invocation_started"},
             {"sequence": 1, "event_type": "invocation_finished"},
@@ -18045,7 +18045,7 @@ class TraceContractTests(unittest.TestCase):
         self.assertIn("INVARIANT_VIOLATION", validate_trace_invariants(bad))
 
     def test_trace_validate_no_signal_has_no_llm_attempt(self):
-        from trace import validate_trace_invariants
+        from refine_trace import validate_trace_invariants
         # no_signal must not carry llm_attempt_started (verified by invariant)
         no_sig = [
             {"sequence": 1, "event_type": "invocation_started"},
@@ -18055,15 +18055,35 @@ class TraceContractTests(unittest.TestCase):
         self.assertEqual(validate_trace_invariants(no_sig), "valid")
 
     def test_trace_finalized_with_result_code(self):
-        from trace import build_trace, finalize_trace
+        from refine_trace import build_trace, finalize_trace
         t = build_trace(session_id="s", source="tool", operation="test", route_state="bound")
         finalized = finalize_trace(t, result_code="success")
         self.assertEqual(finalized["result_code"], "success")
         self.assertIsNotNone(finalized["end_ts"])
 
+    def test_stdlib_trace_is_no_longer_shadowed(self):
+        """B5: the plugin's trace module no longer shadows the stdlib one.
+
+        The repo root is on sys.path on the server (the suite inserts it too),
+        so while the plugin file was named trace.py, `import trace` resolved to
+        it and `hasattr(module, 'Trace')` was False — anything importing the
+        standard trace module got the plugin's instead, process-wide. After the
+        rename to refine_trace.py, `import trace` must yield the stdlib.
+        """
+        import importlib
+        stdlib_trace = importlib.import_module("trace")
+        self.assertTrue(
+            hasattr(stdlib_trace, "Trace"),
+            "import trace must resolve to the stdlib, not the plugin module",
+        )
+        # And the plugin module is reachable under its new, unambiguous name.
+        refine_trace = importlib.import_module("refine_trace")
+        self.assertTrue(hasattr(refine_trace, "build_trace"))
+        self.assertFalse(hasattr(refine_trace, "Trace"))
+
     def test_trace_does_not_mutate_journal(self):
         import logging as _logging
-        import trace as _trace_mod
+        import refine_trace as _trace_mod
         import journal
         # Isolate to a temp hermes_home so the read never touches a real journal
         # and cannot be perturbed by ambient state; same rebinding the neighbouring
@@ -18099,12 +18119,12 @@ class TraceContractTests(unittest.TestCase):
             _trace_mod.logger.propagate = True
 
     def test_trace_no_raw_identity_in_output(self):
-        import trace as trace_mod
+        import refine_trace as trace_mod
         # The original test built a trace with only clean metadata (provider,
         # model) and then looped asserting no field looked like a secret. Nothing
         # secret was ever put in, so the scrub path was never exercised. Feed a
         # credential-shaped value through the real emission boundary (_boundary,
-        # confirmed in trace.py — it applies scrub_text) and assert the raw
+        # confirmed in refine_trace.py — it applies scrub_text) and assert the raw
         # secret does not survive.
         secret = "sk-" + "A" * 32
         scrubbed = trace_mod._boundary(secret)
@@ -18131,7 +18151,7 @@ class TraceBoundaryScrubTests(unittest.TestCase):
         import logging as _logging
         import sys as _sys
         import tempfile as _tempfile
-        import trace as _trace_mod
+        import refine_trace as _trace_mod
 
         td = Path(tempfile.mkdtemp(prefix="tracebnd"))
         old_root = FakeHost.root
@@ -18166,7 +18186,7 @@ class TraceBoundaryScrubTests(unittest.TestCase):
     def test_secret_shaped_field_values_never_reach_the_log_raw(self):
         """Caller-smuggled credentials in route_state/result_code/source are
         redacted at the emission boundary; the raw shapes stay off disk."""
-        import trace as _trace_mod
+        import refine_trace as _trace_mod
         mod, td, old_root, _hc, _old_get = self._isolated_trace()
         try:
             t = mod.build_trace(
@@ -18187,7 +18207,7 @@ class TraceBoundaryScrubTests(unittest.TestCase):
 
     def test_clean_values_and_short_codes_pass_through_unmangled(self):
         """route_state/result/source telemetry must survive the boundary."""
-        import trace as _trace_mod
+        import refine_trace as _trace_mod
         mod, td, old_root, _hc, _old_get = self._isolated_trace()
         try:
             t = mod.build_trace(
@@ -18204,7 +18224,7 @@ class TraceBoundaryScrubTests(unittest.TestCase):
 
     def test_emission_survives_scrub_text_being_unavailable(self):
         """The log must come out even when the boundary cannot scrub."""
-        import trace as _trace_mod
+        import refine_trace as _trace_mod
         mod, td, old_root, _hc, _old_get = self._isolated_trace()
         try:
             with patch.object(mod, "scrub_text", None):
