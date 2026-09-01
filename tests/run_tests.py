@@ -15626,6 +15626,27 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIsNotNone(error)
         self.assertIn("context-control", error)
 
+    def test_status_says_when_refine_sends_no_target_at_all(self):
+        """`llm_provider` is the intended target, not the billed one.
+
+        With both overrides withheld by the trust policy, refine sends no target
+        and the call runs on the invocation-bound route -- the user's own session
+        model. Status reported `llm_provider: fireworks` / `llm_provider_allowed:
+        False` and left the reader to combine them; read alone, the first key made
+        a working run on one provider look like a failing run on another, and cost
+        a live investigation into a billing problem that did not exist.
+
+        The plugin is provider-agnostic. This asserts that its report says so.
+        """
+        status = core.refine_status()
+        self.assertIn("llm_target_effective", status)
+        effective = status["llm_target_effective"]
+        if not (status["llm_model_allowed"] or status["llm_provider_allowed"]):
+            self.assertIn("invocation route", effective)
+            self.assertIn("sends no target", effective)
+        else:
+            self.assertIn("refine sends:", effective)
+
     def test_journal_entries_with_llm_meta_always_carry_a_result_code(self):
         """No failure may be structurally indistinguishable from another.
 

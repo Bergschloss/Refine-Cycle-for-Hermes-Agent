@@ -2386,6 +2386,21 @@ def refine_status() -> Dict[str, Any]:
         "llm_target_issues": target_issues,
         "llm_model_allowed": model_allowed,
         "llm_provider_allowed": provider_allowed,
+        # One line that answers "which provider is refine using", because the two
+        # fields above answered it wrongly by omission. When neither override is
+        # allowed, refine sends no target and the call runs on whatever the user's
+        # session is bound to -- so `llm_provider` above is the intended target,
+        # not the one billed. Reading those two keys alone made a working run on
+        # one provider look like a failing run on another.
+        "llm_target_effective": (
+            "invocation route (user's session model); refine sends no target"
+            if not (model_allowed or provider_allowed)
+            else "refine sends: " + ", ".join(
+                field for field, allowed in (
+                    ("provider", provider_allowed), ("model", model_allowed),
+                ) if allowed
+            )
+        ),
         "last_model_substituted": last_model_substituted,
         "route_present": route_present,
         "proposer": {
@@ -3194,8 +3209,19 @@ def _handle_no_signal(
             # journals must carry it, or "no_op" cannot be told apart from
             # "the gate closed on thin evidence" after the fact.
             "signal_path": _signal_path,
+            # See the note on the same keys in the primary path: the intended
+            # target is not the sent target, and omitting that distinction is
+            # what made refine look provider-bound when it is not.
             "requested_provider": intended_target.get("provider", ""),
             "requested_model": intended_target.get("model", ""),
+            "target_fields_sent": [
+                field
+                for field, allowed in (
+                    ("provider", config.llm_allow_provider_override()),
+                    ("model", config.llm_allow_model_override()),
+                )
+                if allowed
+            ],
             "target_source": run_target_source,
             "primary_attempts": 1,
             **{k: v for k, v in reviewer_call_meta.items() if k in (
@@ -4196,8 +4222,25 @@ def _refine_once(
     # were reset by propose().
     llm_meta = _primary_llm_meta
     _run_llm_meta = {
+        # `requested_*` is the INTENDED target, which is not the same thing as the
+        # target that was sent. When the trust policy withholds these fields the
+        # call runs on the invocation-bound route's own binding -- the user's
+        # chosen model -- and refine names no provider at all. Recording the
+        # intent without recording that it was withheld made the journal and
+        # /refine-cycle status both read as "refine is calling fireworks" during a
+        # run that went to a completely different provider, and sent this
+        # investigation after a billing problem that was not there. The plugin is
+        # provider-agnostic; its telemetry was not.
         "requested_provider": _intended_target.get("provider", ""),
         "requested_model": _intended_target.get("model", ""),
+        "target_fields_sent": [
+            field
+            for field, allowed in (
+                ("provider", config.llm_allow_provider_override()),
+                ("model", config.llm_allow_model_override()),
+            )
+            if allowed
+        ],
         "target_source": _run_target_source,
         "signal_path": _signal_path,
         **{k: v for k, v in llm_meta.items() if k in (
