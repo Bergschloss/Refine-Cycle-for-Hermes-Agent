@@ -20048,6 +20048,17 @@ class NotifyModuleTests(unittest.TestCase):
                         or "no active chat" in m]
         self.assertEqual(len(none_warning), 1, captured.output)
 
+    def test_the_reporter_does_not_raise_from_its_own_bookkeeping(self):
+        """This function reports failures; it must not become one.
+
+        With a non-positive cap the eviction branch used to run min() over an
+        empty dict and raise ValueError -- from inside the worker's own except
+        handler, where it escapes the thread entirely.
+        """
+        with patch.object(self.notify, "_FAILURE_KEYS_MAX", 0):
+            with self.assertLogs(self.notify.logger, level="WARNING"):
+                self.notify._report_send_failure("telegram:111", "exit 1")
+
     def test_a_persistent_failure_is_reported_again_after_the_window(self):
         """A misconfiguration that outlives the throttle window must resurface,
         not vanish after the first day."""

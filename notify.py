@@ -92,8 +92,12 @@ def _report_send_failure(target: str, detail: object) -> None:
                  if (now - ts) >= _FAILURE_REPEAT_SECONDS]
         for k in stale:
             del _SEND_FAILURE_REPORTED[k]
-        if len(_SEND_FAILURE_REPORTED) >= _FAILURE_KEYS_MAX:
-            oldest = min(_SEND_FAILURE_REPORTED, key=_SEND_FAILURE_REPORTED.get)
+        # The dict guard is not redundant: min() over an empty mapping raises,
+        # and `len({}) >= 0` is true for any non-positive cap. This function is
+        # the one that has to stay quiet when everything else is broken, so it
+        # does not get to raise from its own bookkeeping.
+        if _SEND_FAILURE_REPORTED and len(_SEND_FAILURE_REPORTED) >= _FAILURE_KEYS_MAX:
+            oldest = min(_SEND_FAILURE_REPORTED, key=lambda k: _SEND_FAILURE_REPORTED[k])
             del _SEND_FAILURE_REPORTED[oldest]
         _SEND_FAILURE_REPORTED[key] = now
 
