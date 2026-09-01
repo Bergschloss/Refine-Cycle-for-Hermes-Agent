@@ -364,7 +364,18 @@ REVIEWER_MAX_TOKENS = 2400
 #
 # Not proven, and visible in the journal as it accrues: whether the currently
 # configured model finishes inside 120 s. What is proven is that 45 s did not.
-_PROPOSAL_LATENCY_BUDGET_SECONDS = 120.0
+# Raised 120 -> 180 on live evidence, not on a hunch. Two runs against the SAME
+# 60-message session minutes apart: 93 681 ms succeeded, 120 326 ms timed out. The
+# ceiling was sitting inside the provider's ordinary spread, so the same work
+# succeeded or failed by coin flip.
+#
+# 180 is not a fresh guess either -- it is the budget the OTHER proposer arm has
+# always had for the identical job (`config.proposer_subagent_timeout_seconds`,
+# default 180). Those two numbers describing one piece of work were already 4x
+# apart at 45, and 1.5x apart at 120; aligning them removes the disagreement
+# instead of moving it. AGENTS.md: two limits that describe the same thing from
+# two ends drift when they are written twice.
+_PROPOSAL_LATENCY_BUDGET_SECONDS = 180.0
 _PROPOSAL_TIMEOUT_SECONDS = _PROPOSAL_LATENCY_BUDGET_SECONDS
 # The reviewer verdict reads the same real trajectory; give it the same room.
 _REVIEW_TIMEOUT_SECONDS = _PROPOSAL_LATENCY_BUDGET_SECONDS
