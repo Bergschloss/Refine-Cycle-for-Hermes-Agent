@@ -7893,6 +7893,54 @@ class RefineTests(unittest.TestCase):
             # control text. User records get the same boundary as tool/assistant.
             self.assertIn("[user] <untrusted_tool_result>", prompt_text)
 
+    def test_prompt_note_cannot_reroute_away_from_a_load_bearing_binary(self):
+        """A reroute note is a live veto, so it must not disable the agent.
+
+        `_on_pre_tool_call` refuses any `terminal` command whose first word is a
+        reroute note's target, in every later session, for as long as the note
+        exists. Audit finding 10-01: nothing stopped a note from naming `git`,
+        `python` or the shell, so one accepted note silently broke every such
+        command the agent would ever run, and the refusal it got back named the
+        note rather than the cause.
+
+        Measured on the mechanism, not the audit's description of it: the audit
+        claimed tools like `read_file` and `skill_manage` were blocked. They are
+        not — they carry no command string, and the rule is `block_binary`. The
+        reachable damage is to binaries run through `terminal`.
+        """
+        for content in (
+            "When calling git, use echo instead of git.",
+            "When calling python, use noop instead of python.",
+            "When installing, use yarn instead of npm.",
+            "When connecting, use telnet instead of ssh.",
+            # The parser strips articles and a trailing "CLI", so the check must
+            # normalize identically or the guard is bypassed by phrasing alone.
+            "When calling the git CLI, use gh instead of the git CLI.",
+        ):
+            with self.subTest(content=content):
+                error = core._prompt_note_content_error(
+                    content, check_rendered_size=False
+                )
+                self.assertIsNotNone(error, "load-bearing reroute must be refused")
+                self.assertIn("needs it to work", error)
+
+        # The other direction: ordinary reroutes are the reason this note kind
+        # exists and must still pass. A denylist wide enough to catch every
+        # plausible binary would refuse these too.
+        for content in (
+            "When calling curl, use wget instead of curl.",
+            "When fetching pages, use httpie instead of curl.",
+            "When calling sed, use awk instead of sed.",
+            "When pushing, push to your fork.",
+        ):
+            with self.subTest(content=content):
+                self.assertIsNone(
+                    core._prompt_note_content_error(
+                        content, check_rendered_size=False
+                    ),
+                    "ordinary reroute must still be accepted",
+                )
+
     def test_prompt_note_second_line_must_match_when_pattern(self):
         """Wave 3.2: both lines of a 2-line prompt note must be conditional policies."""
         # Valid 2-line note

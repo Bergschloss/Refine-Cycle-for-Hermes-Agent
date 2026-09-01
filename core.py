@@ -420,6 +420,55 @@ _ACTION_REROUTE_OR_ADD = re.compile(
     r"prefer\s+.{1,60}\s+over\s+.{1,60}"
     r")\s*\.?\s*$"
 )
+# A reroute note becomes a live veto: `__init__._on_pre_tool_call` refuses any
+# `terminal` command whose first word is the note's target, in every later
+# session, for as long as the note exists. That is fine for `curl` -> `wget`,
+# and not fine for the handful of programs the agent needs in order to do any
+# work at all. One accepted note reading "When calling git, use echo instead of
+# git." silently breaks every git command the agent will ever run, and the
+# refusal it gets back names the note, not the cause.
+#
+# What makes a name load-bearing is not that it is popular but that the agent's
+# own documented workflows depend on it: the interpreter it runs, the version
+# control it commits with, the package managers it installs with, and the shell
+# itself. Rerouting any of those is a self-inflicted outage, never a lesson
+# learned from a failure -- so it is refused when the note is proposed rather
+# than filtered at enforcement, which would leave a legitimate-looking note
+# sitting in the store.
+#
+# Deliberately short and closed. A long denylist would start refusing ordinary
+# reroutes, which is the behaviour this rule exists to protect.
+_LOAD_BEARING_BINARIES = frozenset({
+    "git",
+    "python", "python3", "py",
+    "pip", "pip3", "npm", "npx", "pnpm", "yarn", "uv", "pipx",
+    "sh", "bash", "zsh", "cmd", "powershell", "pwsh",
+    "ssh", "scp",
+})
+# Mirrors ``__init__._parse_prompt_note_rule``'s reroute match. Kept beside the
+# denylist so the two are read together; the parser normalizes further (strips
+# articles, trailing "cli"/"tool"), and this check normalizes the same way so a
+# note cannot slip through as "the git CLI".
+_REROUTE_TARGET = re.compile(
+    r"(?i)\b(?:use|try|run|execute|call)\s+.+?\s+"
+    r"(?:instead\s+of|rather\s+than|over)\s+(.+?)\s*\.?\s*$"
+)
+
+
+def _reroute_target_is_load_bearing(action_text: str) -> str:
+    """The protected binary a reroute would veto, or "" when it vetoes nothing."""
+    match = _REROUTE_TARGET.search(action_text or "")
+    if not match:
+        return ""
+    target = re.sub(r"\s*\(.*?\)", "", match.group(1)).strip(" .")
+    target = re.sub(r"^(?:the|a|an)\s+", "", target, flags=re.I)
+    target = re.sub(
+        r"\s+(?:cli|command|tool|binary|utility|mcp|api|sdk)$", "",
+        target, flags=re.I,
+    ).strip().lower()
+    return target if target in _LOAD_BEARING_BINARIES else ""
+
+
 # Long enough to be unambiguous as a substring: ``session_id`` and ``x_csrf`` are
 # credentials, ``designation`` is not caught by any of these.
 _CREDENTIAL_FIELD_SUBSTRINGS = (
@@ -2426,6 +2475,12 @@ def _prompt_note_content_error(
         if not (_PROMPT_NOTE_SAFE_ACTION.fullmatch(action_text)
                 or _ACTION_REROUTE_OR_ADD.fullmatch(action_text)):
             return "Prompt note action must match an approved behavioral policy"
+        blocked = _reroute_target_is_load_bearing(action_text)
+        if blocked:
+            return (
+                f"Prompt note cannot reroute away from '{blocked}': the agent "
+                "needs it to work"
+            )
         # The whole line, not just the action: the condition is free text up to
         # 200 characters, so "When the 'api_key' field is missing, include the
         # required fields." carries the same instruction one clause to the left.
