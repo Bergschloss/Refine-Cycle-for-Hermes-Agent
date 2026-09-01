@@ -585,6 +585,28 @@ _ANSWER_REASONING_OPEN = re.compile(
 )
 
 
+def _is_inside_json_string(text: str, position: int) -> bool:
+    """Whether ``position`` falls inside an unterminated JSON string literal.
+
+    Used to tell a reasoning tag that is proposal CONTENT from one that opens a
+    real reasoning block. Escapes are honoured so a tag after ``\\"`` is judged by
+    the surrounding string state, not by the quote count alone.
+    """
+    in_string = False
+    escaped = False
+    for char in text[:position]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+    return in_string
+
+
 def _final_answer_text(text: str) -> str:
     """Drop reasoning blocks that precede the first candidate answer JSON.
 
@@ -598,8 +620,23 @@ def _final_answer_text(text: str) -> str:
         opening = _ANSWER_REASONING_OPEN.search(remaining)
         if opening is None:
             return remaining
-        first_object = remaining.find("{")
-        if first_object >= 0 and first_object < opening.start():
+        # Two reasons to leave a reasoning block alone, and both must be tested
+        # separately. The old test was `any "{" earlier in the text`, which is
+        # neither: a reasoning model writing "I analyzed {tool_name}." in its
+        # preamble made the whole block survive, and the extractor then took the
+        # DRAFT proposal from inside <think> instead of the final decision after
+        # </think> -- a create the model had explicitly reconsidered and replaced
+        # with no_op was applied as if authorized (audit 03-01).
+        #
+        # 1. The tag sits inside a JSON string, so it is proposal content
+        #    (`{"reason": "saw <think> in the log"}`) and rewriting it would
+        #    corrupt the answer.
+        if _is_inside_json_string(remaining, opening.start()):
+            return remaining
+        # 2. A complete, parseable JSON object already appeared before the tag, so
+        #    the answer is genuinely behind us and stripping forward would discard
+        #    it. Parseability is the real question the brace was standing in for.
+        if _extract_first_json_object(remaining[:opening.start()]) is not None:
             return remaining
         tag = opening.group("tag")
         closing = re.search(

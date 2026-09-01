@@ -7959,6 +7959,57 @@ class RefineTests(unittest.TestCase):
             # control text. User records get the same boundary as tool/assistant.
             self.assertIn("[user] <untrusted_tool_result>", prompt_text)
 
+    def test_reasoning_draft_never_outranks_the_final_answer(self):
+        """Audit 03-01: a brace in the preamble handed us the model's draft.
+
+        `_final_answer_text` bailed out whenever ANY "{" appeared before a
+        reasoning tag. A model writing "I analyzed {tool_name}." in its preamble
+        therefore kept the whole <think> block, and the extractor took the draft
+        proposal from inside it -- a `create` the model had explicitly
+        reconsidered and replaced with `no_op` after `</think>` would have been
+        applied as if authorized.
+
+        The brace test was standing in for two real questions, and both are
+        asserted here because each one protects a case the other does not:
+        whether the tag is proposal content inside a JSON string, and whether a
+        complete answer already appeared before it.
+        """
+        draft_then_final = (
+            "I analyzed the error pattern for {tool_name}.\n"
+            "<think>\n"
+            'Draft:\n{"action": "create", "kind": "skill", "name": "flawed-draft",'
+            ' "content": "BAD", "reason": "draft"}\n'
+            "Wait, this was a user typo, returning no_op.\n"
+            "</think>\n"
+            '{"action": "no_op", "reason": "one-off user typo"}'
+        )
+        obj = llm._extract_first_json_object(
+            llm._final_answer_text(draft_then_final))
+        self.assertEqual(obj.get("action"), "no_op")
+        self.assertNotEqual(obj.get("name"), "flawed-draft")
+
+        # Reasoning markup that is proposal CONTENT must survive untouched.
+        content_tag = '{"action": "no_op", "reason": "saw <think> in the log"}'
+        self.assertEqual(
+            llm._extract_first_json_object(llm._final_answer_text(content_tag)),
+            {"action": "no_op", "reason": "saw <think> in the log"},
+        )
+
+        # A complete answer before a trailing reasoning block must not be thrown
+        # away -- this is the case the brace check existed to protect.
+        answer_then_tag = (
+            '{"action": "create", "kind": "skill", "name": "real", "content": "x"}\n'
+            "<think>afterthought</think>"
+        )
+        self.assertEqual(
+            llm._extract_first_json_object(
+                llm._final_answer_text(answer_then_tag)).get("name"),
+            "real",
+        )
+
+        # An unclosed pre-answer block still means there is no final answer.
+        self.assertEqual(llm._final_answer_text("prose\n<think>\nnever closed"), "")
+
     def test_merge_patterns_accumulates_across_disjoint_sessions(self):
         """Audit 06-01: max() collapsed two disjoint sessions into one.
 
