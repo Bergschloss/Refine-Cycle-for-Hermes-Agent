@@ -157,16 +157,6 @@ _NUMERIC_METRIC_KEYS = {
 # rather than weakening the credential grammar with a broad substring exception.
 _NON_SECRET_TOKEN_KEYS = {"tokenizer", "token_count"}
 
-# Fullwidth/compatibility forms of printable ASCII live in this block; each
-# maps to exactly one ASCII character under NFKC (e.g. 'ａ'->'a', '＝'->'=',
-# U+3000 -> ' '). Normalizing ONLY these characters keeps every other Unicode
-# form — typographic punctuation like '…', Cyrillic, CJK prose — byte-identical,
-# while letting the ASCII-oriented credential grammar match obfuscated labels.
-_COMPAT_ASCII_BLOCK = (
-    "\uff01"   # !
-    "\u3000"   # ideographic space
-)
-
 
 def _normalize_compatibility_forms(text: str) -> str:
     """Canonicalize fullwidth/compatibility ASCII forms, nothing else."""
