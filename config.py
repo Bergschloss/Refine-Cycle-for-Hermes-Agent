@@ -210,9 +210,16 @@ def _get_fail_closed_bool(key: str, default: bool = True) -> bool:
     return _parse_bool(_refine_entry_from_raw(raw).get(key), default, key)
 
 
-def get_int(key: str, default: int, min_val: int = 1) -> int:
-    """Read an integer config key with a default and visible floor clamp."""
-    entry = _get_refine_entry()
+def _int_from_entry(
+    entry: Dict[str, Any], key: str, default: int, min_val: int
+) -> int:
+    """Parse one integer config key out of an already-loaded entry.
+
+    Split out of ``get_int`` so a caller that must inspect the entry before
+    choosing a key can decide and read from the *same* snapshot. Loading twice
+    lets config.yaml change in between, which is the failure
+    ``_get_fail_closed_bool`` documents for booleans.
+    """
     val = entry.get(key)
     parsed: Optional[int] = None
     if isinstance(val, (int, float)) and not isinstance(val, bool):
@@ -234,6 +241,11 @@ def get_int(key: str, default: int, min_val: int = 1) -> int:
     if val is not None:
         logger.warning("Config key '%s' has unrecognized integer value; using default", key)
     return default
+
+
+def get_int(key: str, default: int, min_val: int = 1) -> int:
+    """Read an integer config key with a default and visible floor clamp."""
+    return _int_from_entry(_get_refine_entry(), key, default, min_val)
 
 
 def _coerce_string_config_value(value: Any, key: str) -> Tuple[str, str]:
@@ -674,11 +686,21 @@ def audit_recurrence_horizon_days() -> int:
     Accepts the README-documented ``recurrence_horizon_days`` as an alias so an
     operator who follows the docs is not silently given the default. The
     explicit ``audit_recurrence_horizon_days`` still wins when both are set.
+
+    Which key to read and the value itself come from one snapshot: choosing on
+    a first load and reading on a second lets config.yaml change in between,
+    so the branch and the lookup disagree and a valid value collapses to the
+    default. ``/refine audit`` also calls this once per journal row, and a
+    cached ``load_config()`` hit is not free (~265us, half of it a defensive
+    deepcopy), so the second load was paid per row as well.
     """
     entry = _get_refine_entry()
-    if "audit_recurrence_horizon_days" in entry:
-        return get_int("audit_recurrence_horizon_days", 3, min_val=1)
-    return get_int("recurrence_horizon_days", 3, min_val=1)
+    key = (
+        "audit_recurrence_horizon_days"
+        if "audit_recurrence_horizon_days" in entry
+        else "recurrence_horizon_days"
+    )
+    return _int_from_entry(entry, key, 3, min_val=1)
 
 
 def proposer_subagent_enabled() -> bool:

@@ -11055,6 +11055,27 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                                         "recurrence_horizon_days": 10}):
             self.assertEqual(config.audit_recurrence_horizon_days(), 14)
 
+    def test_recurrence_horizon_reads_the_config_once(self):
+        """Deciding on one snapshot and reading the value from another is the
+        trap _get_fail_closed_bool already documents: an editor replacing
+        config.yaml between the two reads makes the branch and the lookup
+        disagree, and a perfectly good value is replaced by the default. It
+        also doubles a ~265us cached load inside ledger's per-row audit loop.
+        Load once, parse that same object."""
+        snapshots = [{"audit_recurrence_horizon_days": 14},
+                     {"recurrence_horizon_days": 10}]
+        calls = []
+
+        def shifting_entry():
+            calls.append(1)
+            return snapshots[min(len(calls) - 1, len(snapshots) - 1)]
+
+        with patch.object(config, "_get_refine_entry", side_effect=shifting_entry):
+            value = config.audit_recurrence_horizon_days()
+        self.assertEqual(value, 14)
+        self.assertEqual(len(calls), 1,
+                         f"config must be loaded once, was loaded {len(calls)}x")
+
     def test_config_string_coercion_and_cooldown_zero(self):
         """Wave 2.9-2.12: config honors string bool/int and allows cooldown=0."""
         # String booleans
