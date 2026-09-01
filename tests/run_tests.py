@@ -15626,6 +15626,35 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIsNotNone(error)
         self.assertIn("context-control", error)
 
+    def test_proposal_and_review_timeouts_stay_derived_from_one_constant(self):
+        """Two limits describing the same work must not be written twice.
+
+        The proposal call and the reviewer call read the same bounded trajectory
+        on the same route. When the two values were literals they were equal by
+        coincidence, and this repository has already paid once for a pair of
+        limits that described the same thing from two ends and then drifted --
+        an output token budget of 2048 against a content guardrail of 15000,
+        which made the largest proposals physically impossible.
+
+        Also asserts the floor. 45s was measured against the live journal as
+        p80 of 187 real successful calls: it truncated 17% of calls that would
+        have succeeded, and every failure landed at 45.2s. A future edit that
+        lowers this back under the measured p90 (74.6s) reintroduces that, so
+        the floor is the finding, not the number.
+        """
+        self.assertEqual(
+            llm._PROPOSAL_TIMEOUT_SECONDS,
+            llm._PROPOSAL_LATENCY_BUDGET_SECONDS,
+        )
+        self.assertEqual(
+            llm._REVIEW_TIMEOUT_SECONDS,
+            llm._PROPOSAL_LATENCY_BUDGET_SECONDS,
+        )
+        self.assertGreaterEqual(
+            llm._PROPOSAL_LATENCY_BUDGET_SECONDS, 74.6,
+            "below the measured p90 of real successful proposal calls",
+        )
+
     def test_override_synonyms_outside_the_verb_list_are_refused(self):
         """10-05: a closed verb list let 24 phrasings through.
 

@@ -332,17 +332,44 @@ PROPOSAL_MAX_TOKENS = proposal_max_tokens(1)
 REVIEWER_MAX_TOKENS = 2400
 
 # Proposal reads a real bounded trajectory with a reasoning model, not an
-# auxiliary helper. The host's auxiliary default (30 s) is sized for helpers
-# and silently drops the slow tail of these reads: timeout, 429 and a dead
-# route collapsed into one undersized window and four rounds read wrong. The
-# value is from the measurement, not the ceiling: observed successful proposal
-# latency 2026-08-25 on the live trajectory read was 11 348–29 776 ms per
-# attempt (each attempt is an independent extraction). 30 s was the failure
-# floor; max*1.5 ≈ 44.7 s -> 45 s gives a reasoning read room to finish while
-# still failing fast enough to retry on a hung host.
-_PROPOSAL_TIMEOUT_SECONDS = 45.0
+# auxiliary helper. The host's auxiliary default (30 s) is sized for helpers and
+# silently drops the slow tail of these reads: timeout, 429 and a dead route
+# collapsed into one undersized window and four rounds read wrong.
+#
+# The previous value, 45 s, was derived as `observed max * 1.5` from a sample
+# whose range was 11 348-29 776 ms, taken 2026-08-25. Re-measured 2026-09-01
+# against the live journal -- 187 real calls that produced a proposal, not a
+# synthetic run -- that sample was the fast half of the distribution:
+#
+#   p50 22.4s   p75 41.0s   p80 44.1s   p85 53.9s   p90 74.6s   p95 106.1s
+#
+# So 45 s sat almost exactly at p80 and truncated 32 of 187 calls -- 17% -- that
+# would otherwise have succeeded. The signature was in the data before it was in
+# the code: the most recent successes clustered at 44.2, 44.1, 44.4 and 44.9 s,
+# finishing just under the ceiling, while every current failure lands at 45.2 s
+# with "The refine model call timed out." A route that works and a provider that
+# works were being reported as a model failure by our own limit.
+#
+# `max * 1.5` is not a defensible rule on this distribution: the tail runs to
+# 511 s, so the same arithmetic now yields 767 s. A percentile is the honest
+# method for a heavy tail, and the choice is stated rather than fitted -- 120 s
+# covers p95 with margin and truncates 4% instead of 17%. What remains above it
+# (106-511 s) is far likelier to be a hung call than a slow read, which is the
+# case the ceiling exists for.
+#
+# 120 s also removes a disagreement rather than adding one. The subagent proposer
+# arm already gets 180 s for the identical job via
+# `config.proposer_subagent_timeout_seconds()`, so the two arms were describing
+# the same work with a 4x gap. Both proposal and review derive from the one
+# constant below, for the reason AGENTS.md gives: two limits that describe the
+# same thing from two ends drift apart when they are written twice.
+#
+# Not proven, and visible in the journal as it accrues: whether the currently
+# configured model finishes inside 120 s. What is proven is that 45 s did not.
+_PROPOSAL_LATENCY_BUDGET_SECONDS = 120.0
+_PROPOSAL_TIMEOUT_SECONDS = _PROPOSAL_LATENCY_BUDGET_SECONDS
 # The reviewer verdict reads the same real trajectory; give it the same room.
-_REVIEW_TIMEOUT_SECONDS = 45.0
+_REVIEW_TIMEOUT_SECONDS = _PROPOSAL_LATENCY_BUDGET_SECONDS
 
 REFINE_PROPOSAL_SCHEMA: Dict[str, Any] = {
     "type": "object",
