@@ -20006,9 +20006,11 @@ class NotifyModuleTests(unittest.TestCase):
                 patch.object(self.notify.config, "notify_target_configured", return_value="telegram"):
             with self.assertLogs(self.notify.logger, level="WARNING") as captured:
                 self.assertFalse(self.notify.notify("body"))
-            # The SAME cause repeated is throttled: one WARNING, then debug, or
-            # the log trains you to skip it.
-            self.notify.notify("body")
+                # The SAME cause repeated is throttled: one WARNING, then debug,
+                # or the log trains you to skip it. This second call has to stay
+                # INSIDE the capture -- outside it assertLogs has already
+                # detached its handler, and the throttle claim asserts nothing.
+                self.notify.notify("body")
         self.assertEqual(len(captured.output), 1, captured.output)
         message = captured.output[0]
         # A tried-and-failed address gets the delivery-failed remedy, not the
@@ -20047,6 +20049,62 @@ class NotifyModuleTests(unittest.TestCase):
         none_warning = [m for m in captured.output if "no address configured" in m
                         or "no active chat" in m]
         self.assertEqual(len(none_warning), 1, captured.output)
+
+    def test_identical_failures_are_throttled_to_one_warning_and_a_debug(self):
+        """The other direction of the same fix, and the one nothing else pinned.
+
+        Every other test here counts warnings for DISTINCT causes, so deleting
+        the throttle entirely left the suite green: the repeat-suppression was
+        asserted only by a call that sat outside its own assertLogs context.
+        This measures both levels in one capture -- the second report is a
+        DEBUG, and the WARNING count does not move.
+        """
+        with self.assertLogs(self.notify.logger, level="DEBUG") as captured:
+            self.notify._report_send_failure("telegram:111", "exit 1")
+            self.notify._report_send_failure("telegram:111", "exit 1")
+        levels = [r.levelname for r in captured.records]
+        self.assertEqual(levels.count("WARNING"), 1, captured.output)
+        repeats = [r.getMessage() for r in captured.records
+                   if r.levelname == "DEBUG" and "failed again" in r.getMessage()]
+        self.assertEqual(len(repeats), 1, captured.output)
+        self.assertIn("telegram:111", repeats[0])
+
+    def test_the_same_target_failing_for_a_new_reason_still_warns(self):
+        """The throttle key is (target, detail), not the target alone.
+
+        A target that starts failing for a second reason -- the exit code
+        changes, or the coupling breaks and it becomes an exception name -- is a
+        new fact. Keying on target alone would swallow it, and every other test
+        here varies the target, so nothing caught that.
+        """
+        with self.assertLogs(self.notify.logger, level="WARNING") as captured:
+            self.notify._report_send_failure("telegram:111", "exit 1")
+            self.notify._report_send_failure("telegram:111", "exit 2")
+            self.notify._report_send_failure("telegram:111", "RuntimeError")
+        self.assertEqual(len(captured.output), 3, captured.output)
+
+    def test_the_failure_throttle_state_stays_bounded(self):
+        """A rotating target must not grow the throttle dict without bound.
+
+        The gateway runs for weeks; an unbounded dict keyed by a value that can
+        rotate is a slow leak that nothing would otherwise notice.
+        """
+        with patch.object(self.notify, "_FAILURE_KEYS_MAX", 4):
+            with patch.object(self.notify.logger, "warning"):
+                for i in range(200):
+                    self.notify._report_send_failure("telegram:%d" % i, "exit 1")
+            self.assertLessEqual(len(self.notify._SEND_FAILURE_REPORTED), 4,
+                                 self.notify._SEND_FAILURE_REPORTED)
+
+    def test_expired_throttle_entries_are_purged_not_merely_capped(self):
+        """Keys past the window are dropped on insert, so the steady state of a
+        long-lived process is small rather than merely capped."""
+        with patch.object(self.notify, "_FAILURE_REPEAT_SECONDS", 0.0), \
+                patch.object(self.notify.logger, "warning"):
+            for i in range(20):
+                self.notify._report_send_failure("telegram:%d" % i, "exit 1")
+        self.assertEqual(len(self.notify._SEND_FAILURE_REPORTED), 1,
+                         self.notify._SEND_FAILURE_REPORTED)
 
     def test_the_reporter_does_not_raise_from_its_own_bookkeeping(self):
         """This function reports failures; it must not become one.
