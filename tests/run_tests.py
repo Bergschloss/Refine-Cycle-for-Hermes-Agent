@@ -11070,6 +11070,40 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 path.read_text(encoding="utf-8"), path.name)
         self.assertEqual(dupes, [], "; ".join(dupes))
 
+    def test_no_module_compiles_with_a_syntax_warning(self):
+        """An invalid escape like "\\%" is not a typo Python rejects -- it keeps
+        the backslash literally, so the code works and nothing complains except
+        a warning nobody reads on a cached-bytecode import. CPython has said it
+        becomes a SyntaxError, and for this plugin that is not a loud failure:
+        an import error means refine is simply never there, silently, forever.
+        Compile from source so cached bytecode cannot hide it."""
+        import pathlib
+        import warnings
+        root = pathlib.Path(config.__file__).resolve().parent
+        modules = sorted(root.glob("*.py")) + sorted((root / "tests").glob("*.py"))
+        self.assertGreater(len(modules), 5, f"module scan found nothing in {root}")
+        problems = []
+        for path in modules:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            problems += [
+                f"{path.name}:{w.lineno} {w.category.__name__}: {w.message}"
+                for w in caught
+                if issubclass(w.category, (SyntaxWarning, DeprecationWarning))
+            ]
+        self.assertEqual(problems, [], "; ".join(problems))
+
+    def test_like_escape_is_unchanged_by_the_literal_fix(self):
+        """The escape fix must be byte-identical, not merely close: this string
+        feeds a SQL LIKE ... ESCAPE '\\' clause, so a changed backslash count
+        would quietly alter which rows match."""
+        name = "my_skill%weird\\path"
+        as_written_before = (
+            name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        self.assertEqual(as_written_before, "my\\_skill\\%weird\\\\path")
+
     def test_duplicate_definition_guard_detects_each_scope(self):
         """The scan above passes today, so prove it is not vacuous: it must
         catch a duplicate at module, class-method and class scope."""

@@ -278,7 +278,7 @@ def _count_uses_with_scope(name: str, since_ts: float) -> Tuple[Optional[int], s
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             escaped_name = (
-                name.replace("\\", "\\\\").replace("%", "\%").replace("_", "\_")
+                name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             )
             # COUNT(*) WHERE timestamp > ? trusts messages.timestamp -- the
             # same untrusted host column validated at the other two sites. A
