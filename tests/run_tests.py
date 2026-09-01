@@ -20429,5 +20429,76 @@ class ActiveChatCaptureTests(unittest.TestCase):
         self.assertEqual(breaches, [], "chat was read off the hook thread")
 
 
+class InstallerPluginContentTests(unittest.TestCase):
+    """What install.py copies must be a plugin that actually runs.
+
+    There was no test for the installer at all, and the copy list was hardcoded.
+    It drifted: notify.py and refine_trace.py were added to the plugin and never
+    added to the installer, so a fresh install produced a tree whose core.py
+    could not be imported at all -- ModuleNotFoundError: No module named
+    'notify'. Nothing caught it, because the installer's own capability
+    verification checks the HOST patch markers and never imports the plugin it
+    just copied.
+
+    These tests assert the outcome (a tree that imports), not the copy list, so
+    they stay valid however the list is produced.
+    """
+
+    def _install_into_temp(self) -> Path:
+        import install
+
+        with tempfile.TemporaryDirectory(prefix="refine-installer-") as td:
+            with patch.dict(os.environ, {"HERMES_HOME": td}, clear=False):
+                meta: dict = {}
+                dest = Path(install.install_plugin(meta))
+            # Copy out of the context manager's tree before it is removed.
+            keep = Path(tempfile.mkdtemp(prefix="refine-installed-"))
+            shutil.copytree(dest, keep / "refine")
+        self.addCleanup(shutil.rmtree, keep, ignore_errors=True)
+        return keep / "refine"
+
+    def test_installer_copies_every_runtime_module(self):
+        """Every module the plugin imports at runtime must reach the install.
+
+        Both directions: no runtime module may be missing, and scratch files
+        (anything leading with an underscore that is not a dunder) must not be
+        dragged along.
+        """
+        dest = self._install_into_temp()
+        installed = {p.name for p in dest.glob("*.py")}
+        expected = {
+            p.name
+            for p in ROOT.glob("*.py")
+            if not p.name.startswith("_") or p.name.startswith("__")
+        }
+        missing = sorted(expected - installed)
+        self.assertEqual(
+            missing, [],
+            f"installer left runtime modules behind: {missing}",
+        )
+        scratch = sorted(n for n in installed if n.startswith("_") and not n.startswith("__"))
+        self.assertEqual(scratch, [], f"installer copied scratch files: {scratch}")
+
+    def test_installed_tree_imports_in_a_fresh_interpreter(self):
+        """The acceptance check the installer never made.
+
+        A complete copy of the plugin imports standalone -- verified -- so a
+        failure here means the installer produced an incomplete tree, not that
+        the environment is missing something.
+        """
+        dest = self._install_into_temp()
+        for module in ("core", "__init__"):
+            r = subprocess.run(
+                [sys.executable, "-c", f"import {module}"],
+                cwd=str(dest), capture_output=True, text=True, timeout=120,
+            )
+            detail = (r.stderr or "").strip().splitlines()
+            self.assertEqual(
+                r.returncode, 0,
+                f"installed plugin cannot import {module}: "
+                f"{detail[-1] if detail else 'no stderr'}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

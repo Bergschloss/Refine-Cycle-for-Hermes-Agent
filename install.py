@@ -63,11 +63,43 @@ FILE_MARKERS = {
     "tui_gateway/methods_tools.py": "plugin_invocation_scope_for_agent",
 }
 
-PLUGIN_FILES = [
+# What gets installed is read from the checkout, not listed here. This list used
+# to be hardcoded and it drifted: notify.py and refine_trace.py joined the plugin
+# and never joined the list, so a fresh install copied a tree whose core.py
+# raised ModuleNotFoundError on import -- a plugin that could not load at all,
+# while the installer printed SUCCESS. The asymmetry decides the rule: an extra
+# file costs a few KB, a missing one costs the whole plugin.
+PLUGIN_MANIFEST_EXTRAS = ("plugin.yaml",)
+
+# core.py imports every one of these at module level, so the absence of any one
+# of them is a dead install. Derivation should cover them already; this is the
+# guard for derivation itself going wrong.
+REQUIRED_PLUGIN_MODULES = (
     "__init__.py", "config.py", "core.py", "journal.py", "ledger.py", "llm.py",
-    "patterns.py", "sanitization.py", "plugin.yaml", "install.py",
-    "tests/__init__.py", "tests/run_tests.py", "tests/test_usefulness.py",
-]
+    "notify.py", "patterns.py", "refine_trace.py", "sanitization.py",
+    "plugin.yaml",
+)
+
+
+def _is_shipped(p: Path) -> bool:
+    """True for a repo file that belongs in an install.
+
+    Skips scratch and probe files (a leading underscore) while keeping dunders,
+    so ``__init__.py`` ships and ``_probe_whatever.py`` does not.
+    """
+    return p.is_file() and (not p.name.startswith("_") or p.name.startswith("__"))
+
+
+def plugin_files() -> list[str]:
+    """Every file to copy into the installed plugin, derived from the checkout."""
+    rels = [p.name for p in sorted(PLUGIN_DIR.glob("*.py")) if _is_shipped(p)]
+    rels += [n for n in PLUGIN_MANIFEST_EXTRAS if (PLUGIN_DIR / n).is_file()]
+    rels += [
+        f"tests/{p.name}"
+        for p in sorted((PLUGIN_DIR / "tests").glob("*.py"))
+        if _is_shipped(p)
+    ]
+    return rels
 
 
 def say(msg: str) -> None:
@@ -248,8 +280,16 @@ def install_plugin(meta: dict) -> str:
     """Copy plugin files into ~/.hermes/plugins/refine (idempotent)."""
     hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
     dest = hermes_home / "plugins" / "refine"
+    files = plugin_files()
+    absent = [m for m in REQUIRED_PLUGIN_MODULES if m not in files]
+    if absent:
+        fail(
+            f"refusing to install an incomplete plugin: {absent} not found in "
+            f"{PLUGIN_DIR}. Installing without them yields a plugin that cannot "
+            "be imported at all."
+        )
     copied = []
-    for rel in PLUGIN_FILES:
+    for rel in files:
         s = PLUGIN_DIR / rel
         d = dest / rel
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -260,6 +300,30 @@ def install_plugin(meta: dict) -> str:
     meta["plugin_dest"] = str(dest)
     meta["plugin_files"] = copied
     return str(dest)
+
+
+def verify_plugin_imports(dest: Path, python: str) -> None:
+    """Import the tree that was just copied, using the interpreter that will load it.
+
+    The pre-existing capability verification checks the HOST patch markers and
+    never touches the copied plugin, which is exactly how an install missing
+    notify.py could print SUCCESS while the plugin was unloadable. ``core``
+    imports every sibling module at module level, so one import exercises the
+    whole copy. A failure here means the install is broken, so it is fatal
+    rather than a warning.
+    """
+    r = subprocess.run(
+        [python, "-c", "import core"],
+        cwd=str(dest), capture_output=True, text=True, timeout=120,
+        encoding="utf-8", errors="replace",
+    )
+    if r.returncode != 0:
+        tail = [line for line in (r.stderr or "").strip().splitlines() if line.strip()]
+        fail(
+            "the installed plugin cannot be imported by the interpreter that will "
+            f"load it ({python}):\n  {tail[-1] if tail else 'no stderr'}\n"
+            f"  tree: {dest}"
+        )
 
 
 def write_metadata(meta_dir: Path, meta: dict) -> Path:
@@ -385,7 +449,9 @@ def do_install(args) -> None:
 
     say("Installing Refine plugin…")
     dest = install_plugin(meta)
-    say(f"Plugin files → {dest}")
+    say(f"Plugin files → {dest} ({len(meta.get('plugin_files') or [])} files)")
+    verify_plugin_imports(Path(dest), python_of(src))
+    say("Plugin import verified in a fresh interpreter.")
 
     write_metadata(mdir, meta)
     say(f"Metadata → {mdir / METADATA_NAME}")
