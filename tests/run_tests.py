@@ -15063,6 +15063,112 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("denied", entry["error"])
         self.assertEqual(FakeHost.memory_entries, [])
 
+    # ── A2: a full memory store is its own result, not a generic error ──────
+
+    def test_memory_full_store_gets_a_distinct_result_code(self):
+        """Fail-first: parent gives result_code equal to the generic outcome.
+
+        The host has no structured field for "store full" -- it is prose. This
+        must be classified from the specific phrasing tools.memory_tool actually
+        emits, not a loose match, and recorded as result_code=memory_full with
+        the parsed used/limit, distinct from any other apply error's code.
+        """
+        consolidation_error = (
+            "Memory at 2,149/2,200 chars. Adding this entry (80 chars) would "
+            "exceed the limit. Consolidate now: use 'replace' to merge "
+            "overlapping entries into shorter ones or 'remove' stale or less "
+            "important entries (see current_entries below), then retry this "
+            "add — all in this turn."
+        )
+        with patch.object(
+            core, "_apply_memory",
+            return_value={
+                "success": False, "error": consolidation_error,
+                "current_entries": ["one", "two"], "usage": "2,149/2,200",
+            },
+        ):
+            result = self.run_proposal(memory_edit("x" * 80, name="mem-full"))
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_full")
+        self.assertEqual(result["llm_meta"]["memory_used"], 2149)
+        self.assertEqual(result["llm_meta"]["memory_limit"], 2200)
+        # The journaled outcome must stay "error" -- no new outcome member.
+        entry = journal.get_entry(result["record_id"])
+        self.assertEqual(entry["outcome"], "error")
+
+    def test_memory_consolidation_exhausted_gets_its_own_terminal_code(self):
+        """The host's terminal "stop retrying" reply is a distinct state from
+        one write not fitting -- it means several consolidation attempts
+        already failed this turn."""
+        exhausted_error = (
+            "Memory consolidation failed 4 times this turn. Stop retrying "
+            "memory calls — leave memory unchanged for now and continue with "
+            "your reply to the user. The fact can be saved in a later turn."
+        )
+        with patch.object(
+            core, "_apply_memory",
+            return_value={"success": False, "done": True, "error": exhausted_error},
+        ):
+            result = self.run_proposal(memory_edit("late lesson", name="mem-exhausted"))
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["llm_meta"]["result_code"], "memory_consolidation_exhausted"
+        )
+        self.assertNotIn("memory_used", result["llm_meta"])
+
+    def test_unrelated_memory_apply_error_keeps_its_existing_code(self):
+        """Both directions: an apply failure that is NOT memory-full must not be
+        misclassified just because it happened on a memory edit. "Existing
+        code" is whatever the run already carries (normally "ok", set from the
+        proposal's own failure field, independent of the apply outcome) --
+        this item must not touch that for an unrelated failure.
+        """
+        with patch.object(
+            core, "_apply_memory",
+            return_value={"success": False, "error": "host I/O error: disk full"},
+        ):
+            result = self.run_proposal(memory_edit("irrelevant", name="mem-io-error"))
+        self.assertFalse(result["success"])
+        self.assertEqual(result["llm_meta"]["result_code"], "ok")
+
+    def test_memory_full_error_text_still_goes_through_scrub_text(self):
+        """The host text still goes through scrub_text before it reaches the
+        journal, even though it now also drives a structured code."""
+        secret = 'token="abc.DEF+/=!?"'
+        consolidation_error = (
+            "Memory at 2,149/2,200 chars. Adding this entry would exceed the "
+            f"limit. {secret}"
+        )
+        with patch.object(
+            core, "_apply_memory",
+            return_value={"success": False, "error": consolidation_error},
+        ):
+            result = self.run_proposal(memory_edit("y" * 80, name="mem-full-secret"))
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_full")
+        raw = journal.journal_path().read_text(encoding="utf-8")
+        self.assertNotIn(secret, raw)
+
+    def test_memory_full_in_a_transaction_does_not_mutate_the_run_meta(self):
+        """The run-level llm_meta the caller also holds must not be mutated by
+        one edit's memory_full classification -- only a copy is edited."""
+        consolidation_error = (
+            "Memory at 2,149/2,200 chars. Adding this entry would exceed the "
+            "limit."
+        )
+        FakeHost.entry_config()["max_edits_per_day"] = 5
+        with patch.object(
+            core, "_apply_memory",
+            return_value={"success": False, "error": consolidation_error},
+        ):
+            result = self.run_proposal(multi_proposal(
+                memory_edit("z" * 80, name="mem-full-tx"),
+            ))
+        self.assertEqual(result["llm_meta"]["result_code"], "ok")
+        item = result["results"][0]
+        self.assertEqual(item["llm_meta"]["result_code"], "memory_full")
+        self.assertIsNot(item["llm_meta"], result["llm_meta"])
+
     def test_memory_content_with_surrounding_whitespace_still_applies(self):
         """The host stores the stripped form, so recovery must record that form.
 

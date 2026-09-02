@@ -2916,6 +2916,57 @@ def _apply_skill(proposal: Dict[str, Any]) -> Dict[str, Any]:
     return _host_tool_result(raw)
 
 
+_MEMORY_CONSOLIDATION_FAILURE_RE = re.compile(
+    r"Memory at ([\d,]+)/([\d,]+) chars\."
+)
+_MEMORY_CONSOLIDATION_EXHAUSTED_RE = re.compile(
+    r"Memory consolidation failed \d+ times this turn"
+)
+
+
+def _memory_full_result_code(apply_result: Dict[str, Any]) -> str:
+    """Classify a failed memory apply as full-store, exhausted, or unrelated.
+
+    The host (``tools.memory_tool``) has no structured field for this — its
+    ``_consolidation_failure`` returns a plain ``error`` string. Prefer a
+    structured field if one ever appears; until then, match the specific
+    phrasing the host actually emits rather than a loose "full" substring,
+    so an unrelated apply error (bad content, host I/O failure, drift) keeps
+    its generic code instead of being misclassified as a budget problem.
+
+    Returns "" when the failure is not a memory-full/consolidation-exhausted
+    one at all, so the caller can fall back to its existing generic code.
+    """
+    if apply_result.get("success"):
+        return ""
+    error = str(apply_result.get("error", ""))
+    if _MEMORY_CONSOLIDATION_EXHAUSTED_RE.search(error):
+        return "memory_consolidation_exhausted"
+    if _MEMORY_CONSOLIDATION_FAILURE_RE.search(error):
+        return "memory_full"
+    return ""
+
+
+def _memory_full_usage(apply_result: Dict[str, Any]) -> "Tuple[Optional[int], Optional[int]]":
+    """Parse (used, limit) chars out of the host's consolidation-failure text.
+
+    Defensive: the host's message is prose, not a contract. If the shape ever
+    changes, this returns (None, None) rather than raising, so a proposal that
+    genuinely hit the limit is not turned into an unrelated crash just because
+    the usage numbers could not be read back out of a human sentence.
+    """
+    error = str(apply_result.get("error", ""))
+    match = _MEMORY_CONSOLIDATION_FAILURE_RE.search(error)
+    if not match:
+        return None, None
+    try:
+        used = int(match.group(1).replace(",", ""))
+        limit = int(match.group(2).replace(",", ""))
+    except ValueError:
+        return None, None
+    return used, limit
+
+
 def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
     # ``memory_tool`` is the entry point that owns the host's ``write_approval``
     # gate; ``MemoryStore.add`` performs the write with no gate at all. Calling
@@ -4690,7 +4741,14 @@ def _refine_once(
             active_chat=active_chat,
         )
     response["evidence"] = evidence_summary
-    response["llm_meta"] = _run_llm_meta
+    # A2: _apply_edit already sets response["llm_meta"], normally to this same
+    # _run_llm_meta object -- except when the apply hit the memory-full path,
+    # where it is a distinct copy carrying result_code=memory_full/
+    # memory_consolidation_exhausted. Only fall back to _run_llm_meta for the
+    # early-return paths inside _apply_edit that do not set the key at all
+    # (guardrail rejection, backup failure, etc.), so this never overwrites
+    # that override.
+    response["llm_meta"] = response.get("llm_meta", _run_llm_meta)
     return response
 
 
@@ -5025,6 +5083,23 @@ def _apply_edit(
         if staged
         else ("applied" if apply_result.get("success") else "error")
     )
+    # A2: a full memory store is its own result, not a generic error. The
+    # journaled ``outcome`` stays "error" -- ``outcome`` drives ledger/audit
+    # verdict logic and gaining a new member would change that -- but the
+    # response's llm_meta gets a specific result_code so the cause can be
+    # counted and told apart from any other apply failure. llm_meta itself is
+    # journal-immutable (frozen at prepare() time, before this apply ran), so
+    # this cannot be written into the durable record; it is exposed on the
+    # in-memory response only.
+    if kind == "memory" and outcome == "error":
+        memory_result_code = _memory_full_result_code(apply_result)
+        if memory_result_code:
+            llm_meta = dict(llm_meta or {})
+            llm_meta["result_code"] = memory_result_code
+            used, limit = _memory_full_usage(apply_result)
+            if used is not None and limit is not None:
+                llm_meta["memory_used"] = used
+                llm_meta["memory_limit"] = limit
     try:
         finalized = journal.finalize(
             entry_id,
@@ -5119,6 +5194,13 @@ def _apply_edit(
         # The daily budget counts edits, so a transaction reports each applied or
         # reserved edit rather than one proposal.
         "edits_applied": 1 if success else 0,
+        # A2: memory_full/memory_consolidation_exhausted (when detected) lives
+        # here rather than in the journal, since llm_meta is immutable after
+        # journal.prepare(). Identical to the caller's shared run meta unless
+        # this specific apply hit the memory-full path, in which case it is a
+        # distinct dict -- the run-level meta the caller also holds must not be
+        # mutated by one edit's outcome.
+        "llm_meta": llm_meta,
     }
     if success:
         response["journal_id"] = entry_id
