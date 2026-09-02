@@ -20475,13 +20475,21 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-qm", "stock base")
         self.head = self._git("rev-parse", "--short=10", "HEAD").stdout.decode().strip()
-        # A patch guaranteed to apply: diff the checkout against itself, then
-        # restore. Written OUTSIDE the checkout, or it reads as untracked work.
-        self._write_markers()
+        self.patch_file = self._generate_patch("generated-route.patch")
+
+    def _generate_patch(self, name: str, rels=None) -> Path:
+        """A patch guaranteed to apply: diff the checkout against itself.
+
+        Written OUTSIDE the checkout, or it reads as untracked work. ``rels``
+        limits it to a subset, which is what makes a reverse of a partially
+        patched host succeed.
+        """
+        self._write_markers(rels)
         diff = self._git("diff").stdout.decode("utf-8")
         self._git("checkout", "-q", "--", ".")
-        self.patch_file = self.root / "generated-route.patch"
-        self.patch_file.write_text(diff, encoding="utf-8")
+        path = self.root / name
+        path.write_text(diff, encoding="utf-8")
+        return path
 
     def _write_markers(self, rels=None) -> None:
         import install
@@ -20735,22 +20743,88 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertIn("overwrites the current versions", joined)
         self.assertNotIn("byte-for-byte", joined)
 
-    def test_a_partial_host_is_backed_up_before_the_reverse_touches_it(self):
-        """The tidy-up reverse is a host mutation; backup-before-edit has no exception."""
+    def test_a_partial_host_that_fails_mid_run_is_still_fully_restorable(self):
+        """The assertion that matters: not "a zip exists" but "--rollback works".
+
+        A partial host is reversed before the patch is applied, and both steps used
+        to run before any metadata existed. Measured on the pre-fix code: the
+        user's three patched files were reverted, two orphan zips were written, no
+        metadata was recorded, and --rollback answered "nothing to roll back".
+        """
         import install
 
-        self._write_markers(rels=list(install.PATCH_FILES[:3]))
+        three = list(install.PATCH_FILES[:3])
+        # A patch covering exactly the patched files, so the reverse succeeds and
+        # really does mutate the host -- the state this test is about.
+        partial_patch = self._generate_patch("generated-partial.patch", rels=three)
+        self._write_markers(rels=three)
+        before = self._target_snapshot()
         mdir = install.metadata_dir(self.src)
-        with self._as_stock_host():
+
+        with self._as_stock_host(), patch.object(install, "PATCH_FILE", partial_patch):
             state, _ = install.classify_host(self.src)
-            self.assertEqual(state, "partial")
-            with patch.object(install, "fail", side_effect=SystemExit(1)):
+            self.assertEqual(state, "partial", "fixture is not the state under test")
+            # Fail the run after the reverse has already mutated the host.
+            with patch.object(install, "apply_patch", side_effect=SystemExit(1)):
                 with self.assertRaises(SystemExit):
                     install.do_install(self._args(patch_only=True, plugin_only=False))
+
+        self.assertNotEqual(self._target_snapshot(), before, "the reverse changed nothing")
         self.assertTrue(
-            sorted(mdir.glob("host-backup-*.zip")),
-            "the reverse ran with nothing to restore from",
+            (mdir / install.METADATA_NAME).is_file(),
+            "the host was mutated with no record of how to undo it",
         )
+        self.assertTrue(self._read_metadata()["host"]["backup"])
+
+        install.do_rollback(self._args(plugin_only=False))
+        self.assertEqual(
+            self._target_snapshot(), before,
+            "the user's partial host state was not recoverable",
+        )
+
+    def test_a_failed_apply_leaves_a_working_rollback(self):
+        """Every fail() inside the apply happens with host files already changed."""
+        import install
+
+        before = self._target_snapshot()
+        mdir = install.metadata_dir(self.src)
+
+        def half_apply(src, meta_dir):
+            # What a partially-applied patch looks like from the caller's side.
+            (self.src / install.PATCH_FILES[0]).write_text("HALF = True\n", encoding="utf-8")
+            install.fail("simulated: patch application failed mid-way")
+
+        with self._as_stock_host(), \
+             patch.object(install, "apply_patch", side_effect=half_apply):
+            with self.assertRaises(SystemExit):
+                install.do_install(self._args(patch_only=True, plugin_only=False))
+
+        self.assertNotEqual(self._target_snapshot(), before)
+        self.assertTrue((mdir / install.METADATA_NAME).is_file())
+        install.do_rollback(self._args(plugin_only=False))
+        self.assertEqual(self._target_snapshot(), before, "a half-applied host was not restorable")
+
+    def test_a_patch_that_cannot_apply_leaves_nothing_behind(self):
+        """A refusal must not litter the host with a backup it never needed."""
+        import install
+
+        before = self._target_snapshot()
+        mdir = install.metadata_dir(self.src)
+        unappliable = self.root / "unappliable.patch"
+        unappliable.write_text(
+            "diff --git a/cli.py b/cli.py\n--- a/cli.py\n+++ b/cli.py\n"
+            "@@ -1 +1,2 @@\n-DOES_NOT_EXIST = True\n+MARKER = True\n",
+            encoding="utf-8",
+        )
+        with self._as_stock_host(), patch.object(install, "PATCH_FILE", unappliable), \
+             patch.object(install, "fail", side_effect=SystemExit(1)):
+            with self.assertRaises(SystemExit):
+                install.do_install(self._args(patch_only=True, plugin_only=False))
+        self.assertEqual(self._target_snapshot(), before)
+        self.assertEqual(sorted(mdir.glob("host-backup-*.zip")), [])
+        self.assertFalse((mdir / install.METADATA_NAME).is_file())
+
+
 
     def test_plugin_only_writes_nothing_into_the_host_tree_but_its_own_record(self):
         """The byte-identity check covers 8 files; this covers the whole tree."""

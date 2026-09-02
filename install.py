@@ -329,32 +329,67 @@ def backup_host(src: Path, meta_dir: Path) -> Path:
     return backup_path
 
 
-def apply_patch_atomic(src: Path, meta_dir: Path) -> dict:
-    """Apply the patch via git apply in a temp index-safe way.
+def record_host_backup(src: Path, meta_dir: Path, meta: dict) -> None:
+    """Back up the patch targets and persist the pointer BEFORE mutating the host.
 
-    git is already required (we classified via HEAD); `git apply` is used on
-    every platform the host itself supports. Files are written through temp
-   +rename by git, keeping the mutation atomic per file.
+    Every failure between a host mutation and the end of the run used to leave a
+    host nothing could undo: the zip was on disk, no metadata referenced it, and
+    --rollback answered "No rollback metadata found; nothing to roll back". Both
+    mutating paths -- the reverse of a partial host and the patch apply itself --
+    now record first, so the fail() that follows is recoverable. Measured before
+    this: a partial host whose apply failed marker verification lost the user's
+    three patched files, wrote two orphan zips, and denied anything had happened.
     """
-    created_before = {rel for rel in ALL_PATCH_CONTENT if not (src / rel).is_file()}
-    backup = backup_host(src, meta_dir)
+    meta["host"] = {
+        "backup": str(backup_host(src, meta_dir)),
+        # Computed here, before the mutation: afterwards they exist.
+        "created_files": sorted(rel for rel in ALL_PATCH_CONTENT if not (src / rel).is_file()),
+    }
+    write_metadata(meta_dir, meta)
+
+
+def check_patch_applies(src: Path) -> None:
+    """Refuse a patch that cannot apply, before anything is written anywhere.
+
+    `git apply --check` mutates nothing, so it belongs ahead of the backup: a run
+    that is going to refuse should not leave a zip and a metadata document behind
+    for a host it never touched. Measured on a real 8.31 tree, where an untracked
+    leftover made the patch unappliable and the run still wrote both.
+    """
     r = run_git(src, "apply", "--check", str(PATCH_FILE))
     if r.returncode != 0:
         fail(f"patch does not apply cleanly; aborting without changes.\n{r.stderr}")
+
+
+def apply_patch(src: Path, meta_dir: Path) -> None:
+    """Apply the route patch, having already recorded a way back.
+
+    git is already required (we classified via HEAD); `git apply` is used on
+    every platform the host itself supports. Files are written through temp +
+    rename by git, keeping the mutation atomic per file. The caller must have
+    called record_host_backup first -- every fail() below leaves host files
+    changed, and the recorded backup is what makes them recoverable.
+    """
+    check_patch_applies(src)
     r = run_git(src, "apply", str(PATCH_FILE))
     if r.returncode != 0:
-        fail(f"patch application failed mid-way; restoring backup.\n{r.stderr}")
-    # verify markers landed everywhere
-    missing = []
-    for rel in PATCH_FILES:
-        f = src / rel
-        marker = FILE_MARKERS.get(rel, PATCHED_MARKER)
-        if not f.is_file() or marker not in f.read_text(encoding="utf-8", errors="replace"):
-            missing.append(rel)
+        fail(
+            "patch application failed mid-way; the host may be half-patched. "
+            f"Restore it with `python install.py --rollback` (backup recorded in "
+            f"{meta_dir / METADATA_NAME}).\n{r.stderr}"
+        )
+    missing = [rel for rel in PATCH_FILES if rel not in applied_patch_files(src)]
     if missing:
         rb = run_git(src, "apply", "-R", str(PATCH_FILE))
-        fail(f"verification failed ({missing}); patch reversed rc={rb.returncode}")
-    return {"backup": str(backup), "created_files": sorted(created_before)}
+        left = applied_patch_files(src)
+        # Read the markers back rather than reporting git's exit code as if it
+        # were the outcome: "patch reversed rc=0" was a claim about the host that
+        # nothing had checked.
+        fail(
+            f"verification failed ({missing}); attempted reverse rc={rb.returncode}, "
+            f"{len(left)}/{len(PATCH_FILES)} files still carry the marker. "
+            f"`python install.py --rollback` restores the recorded backup."
+        )
 
 
 def compile_all(src: Path) -> None:
@@ -752,12 +787,22 @@ def do_install(args) -> None:
         return
     if state == "incompatible":
         fail(f"Incompatible host: {detail}")
+
+    # Built before anything is allowed to touch the host: previous_metadata()
+    # refuses on an unreadable record, and that refusal is only worth having if it
+    # happens while the host is still untouched.
+    mdir = metadata_dir(src)
+    meta: dict = new_metadata(
+        src, previous_metadata(mdir), mode="patch-only" if args.patch_only else "full"
+    )
+    host_backup_recorded = False
+
     if state == "partial":
-        # Backup first: this reverse is a host mutation like any other, and
-        # "backup before edit" has no exception for the tidy-up path. A reverse
-        # that half-applies used to leave a third state with nothing to restore.
-        partial_backup = backup_host(src, metadata_dir(src))
-        say(f"Pre-reverse backup: {partial_backup}")
+        # Record before reversing: this reverse is a host mutation like any
+        # other, and "backup before edit" has no exception for the tidy-up path.
+        record_host_backup(src, mdir, meta)
+        host_backup_recorded = True
+        say(f"Pre-reverse backup recorded: {meta['host']['backup']}")
         rb = run_git(src, "apply", "-R", str(PATCH_FILE))
         say(f"Partial patch state detected; attempted reverse to reach stock (rc={rb.returncode}).")
         state, detail = classify_host(src)
@@ -772,20 +817,16 @@ def do_install(args) -> None:
             "then re-run. Refusing to overwrite user work."
         )
 
-    mdir = metadata_dir(src)
-    meta: dict = new_metadata(
-        src, previous_metadata(mdir), mode="patch-only" if args.patch_only else "full"
-    )
-
     if state == "stock":
         say("Applying host patch (with pre-mutation backup)…")
-        meta["host"] = apply_patch_atomic(src, mdir)
-        # Persist the rollback pointer the moment the host is mutated, not at the
-        # end of the run. Everything after this line can fail() -- compile_all,
-        # install_plugin refusing an incomplete tree, import verification -- and
-        # a patched host whose backup nothing references is a host that cannot be
-        # rolled back at all: --rollback answers "No rollback metadata found".
-        write_metadata(mdir, meta)
+        # Ahead of the backup: a refusal should leave nothing behind at all.
+        check_patch_applies(src)
+        if not host_backup_recorded:
+            # The partial branch already recorded the true pre-run state; keep
+            # that one. A second backup here would capture the reversed tree and
+            # rollback would restore the installer's own intermediate state.
+            record_host_backup(src, mdir, meta)
+        apply_patch(src, mdir)
         compile_all(src)
         say("Host patch applied and compiled.")
     elif state == "patched":
