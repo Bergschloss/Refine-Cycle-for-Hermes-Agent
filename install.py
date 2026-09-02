@@ -393,10 +393,21 @@ def apply_patch(src: Path, meta_dir: Path) -> None:
 
 
 def compile_all(src: Path) -> None:
+    """Byte-compile the patched host files to prove they parse.
+
+    Into a temp directory, not beside the sources: the host tree is the user's,
+    and __pycache__ entries left in it that --rollback does not remove contradict
+    "host restored byte-for-byte from backup". Measured after --patch-only plus
+    --rollback on a throwaway host: 8 .pyc across 5 __pycache__ directories still
+    there, with the run reporting a faithful restore.
+    """
     import py_compile
 
-    for rel in PATCH_FILES:
-        py_compile.compile(str(src / rel), doraise=True)
+    with tempfile.TemporaryDirectory(prefix="refine-compile-") as td:
+        for index, rel in enumerate(PATCH_FILES):
+            py_compile.compile(
+                str(src / rel), cfile=str(Path(td) / f"{index}.pyc"), doraise=True
+            )
 
 
 def python_of(src: Path) -> str:
@@ -600,9 +611,13 @@ def new_metadata(src: Path, previous: dict, *, mode: str) -> dict:
         # true pre-install state; later runs never mutated the host further.
         "host": previous.get("host", {}),
     }
-    for key in ("plugin_dest", "plugin_files"):
-        if previous.get(key):
-            meta[key] = previous[key]
+    # Only while the recorded tree is still there: carrying a stale destination
+    # forward (HERMES_HOME changed between runs, or someone removed the tree by
+    # hand) makes --rollback announce a removal of something already gone.
+    if previous.get("plugin_dest") and Path(previous["plugin_dest"]).is_dir():
+        meta["plugin_dest"] = previous["plugin_dest"]
+        if previous.get("plugin_files"):
+            meta["plugin_files"] = previous["plugin_files"]
     return meta
 
 
@@ -694,6 +709,7 @@ def do_rollback(args) -> None:
     mode = args.plugin_mode or "remove"
     plugin_dest_value = meta.get("plugin_dest")
     plugin_dest = Path(plugin_dest_value) if plugin_dest_value else None
+    keep_record = False
     def _would_delete_this_checkout(dest: Path) -> bool:
         # Equality covers the documented layout (the checkout IS the
         # destination). Containment covers a checkout nested under it, where
@@ -719,17 +735,29 @@ def do_rollback(args) -> None:
             "Rollback removes copies it made, never the source repository. Delete "
             "it yourself if that is what you want."
         )
+        keep_record = True
     elif mode == "remove" and plugin_dest is not None and plugin_dest.is_dir():
         shutil.rmtree(plugin_dest, ignore_errors=True)
         if plugin_dest.exists():
+            # Windows with a running gateway holding a file open is the usual
+            # cause. Deleting the record here would leave a tree on disk that no
+            # later --rollback can find.
             say(f"WARNING: could not fully remove the plugin tree: {plugin_dest}")
+            keep_record = True
         else:
             say(f"Plugin removed: {plugin_dest}")
     elif plugin_dest is not None:
         say(f"Plugin kept in place ({mode}): {plugin_dest}")
+        keep_record = plugin_dest.is_dir()
     else:
         say("No plugin destination in metadata; no plugin files were removed.")
-    (mdir / METADATA_NAME).unlink(missing_ok=True)
+    if keep_record:
+        say(
+            f"Keeping {mdir / METADATA_NAME}: plugin files are still on disk, and the "
+            "record is what a later --rollback needs to find them."
+        )
+    else:
+        (mdir / METADATA_NAME).unlink(missing_ok=True)
     if backup_value and moved_on:
         say(
             f"Rollback complete: host files restored from the backup taken at "
@@ -881,12 +909,15 @@ print("CAPABILITY_OK")
         os.unlink(cap_script)
     say("Capability verified: invocation-bound machinery present and fail-closed.")
 
-    if verified == "unclassified":
-        # The banner is the only line most people read. It must not say the same
-        # thing after an import the installer could not classify as after one it
-        # verified. Exit stays 0: the copy may well be fine, and refusing here
-        # would block installs on hosts whose environment simply cannot import.
-        say("\nINSTALLED, PLUGIN IMPORT NOT VERIFIED. Next steps:")
+    if verified != "verified":
+        # The banner is the only line most people read, so it must not read the
+        # same after an unverified import as after a verified one. "host-unresolved"
+        # counts as unverified HERE specifically: the capability check just above
+        # proved this interpreter resolves the host, so a plugin import that failed
+        # on a host module is a contradiction, not an explanation. Exit stays 0 --
+        # the copy may well be fine, and refusing would block installs whose
+        # environment simply cannot import Hermes.
+        say(f"\nINSTALLED, PLUGIN IMPORT NOT VERIFIED ({verified}). Next steps:")
     else:
         say("\nSUCCESS. Next steps:")
     say("  1. Restart the gateway OUTSIDE its own process:")

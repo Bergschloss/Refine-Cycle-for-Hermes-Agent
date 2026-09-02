@@ -20804,6 +20804,32 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         install.do_rollback(self._args(plugin_only=False))
         self.assertEqual(self._target_snapshot(), before, "a half-applied host was not restorable")
 
+    def test_rollback_keeps_the_record_when_the_plugin_tree_survives(self):
+        """Deleting the record would leave a tree no later rollback can find."""
+        import install
+
+        checkout = self.root / "sacrificial-checkout"
+        checkout.mkdir(parents=True)
+        (checkout / "keep.txt").write_text("x\n", encoding="utf-8")
+        messages = self._rollback_with_plugin_dest(checkout, checkout)
+        self.assertTrue(any("Keeping" in message for message in messages))
+        self.assertTrue(
+            (install.metadata_dir(self.src) / install.METADATA_NAME).is_file(),
+            "the record naming a surviving plugin tree was deleted",
+        )
+
+    def test_compile_all_leaves_no_bytecode_in_the_host_tree(self):
+        """A rollback that reports byte-for-byte must not leave __pycache__ behind."""
+        import install
+
+        with self._as_stock_host(), \
+             patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+        self.assertEqual(
+            [str(p) for p in self.src.rglob("__pycache__")], [],
+            "compile_all left bytecode a rollback does not remove",
+        )
+
     def test_a_patch_that_cannot_apply_leaves_nothing_behind(self):
         """A refusal must not litter the host with a backup it never needed."""
         import install
