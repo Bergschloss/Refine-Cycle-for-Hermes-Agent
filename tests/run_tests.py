@@ -20430,6 +20430,111 @@ class ActiveChatCaptureTests(unittest.TestCase):
         self.assertEqual(breaches, [], "chat was read off the hook thread")
 
 
+class InstallerHostSelectionTests(unittest.TestCase):
+    """Host classification chooses a patch by applicability, never commit ID."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="refine-install-host-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.src = self.root / "hermes"
+        self.assets = self.root / "assets"
+        self.assets.mkdir()
+        self._make_checkout()
+
+    def _make_checkout(self) -> None:
+        import install
+
+        for rel in install.ALL_PATCH_CONTENT:
+            target = self.src / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("BASE = True\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.src)], check=True)
+        subprocess.run(["git", "-C", str(self.src), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(self.src), "config", "user.name", "Refine test"], check=True)
+        subprocess.run(["git", "-C", str(self.src), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.src), "commit", "-qm", "base"], check=True)
+
+    def _patch(self, name: str, *, applies: bool = True) -> Path:
+        target = self.src / "hermes_cli" / "plugins.py"
+        if applies:
+            target.write_text("BASE = True\nplugin_invocation_scope = True\n", encoding="utf-8")
+            diff = subprocess.run(
+                ["git", "-C", str(self.src), "diff"], capture_output=True, check=True
+            ).stdout
+            subprocess.run(["git", "-C", str(self.src), "checkout", "-q", "--", "."], check=True)
+            content = diff.decode("utf-8")
+        else:
+            content = (
+                "diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py\n"
+                "--- a/hermes_cli/plugins.py\n+++ b/hermes_cli/plugins.py\n"
+                "@@ -1 +1,2 @@\n-DOES_NOT_EXIST = True\n+plugin_invocation_scope = True\n"
+            )
+        patch_file = self.assets / name
+        patch_file.write_text(content, encoding="utf-8")
+        return patch_file
+
+    def test_the_version_prefix_is_not_a_gate(self):
+        """A refusal must be based on attempted patches, not the commit ID."""
+        import install
+
+        impossible = self._patch("invocation-route-v2099.1.1.patch", applies=False)
+        with patch.object(install, "patch_candidates", return_value=[impossible], create=True):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "incompatible")
+        self.assertNotIn(
+            "unsupported base", detail,
+            "host refused on its commit id rather than on whether a patch applies",
+        )
+        self.assertIn("tried: invocation-route-v2099.1.1.patch", detail)
+
+    def test_a_base_the_patch_fits_is_installable(self):
+        import install
+
+        candidate = self._patch("invocation-route-v2026.8.31.patch")
+        with patch.object(install, "patch_candidates", return_value=[candidate], create=True):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "stock")
+        self.assertIn(candidate.name, detail)
+
+    def test_the_more_specific_patch_wins_when_both_apply(self):
+        import install
+
+        older = self._patch("invocation-route-v2026.9.2.patch")
+        newer = self._patch("invocation-route-v2026.10.1.patch")
+        with patch.object(install, "patch_candidates", return_value=[newer, older], create=True):
+            self.assertEqual(install.select_patch(self.src), newer)
+
+    def test_bundled_patches_are_ordered_newest_first(self):
+        import install
+
+        names = [path.name for path in install.patch_candidates()]
+        self.assertLess(names.index("invocation-route-v2026.8.31.patch"), names.index("invocation-route-v2026.8.16.patch"))
+        synthetic = [Path("invocation-route-v2026.9.2.patch"), Path("invocation-route-v2026.10.1.patch")]
+        self.assertEqual(
+            sorted(synthetic, key=install._patch_sort_key, reverse=True)[0].name,
+            "invocation-route-v2026.10.1.patch",
+        )
+
+    def test_user_modified_targets_are_dirty_not_incompatible(self):
+        import install
+
+        candidate = self._patch("invocation-route-v2026.8.31.patch")
+        (self.src / "hermes_cli" / "plugins.py").write_text("USER_CHANGE = True\n", encoding="utf-8")
+        with patch.object(install, "patch_candidates", return_value=[candidate], create=True):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "dirty")
+        self.assertIn("user-modified", detail)
+
+    def test_no_bundled_patches_refuses_honestly(self):
+        import install
+
+        with patch.object(install, "patch_candidates", return_value=[], create=True):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "incompatible")
+        self.assertIn("none bundled", detail)
+
+
 class InstallerPluginContentTests(unittest.TestCase):
     """What install.py copies must be a plugin that actually runs.
 
