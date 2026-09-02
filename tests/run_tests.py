@@ -15734,6 +15734,59 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn("memory_used", result["llm_meta"])
         self.assertNotIn("memory_limit", result["llm_meta"])
 
+    def test_the_human_facing_message_reports_memory_pressure(self):
+        """B4 put used/limit on llm_meta, where only the AGENT reads them.
+
+        ``/refine`` renders ``message`` and nothing else, so the operator who
+        asked to be shown how full memory is at every write was the one party who
+        could not see it. The point of the number is a reminder for a human.
+        """
+        FakeHost.memory_entries[:] = ["existing"]
+        FakeHost.memory_char_limit = 500
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "visible-pressure",
+            "content": "a brand new fact", "reason": "why", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        used = result["llm_meta"]["memory_used"]
+        self.assertIn(f"memory {used}/500", result["message"])
+
+    def test_a_skill_edit_message_gains_no_memory_clause(self):
+        """Both directions: only a memory write reports memory."""
+        result = self.run_proposal(skill_proposal("no-memory-clause"))
+        self.assertTrue(result["success"])
+        self.assertNotIn("| memory ", result["message"])
+
+    def test_a_host_with_unreadable_memory_config_reports_no_number(self):
+        """No fields means no clause -- never a guessed or half-rendered number."""
+        with patch.object(core, "_memory_usage", return_value=(None, None)):
+            result = self.run_proposal({
+                "action": "create", "kind": "memory", "name": "no-number",
+                "content": "a fact with no host memory config available",
+                "reason": "why", "evidence": [],
+            })
+        self.assertTrue(result["success"])
+        self.assertNotIn("| memory ", result["message"])
+
+    def test_the_lesson_notification_reports_memory_pressure(self):
+        """The notification is the most visible surface, so it carries it too.
+
+        Same two llm_meta fields, so the message and the notification cannot
+        disagree about how full the store is.
+        """
+        FakeHost.memory_entries[:] = ["existing"]
+        FakeHost.memory_char_limit = 500
+        with patch.object(core._notify, "notify") as sent:
+            result = self.run_proposal({
+                "action": "create", "kind": "memory", "name": "notified-pressure",
+                "content": "a brand new fact", "reason": "why", "evidence": [],
+            })
+        self.assertTrue(result["success"])
+        self.assertTrue(sent.called, "an applied edit must notify")
+        body = sent.call_args[0][0]
+        used = result["llm_meta"]["memory_used"]
+        self.assertIn(f"{used}/500", body)
+
     def test_dry_run_preview_refuses_an_over_long_memory_entry(self):
         """The length ceiling lived only in llm._finalize_edit.
 

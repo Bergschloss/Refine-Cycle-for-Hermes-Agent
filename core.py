@@ -3811,8 +3811,36 @@ def _set_subagent_lifecycle_provider(provider: Optional[Any]) -> None:
 
 _LESSON_BODY = "♾️ Refine Cycle — new lesson learned"
 
+# When the store is this full, the notification says so in words as well as in
+# numbers. A percentage rather than a character count, because the limit is the
+# host's to choose and refine must stay agnostic about its value.
+_MEMORY_TIGHT_PERCENT = 90
 
-def _notify_lesson(active_chat=None) -> None:
+
+def _lesson_body(used: Optional[int] = None, limit: Optional[int] = None) -> str:
+    """The lesson line, carrying memory pressure when the host reported it.
+
+    The notification is the most visible surface there is -- more visible than
+    ``/refine`` output, which a user has to go and ask for -- so it carries the
+    same two numbers the response message does, from the same llm_meta fields.
+    The point of the number is to remind a human that memory is finite.
+
+    Absent or unreadable usage yields the bare line rather than a guessed number:
+    a host whose memory config cannot be read is reported as silence.
+    """
+    if not (isinstance(used, int) and isinstance(limit, int) and limit > 0):
+        return _LESSON_BODY
+    body = f"{_LESSON_BODY} (memory {used}/{limit}"
+    if used * 100 >= limit * _MEMORY_TIGHT_PERCENT:
+        body += ", getting tight"
+    return body + ")"
+
+
+def _notify_lesson(
+    active_chat=None,
+    used: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> None:
     """Tell the user a refine edit landed. Only ever called for outcome=applied.
 
     The durable journal entry is the source of truth and already exists by the
@@ -3829,7 +3857,7 @@ def _notify_lesson(active_chat=None) -> None:
     the message goes there, otherwise notify falls back to a configured target.
     """
     try:
-        _notify.notify(_LESSON_BODY, active_chat)
+        _notify.notify(_lesson_body(used, limit), active_chat)
     except Exception:
         logger.debug("refine notify: lesson message failed", exc_info=True)
 
@@ -5523,7 +5551,11 @@ def _apply_edit(
         # not recorded. Only outcome=applied — a pending_approval edit has NOT
         # landed, so "lesson learned" would be a lie. Failure is logged and
         # ignored inside _notify_lesson.
-        _notify_lesson(active_chat=active_chat)
+        _notify_lesson(
+            active_chat=active_chat,
+            used=(llm_meta or {}).get("memory_used"),
+            limit=(llm_meta or {}).get("memory_limit"),
+        )
 
     message = (
         f"done ({time.time() - started:.1f}s) | action={action} kind={kind} "
@@ -5550,6 +5582,19 @@ def _apply_edit(
         message += f" | pending_id={pending_id}"
     if apply_result.get("error"):
         message += f" | error={scrub_text(str(apply_result['error']))[:100]}"
+    # The operator sees ``message`` and nothing else -- ``/refine`` renders no
+    # other field -- so the party who asked to be shown how full memory is at
+    # every write was the only one who could not see it. A2 (store full) and B4
+    # (applied) put the same two fields on llm_meta, so one render covers both a
+    # write that landed and a write the store refused, and the two surfaces
+    # cannot disagree about the number. Absent fields mean no clause: a host
+    # whose memory config cannot be read is reported as silence, never as a
+    # guessed number.
+    if kind == "memory":
+        used = (llm_meta or {}).get("memory_used")
+        limit = (llm_meta or {}).get("memory_limit")
+        if isinstance(used, int) and isinstance(limit, int) and limit > 0:
+            message += f" | memory {used}/{limit} ({used * 100 // limit}%)"
 
     success = bool(apply_result.get("success"))
     response: Dict[str, Any] = {
