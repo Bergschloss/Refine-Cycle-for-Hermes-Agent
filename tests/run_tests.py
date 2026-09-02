@@ -20431,20 +20431,66 @@ class ActiveChatCaptureTests(unittest.TestCase):
 
 
 class InstallerPluginOnlyTests(unittest.TestCase):
-    """``--plugin-only`` must never enter the host-patching path."""
+    """``--plugin-only`` must never enter the host-patching path.
+
+    The fixture is a real git checkout that the installer classifies as ``stock``,
+    plus a route patch that genuinely applies to it, so "the host is byte-identical
+    afterwards" is an assertion that CAN fail -- and
+    test_the_same_stock_host_is_patched_without_the_flag proves it does. An earlier
+    version of these tests mocked classify_host to raise instead, which made the
+    byte-identity check a tautology: no path writes host files without classifying
+    first, and the fixture was not even a git checkout, so the unfixed installer
+    refused it as incompatible rather than patching it.
+    """
 
     def setUp(self):
-        import install
-
         self.temp = tempfile.TemporaryDirectory(prefix="refine-plugin-only-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.src = self.root / "hermes"
         self.home = self.root / "hermes-home"
-        for rel in install.PATCH_FILES:
+        self._make_stock_checkout()
+
+    def _git(self, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(self.src), *args], capture_output=True, check=True
+        )
+
+    def _make_stock_checkout(self) -> None:
+        import install
+
+        for rel in install.ALL_PATCH_CONTENT:
             target = self.src / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("BASE = True\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.src)], check=True)
+        self._git("config", "user.email", "test@example.invalid")
+        self._git("config", "user.name", "Refine test")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "stock base")
+        self.head = self._git("rev-parse", "--short=10", "HEAD").stdout.decode().strip()
+        # A patch guaranteed to apply: diff the checkout against itself, then
+        # restore. Written OUTSIDE the checkout, or it reads as untracked work.
+        self._write_markers()
+        diff = self._git("diff").stdout.decode("utf-8")
+        self._git("checkout", "-q", "--", ".")
+        self.patch_file = self.root / "generated-route.patch"
+        self.patch_file.write_text(diff, encoding="utf-8")
+
+    def _write_markers(self, rels=None) -> None:
+        import install
+
+        for rel in rels if rels is not None else install.PATCH_FILES:
+            marker = install.FILE_MARKERS.get(rel, install.PATCHED_MARKER)
+            (self.src / rel).write_text(f"BASE = True\n{marker} = True\n", encoding="utf-8")
+
+    def _as_stock_host(self):
+        """Make the real classify_host see this fixture as a supported stock base."""
+        import install
+
+        return patch.multiple(
+            install, EXPECTED_BASE_PREFIX=self.head[:8], PATCH_FILE=self.patch_file
+        )
 
     def _args(self, *, patch_only: bool = False, plugin_only: bool = True):
         return types.SimpleNamespace(
@@ -20457,32 +20503,94 @@ class InstallerPluginOnlyTests(unittest.TestCase):
 
         return {rel: (self.src / rel).read_bytes() for rel in install.PATCH_FILES}
 
-    def test_plugin_only_installs_without_touching_a_stock_host(self):
+    def _read_metadata(self) -> dict:
+        import install
+
+        return json.loads(
+            (install.metadata_dir(self.src) / install.METADATA_NAME).read_text(encoding="utf-8")
+        )
+
+    def test_the_fixture_is_a_stock_host_the_patch_fits(self):
+        """Precondition for every byte-identity assertion below."""
+        import install
+
+        with self._as_stock_host():
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "stock", detail)
+        self.assertEqual(
+            install.run_git(self.src, "apply", "--check", str(self.patch_file)).returncode, 0
+        )
+
+    def test_plugin_only_leaves_a_stock_host_byte_identical(self):
         import install
 
         before = self._target_snapshot()
         messages: list[str] = []
-        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
-             patch.object(install, "classify_host", side_effect=AssertionError("must not classify")), \
-             patch.object(install, "say", messages.append):
-            install.do_install(self._args())
-        self.assertEqual(self._target_snapshot(), before, "--plugin-only must not patch host files")
+        try:
+            # finally, not after: the unfixed installer patches the host and then
+            # dies in capability verification, and the mutation is the finding --
+            # so the byte-identity check has to run even on the way out.
+            with self._as_stock_host(), \
+                 patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+                 patch.object(install, "say", messages.append):
+                install.do_install(self._args())
+        finally:
+            self.assertEqual(
+                self._target_snapshot(), before, "--plugin-only must not patch host files"
+            )
+        self.assertEqual(install.applied_patch_files(self.src), [])
         self.assertTrue((self.home / "plugins" / "refine" / "plugin.yaml").is_file())
-        self.assertTrue((install.metadata_dir(self.src) / install.METADATA_NAME).is_file())
+        self.assertEqual(self._read_metadata()["mode"], "plugin-only")
         self.assertTrue(any("llm_invocation_unavailable" in message for message in messages))
+        self.assertTrue(any("0/8 patch targets" in message for message in messages))
         self.assertFalse(any("Capability verified" in message for message in messages))
 
-    def test_plugin_only_leaves_a_route_marked_host_unchanged(self):
+    def test_the_same_stock_host_is_patched_without_the_flag(self):
+        """Both directions: the fixture really is patchable, so the check above bites."""
         import install
 
-        route_file = self.src / "hermes_cli" / "plugins.py"
-        route_file.write_text(f"{install.PATCHED_MARKER} = True\n", encoding="utf-8")
         before = self._target_snapshot()
+        with self._as_stock_host(), \
+             patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+            state, detail = install.classify_host(self.src)
+        self.assertNotEqual(self._target_snapshot(), before)
+        self.assertEqual(state, "patched", detail)
+        self.assertEqual(self._read_metadata()["mode"], "patch-only")
+
+    def test_plugin_only_never_classifies_the_host(self):
+        """Belt to the byte-identity brace: the host-patching path is not entered."""
+        import install
+
         with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
              patch.object(install, "classify_host", side_effect=AssertionError("must not classify")):
             install.do_install(self._args())
-        self.assertEqual(self._target_snapshot(), before)
         self.assertTrue((self.home / "plugins" / "refine" / "plugin.yaml").is_file())
+
+    def test_plugin_only_on_a_fully_patched_host_does_not_warn(self):
+        import install
+
+        self._write_markers()
+        before = self._target_snapshot()
+        messages: list[str] = []
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "say", messages.append):
+            install.do_install(self._args())
+        self.assertEqual(self._target_snapshot(), before)
+        self.assertFalse(any("llm_invocation_unavailable" in message for message in messages))
+        self.assertTrue(any("capability present on all 8" in message for message in messages))
+
+    def test_plugin_only_reports_a_partially_patched_host(self):
+        """plugins.py alone carrying the marker is not a working route."""
+        import install
+
+        self._write_markers(rels=["hermes_cli/plugins.py"])
+        messages: list[str] = []
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "say", messages.append):
+            install.do_install(self._args())
+        self.assertTrue(any("1/8 patch targets" in message for message in messages))
+        self.assertTrue(any("llm_invocation_unavailable" in message for message in messages))
 
     def test_patch_only_and_plugin_only_are_rejected_together(self):
         import install
@@ -20494,16 +20602,78 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertIn("--patch-only", message)
         self.assertIn("--plugin-only", message)
 
+    def test_rollback_refuses_the_install_mode_flags(self):
+        """`--plugin-only --rollback` would have restored the host from the backup."""
+        import install
+
+        with patch.object(install, "fail", side_effect=SystemExit(1)) as fail:
+            with self.assertRaises(SystemExit):
+                install.main(["--rollback", "--plugin-only", "--hermes-src", str(self.src)])
+        message = fail.call_args.args[0]
+        self.assertIn("--rollback", message)
+        self.assertIn("--plugin-only", message)
+
     def test_plugin_only_rollback_removes_only_its_plugin(self):
         import install
 
         before = self._target_snapshot()
-        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
-             patch.object(install, "classify_host", side_effect=AssertionError("must not classify")):
+        messages: list[str] = []
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
             install.do_install(self._args())
-            install.do_rollback(self._args())
+            with patch.object(install, "say", messages.append):
+                install.do_rollback(self._args(plugin_only=False))
         self.assertEqual(self._target_snapshot(), before)
         self.assertFalse((self.home / "plugins" / "refine").exists())
+        self.assertFalse(any("byte-for-byte" in message for message in messages))
+
+    def test_rollback_never_claims_a_host_it_did_not_restore(self):
+        """A patched host with no backup of ours: report, warn, change nothing."""
+        import install
+
+        self._write_markers()
+        before = self._target_snapshot()
+        messages: list[str] = []
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args())
+            with patch.object(install, "say", messages.append):
+                install.do_rollback(self._args(plugin_only=False))
+        self.assertEqual(self._target_snapshot(), before, "rollback must not unpatch a host it never patched")
+        self.assertTrue(any("no Hermes host files were changed by this installer" in m for m in messages))
+        self.assertTrue(any("8/8 host files still carry the route marker" in m for m in messages))
+        self.assertFalse(any("byte-for-byte" in message for message in messages))
+
+    def test_plugin_only_preserves_an_earlier_installs_host_backup(self):
+        """Lose this pointer and every earlier host patch becomes unrollbackable."""
+        import install
+
+        mdir = install.metadata_dir(self.src)
+        mdir.mkdir(parents=True, exist_ok=True)
+        earlier = {
+            "installer_version": 2, "mode": "full",
+            "host": {"backup": str(mdir / "host-backup-EARLIER.zip"), "created_files": []},
+        }
+        (mdir / install.METADATA_NAME).write_text(json.dumps(earlier), encoding="utf-8")
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args())
+        after = self._read_metadata()
+        self.assertEqual(after["host"], earlier["host"])
+        self.assertEqual(after["mode"], "plugin-only")
+
+    def test_unreadable_metadata_is_refused_not_overwritten(self):
+        """Overwriting it strands the backup zip it is the only pointer to."""
+        import install
+
+        mdir = install.metadata_dir(self.src)
+        mdir.mkdir(parents=True, exist_ok=True)
+        corrupt = mdir / install.METADATA_NAME
+        corrupt.write_text('{"host": {"backup": "/tmp/x.zip"', encoding="utf-8")
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "fail", side_effect=SystemExit(1)) as fail:
+            with self.assertRaises(SystemExit):
+                install.do_install(self._args())
+        self.assertIn("does not parse as JSON", fail.call_args.args[0])
+        self.assertEqual(corrupt.read_text(encoding="utf-8"), '{"host": {"backup": "/tmp/x.zip"')
+
 
 
 class InstallerPluginContentTests(unittest.TestCase):

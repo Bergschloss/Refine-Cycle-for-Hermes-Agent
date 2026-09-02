@@ -182,20 +182,32 @@ def git_head_short(repo: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def applied_patch_files(src: Path) -> list[str]:
+    """Patch targets that carry their own applied-marker, read off disk.
+
+    The single source of truth for "is the host capability there", shared by
+    classify_host and by the paths that report host state without classifying.
+    Checking only hermes_cli/plugins.py answers a narrower question and calls a
+    partially patched host healthy.
+    """
+    applied = []
+    for rel in PATCH_FILES:
+        f = src / rel
+        if not f.is_file():
+            continue
+        body = f.read_text(encoding="utf-8", errors="replace")
+        if FILE_MARKERS.get(rel, PATCHED_MARKER) in body:
+            applied.append(rel)
+    return applied
+
+
 def classify_host(src: Path) -> tuple[str, str]:
     """Return (state_class, detail). States: stock, patched, partial, dirty, incompatible."""
     head = git_head_short(src)
     plugins_py = src / "hermes_cli" / "plugins.py"
     text = plugins_py.read_text(encoding="utf-8", errors="replace")
     has_marker = PATCHED_MARKER in text
-    def _applied(rel: str) -> bool:
-        f = src / rel
-        if not f.is_file():
-            return False
-        body = f.read_text(encoding="utf-8", errors="replace")
-        return FILE_MARKERS.get(rel, PATCHED_MARKER) in body
-
-    applied_count = sum(1 for rel in PATCH_FILES if _applied(rel))
+    applied_count = len(applied_patch_files(src))
     if head is None:
         return ("incompatible", "not a git checkout; refusing to patch blind")
     if not head.startswith(EXPECTED_BASE_PREFIX) and not has_marker:
@@ -370,6 +382,46 @@ def metadata_dir(src: Path) -> Path:
     return src / ".refine-install"
 
 
+def previous_metadata(meta_dir: Path) -> dict:
+    """Metadata to carry forward, or a refusal when a file exists but will not parse.
+
+    load_metadata() returns None both for "no install yet" and for "the file is
+    corrupt", and the install paths then write a fresh document over it. The
+    corrupt case matters: that file holds the path of the backup that restores
+    the pre-install host, so overwriting it strands the backup and the next
+    --rollback finds no host block at all. Refuse instead of quietly discarding
+    the only rollback pointer.
+    """
+    path = meta_dir / METADATA_NAME
+    meta = load_metadata(meta_dir)
+    if meta is None and path.is_file():
+        fail(
+            f"{path} exists but does not parse as JSON. It records the backup that "
+            "restores this host, so the installer will not overwrite it. Move it "
+            "aside deliberately (accepting the loss of rollback) and re-run."
+        )
+    return meta or {}
+
+
+def new_metadata(src: Path, previous: dict, *, mode: str) -> dict:
+    """Fresh install metadata. One builder so the modes cannot drift apart.
+
+    ``mode`` is what lets a later --rollback tell a plugin-only run, which never
+    touches the host, from a full install on an already-patched host: both leave
+    the host block empty, and only one of them means "the host was never ours".
+    """
+    return {
+        "installer_version": 2,
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "hermes_src": str(src),
+        "base_head": git_head_short(src),
+        "mode": mode,
+        # Preserve the FIRST backup across repeat installs: it restores the
+        # true pre-install state; later runs never mutated the host further.
+        "host": previous.get("host", {}),
+    }
+
+
 def do_status(args) -> None:
     src = find_hermes_src(args.hermes_src)
     state, detail = classify_host(src)
@@ -411,7 +463,24 @@ def do_rollback(args) -> None:
                     target.unlink()
                     say(f"Removed installer-created file: {rel}")
     else:
-        say("No host backup in metadata; no Hermes host files were changed.")
+        # Say only what the metadata proves: this installer applied no host
+        # patch. Whether the host carries the route from somewhere else
+        # (install.sh, a manual git apply) is not ours to claim or undo.
+        say("No host backup in metadata; no Hermes host files were changed by this installer.")
+        orphans = sorted(p.name for p in mdir.glob("host-backup-*.zip"))
+        if orphans:
+            say(
+                f"WARNING: {orphans} exist in {mdir} but no metadata references them. "
+                "Nothing was restored from them and they are left in place; if the "
+                "host needs reverting, use the newest one or `git apply -R` by hand."
+            )
+        marked = applied_patch_files(src)
+        if marked:
+            say(
+                f"Note: {len(marked)}/{len(PATCH_FILES)} host files still carry the "
+                f"route marker (recorded install mode: {meta.get('mode') or 'unknown'}). "
+                "The host is left exactly as it is."
+            )
 
     # plugin removal (diagnostic-only mode keeps files, removes tool registration)
     mode = args.plugin_mode or "remove"
@@ -438,14 +507,7 @@ def do_install(args) -> None:
     src = find_hermes_src(args.hermes_src)
     if args.plugin_only:
         mdir = metadata_dir(src)
-        previous = load_metadata(mdir) or {}
-        meta: dict = {
-            "installer_version": 2,
-            "installed_at": datetime.now(timezone.utc).isoformat(),
-            "hermes_src": str(src),
-            "base_head": git_head_short(src),
-            "host": previous.get("host", {}),
-        }
+        meta: dict = new_metadata(src, previous_metadata(mdir), mode="plugin-only")
         say("--plugin-only: skipping host classification and host patching.")
         say("Installing Refine plugin…")
         dest = install_plugin(meta)
@@ -453,13 +515,16 @@ def do_install(args) -> None:
         verify_plugin_imports(Path(dest), python_of(src), src)
         write_metadata(mdir, meta)
         say(f"Metadata → {mdir / METADATA_NAME}")
-        route_file = src / "hermes_cli" / "plugins.py"
-        route_present = route_file.is_file() and PATCHED_MARKER in route_file.read_text(
-            encoding="utf-8", errors="replace"
-        )
-        if not route_present:
+        # Report the host across every patch target, not just plugins.py: a
+        # partially patched host has the marker there and still cannot route,
+        # and staying silent about it is the bug this flag work set out to end.
+        applied = applied_patch_files(src)
+        if len(applied) == len(PATCH_FILES):
+            say(f"Host capability present on all {len(PATCH_FILES)} patch targets; left untouched.")
+        else:
             say(
-                "Host capability is absent: refine_run will return "
+                f"Host capability is incomplete ({len(applied)}/{len(PATCH_FILES)} patch "
+                "targets carry the marker): refine_run will return "
                 "llm_invocation_unavailable until --patch-only is run."
             )
         say("Done (--plugin-only).")
@@ -490,16 +555,9 @@ def do_install(args) -> None:
         )
 
     mdir = metadata_dir(src)
-    previous = load_metadata(mdir) or {}
-    meta: dict = {
-        "installer_version": 2,
-        "installed_at": datetime.now(timezone.utc).isoformat(),
-        "hermes_src": str(src),
-        "base_head": git_head_short(src),
-        # Preserve the FIRST backup across repeat installs: it restores the
-        # true pre-install state; later runs never mutated the host further.
-        "host": previous.get("host", {}),
-    }
+    meta: dict = new_metadata(
+        src, previous_metadata(mdir), mode="patch-only" if args.patch_only else "full"
+    )
 
     if state == "stock":
         say("Applying host patch (with pre-mutation backup)…")
@@ -568,6 +626,17 @@ def main(argv: list[str]) -> None:
     ap.add_argument("--plugin-mode", choices=["remove", "keep"], default="remove",
                     help="what to do with plugin files during rollback")
     args = ap.parse_args(argv)
+
+    # --rollback undoes whatever the recorded install changed; there is no
+    # host-only or plugin-only rollback. Accepting the flags silently would let
+    # `--plugin-only --rollback` restore the host from the backup zip -- an
+    # un-patch of the live core, asked for by a user who said "plugin only".
+    if args.rollback and (args.patch_only or args.plugin_only):
+        fail(
+            "--rollback cannot be combined with --patch-only or --plugin-only: "
+            "rollback reverses whatever the recorded install did. Use --plugin-mode "
+            "keep to leave the plugin files in place."
+        )
 
     if args.status:
         do_status(args)
