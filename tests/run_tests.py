@@ -20430,6 +20430,82 @@ class ActiveChatCaptureTests(unittest.TestCase):
         self.assertEqual(breaches, [], "chat was read off the hook thread")
 
 
+class InstallerPluginOnlyTests(unittest.TestCase):
+    """``--plugin-only`` must never enter the host-patching path."""
+
+    def setUp(self):
+        import install
+
+        self.temp = tempfile.TemporaryDirectory(prefix="refine-plugin-only-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.src = self.root / "hermes"
+        self.home = self.root / "hermes-home"
+        for rel in install.PATCH_FILES:
+            target = self.src / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("BASE = True\n", encoding="utf-8")
+
+    def _args(self, *, patch_only: bool = False, plugin_only: bool = True):
+        return types.SimpleNamespace(
+            hermes_src=str(self.src), patch_only=patch_only,
+            plugin_only=plugin_only, plugin_mode="remove",
+        )
+
+    def _target_snapshot(self) -> dict[str, bytes]:
+        import install
+
+        return {rel: (self.src / rel).read_bytes() for rel in install.PATCH_FILES}
+
+    def test_plugin_only_installs_without_touching_a_stock_host(self):
+        import install
+
+        before = self._target_snapshot()
+        messages: list[str] = []
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "classify_host", side_effect=AssertionError("must not classify")), \
+             patch.object(install, "say", messages.append):
+            install.do_install(self._args())
+        self.assertEqual(self._target_snapshot(), before, "--plugin-only must not patch host files")
+        self.assertTrue((self.home / "plugins" / "refine" / "plugin.yaml").is_file())
+        self.assertTrue((install.metadata_dir(self.src) / install.METADATA_NAME).is_file())
+        self.assertTrue(any("llm_invocation_unavailable" in message for message in messages))
+        self.assertFalse(any("Capability verified" in message for message in messages))
+
+    def test_plugin_only_leaves_a_route_marked_host_unchanged(self):
+        import install
+
+        route_file = self.src / "hermes_cli" / "plugins.py"
+        route_file.write_text(f"{install.PATCHED_MARKER} = True\n", encoding="utf-8")
+        before = self._target_snapshot()
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "classify_host", side_effect=AssertionError("must not classify")):
+            install.do_install(self._args())
+        self.assertEqual(self._target_snapshot(), before)
+        self.assertTrue((self.home / "plugins" / "refine" / "plugin.yaml").is_file())
+
+    def test_patch_only_and_plugin_only_are_rejected_together(self):
+        import install
+
+        with patch.object(install, "fail", side_effect=SystemExit(1)) as fail:
+            with self.assertRaises(SystemExit):
+                install.do_install(self._args(patch_only=True, plugin_only=True))
+        message = fail.call_args.args[0]
+        self.assertIn("--patch-only", message)
+        self.assertIn("--plugin-only", message)
+
+    def test_plugin_only_rollback_removes_only_its_plugin(self):
+        import install
+
+        before = self._target_snapshot()
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "classify_host", side_effect=AssertionError("must not classify")):
+            install.do_install(self._args())
+            install.do_rollback(self._args())
+        self.assertEqual(self._target_snapshot(), before)
+        self.assertFalse((self.home / "plugins" / "refine").exists())
+
+
 class InstallerPluginContentTests(unittest.TestCase):
     """What install.py copies must be a plugin that actually runs.
 
