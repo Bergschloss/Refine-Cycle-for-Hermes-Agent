@@ -20730,7 +20730,13 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         with self._as_stock_host(), \
              patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
             install.do_install(self._args(patch_only=True, plugin_only=False))
-            self.assertEqual(self._read_metadata()["plugin_dest"], str(self.home / "plugins" / "refine"))
+            # Resolved, not string-equal: hermes_home_dir() resolves HERMES_HOME,
+            # and on a Windows runner the temp path arrives in 8.3 form
+            # (C:\Users\RUNNER~1\...) and comes back long (C:\Users\runneradmin\...).
+            self.assertEqual(
+                Path(self._read_metadata()["plugin_dest"]).resolve(),
+                (self.home / "plugins" / "refine").resolve(),
+            )
             install.do_rollback(self._args(plugin_only=False))
         self.assertFalse((self.home / "plugins" / "refine").exists(), "plugin left unremovable")
         self.assertEqual(install.applied_patch_files(self.src), [], "host not rolled back")
