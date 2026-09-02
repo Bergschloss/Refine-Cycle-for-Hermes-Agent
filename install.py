@@ -424,38 +424,82 @@ def do_rollback(args) -> None:
     meta = load_metadata(mdir)
     if not meta:
         fail("No rollback metadata found; nothing to roll back.")
-    backup = Path(meta["host"]["backup"])
-    if not backup.is_file():
-        fail(f"Backup zip missing: {backup}")
-    with tempfile.TemporaryDirectory(prefix="refine-rollback-") as td:
-        with zipfile.ZipFile(backup) as z:
-            z.extractall(td)
-        td_root = Path(td)
-        for rel in PATCH_FILES:
-            restored = td_root / rel
-            target = src / rel
-            if restored.is_file():
-                shutil.copy2(restored, target)
-        for rel in meta["host"].get("created_files", []):
-            target = src / rel
-            if target.is_file():
-                target.unlink()
-                say(f"Removed installer-created file: {rel}")
+    host = meta.get("host") or {}
+    backup_value = host.get("backup")
+    if backup_value:
+        backup = Path(backup_value)
+        if not backup.is_file():
+            fail(f"Backup zip missing: {backup}")
+        with tempfile.TemporaryDirectory(prefix="refine-rollback-") as td:
+            with zipfile.ZipFile(backup) as z:
+                z.extractall(td)
+            td_root = Path(td)
+            for rel in PATCH_FILES:
+                restored = td_root / rel
+                target = src / rel
+                if restored.is_file():
+                    shutil.copy2(restored, target)
+            for rel in host.get("created_files", []):
+                target = src / rel
+                if target.is_file():
+                    target.unlink()
+                    say(f"Removed installer-created file: {rel}")
+    else:
+        say("No host backup in metadata; no Hermes host files were changed.")
+
     # plugin removal (diagnostic-only mode keeps files, removes tool registration)
     mode = args.plugin_mode or "remove"
-    plugin_dest = Path(meta.get("plugin_dest") or "")
-    if mode == "remove" and plugin_dest.is_dir():
+    plugin_dest_value = meta.get("plugin_dest")
+    plugin_dest = Path(plugin_dest_value) if plugin_dest_value else None
+    if mode == "remove" and plugin_dest is not None and plugin_dest.is_dir():
         shutil.rmtree(plugin_dest, ignore_errors=True)
         say(f"Plugin removed: {plugin_dest}")
-    else:
+    elif plugin_dest is not None:
         say(f"Plugin kept in place ({mode}): {plugin_dest}")
+    else:
+        say("No plugin destination in metadata; no plugin files were removed.")
     mdir_r = metadata_dir(src)
     (mdir_r / METADATA_NAME).unlink(missing_ok=True)
-    say("Rollback complete: host restored byte-for-byte from backup.")
+    if backup_value:
+        say("Rollback complete: host restored byte-for-byte from backup.")
+    else:
+        say("Rollback complete.")
 
 
 def do_install(args) -> None:
+    if args.patch_only and args.plugin_only:
+        fail("--patch-only and --plugin-only cannot be used together")
+
     src = find_hermes_src(args.hermes_src)
+    if args.plugin_only:
+        mdir = metadata_dir(src)
+        previous = load_metadata(mdir) or {}
+        meta: dict = {
+            "installer_version": 2,
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "hermes_src": str(src),
+            "base_head": git_head_short(src),
+            "host": previous.get("host", {}),
+        }
+        say("--plugin-only: skipping host classification and host patching.")
+        say("Installing Refine plugin…")
+        dest = install_plugin(meta)
+        say(f"Plugin files → {dest} ({len(meta.get('plugin_files') or [])} files)")
+        verify_plugin_imports(Path(dest), python_of(src), src)
+        write_metadata(mdir, meta)
+        say(f"Metadata → {mdir / METADATA_NAME}")
+        route_file = src / "hermes_cli" / "plugins.py"
+        route_present = route_file.is_file() and PATCHED_MARKER in route_file.read_text(
+            encoding="utf-8", errors="replace"
+        )
+        if not route_present:
+            say(
+                "Host capability is absent: refine_run will return "
+                "llm_invocation_unavailable until --patch-only is run."
+            )
+        say("Done (--plugin-only).")
+        return
+
     state, detail = classify_host(src)
     say(f"Hermes checkout : {src}")
     say(f"Host state      : {state} — {detail}")
