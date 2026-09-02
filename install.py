@@ -711,14 +711,31 @@ def do_rollback(args) -> None:
     plugin_dest = Path(plugin_dest_value) if plugin_dest_value else None
     keep_record = False
     def _would_delete_this_checkout(dest: Path) -> bool:
-        # Equality covers the documented layout (the checkout IS the
-        # destination). Containment covers a checkout nested under it, where
-        # rmtree(dest) takes the repository with it just as thoroughly.
+        """Is rmtree(dest) going to take this checkout with it?
+
+        Both sides resolved and case-folded. Comparing a resolved dest against
+        the raw module global was enough on Linux and wrong on Windows, where a
+        path can arrive in 8.3 form (C:\\Users\\RUNNER~1\\...) and come back long:
+        the guard then returned False and the rmtree went ahead. Equality covers
+        the documented layout (the checkout IS the destination); containment
+        covers a checkout nested under it, which rmtree removes just as
+        thoroughly. Unknowable paths count as "yes": the one guard that keeps
+        Refine from deleting the user's work fails closed.
+        """
+        def _key(path: Path) -> str:
+            return os.path.normcase(str(path))
+
         try:
             resolved = dest.resolve()
+            here = PLUGIN_DIR.resolve()
         except OSError:
-            return False
-        return resolved == PLUGIN_DIR or PLUGIN_DIR.is_relative_to(resolved)
+            return True
+        if _key(resolved) == _key(here):
+            return True
+        try:
+            return _key(here).startswith(_key(resolved) + os.sep)
+        except (TypeError, ValueError):
+            return True
 
     if (
         mode == "remove"
