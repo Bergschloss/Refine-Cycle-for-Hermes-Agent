@@ -1004,7 +1004,7 @@ class RefineTests(unittest.TestCase):
         """
         now = time.time()
         rows = [
-            ("session", "tool", "ERROR: schedule is required for create", "cronjob",
+            ("session", "tool", "ERROR: connection refused to scheduler service", "cronjob",
              now - 200 + index, 1)
             for index in range(3)
         ] + [
@@ -1026,7 +1026,7 @@ class RefineTests(unittest.TestCase):
         # And the snippets shown agree with what was counted, rather than being
         # drawn from a window that no longer holds those failures.
         self.assertTrue(evidence["tool_errors"])
-        self.assertIn("schedule is required", evidence["tool_errors"][-1]["snippet"])
+        self.assertIn("connection refused", evidence["tool_errors"][-1]["snippet"])
 
     def test_failures_inside_the_window_are_counted_once_not_twice(self):
         """Two collection paths over overlapping rows is how double counting starts.
@@ -16401,6 +16401,74 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             patterns.extract_patterns.__defaults__[0],
             patterns.FORMAT_PATTERNS_LIMIT,
         )
+
+    # ── B1: a self-correcting error is not a lesson ───────────────────────
+
+    def test_the_two_known_junk_cases_are_suppressed(self):
+        """The two live examples the spec is built on, both anchored near the
+        message start (a tool's own structured refusal)."""
+        self.assertTrue(
+            patterns.is_self_correcting_error('{"error": "query is required"}')
+        )
+        self.assertTrue(
+            patterns.is_self_correcting_error(
+                '{"error": "content is required for \'replace\' action.", '
+                '"success": false}'
+            )
+        )
+
+    def test_a_real_recurring_failure_naming_required_is_not_suppressed(self):
+        """Both directions: 'required' appearing deep in an unrelated failure
+        (a traceback, a long log) must not be misread as self-correcting.
+
+        Measured against the live corpus this rule is calibrated on: two
+        rejected candidate rules ("did you mean", a usage line) both matched
+        Python's own AttributeError text inside real tracebacks -- a genuine
+        recurring failure, not a self-correcting one. This asserts the
+        anchor that keeps that shape out.
+        """
+        traceback_error = (
+            "Traceback (most recent call last):\n"
+            "  File \"tool.py\", line 42, in run\n"
+            "AttributeError: 'Thing' object has no attribute '__dict__'. "
+            "field is required somewhere downstream in this long message"
+        )
+        self.assertFalse(patterns.is_self_correcting_error(traceback_error))
+
+    def test_self_correcting_errors_are_excluded_from_lesson_candidacy(self):
+        """Gated out of extract_patterns (the aggregation that feeds signal
+        gating and the proposer prompt), not merely flagged."""
+        grouped = patterns.extract_patterns([
+            {"tool": "tool_search", "content": '{"error": "query is required"}',
+             "session_id": "s"},
+            {"tool": "tool_search", "content": '{"error": "query is required"}',
+             "session_id": "s"},
+        ])
+        self.assertEqual(grouped, [])
+
+    def test_a_real_recurring_failure_still_becomes_a_pattern(self):
+        """The other direction: an ordinary repeated failure is unaffected."""
+        grouped = patterns.extract_patterns([
+            {"tool": "http", "content": "connection refused", "session_id": "s"},
+            {"tool": "http", "content": "connection refused", "session_id": "s"},
+        ])
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped[0]["count"], 2)
+
+    def test_a_suppressed_error_still_reaches_the_raw_evidence_lists(self):
+        """A suppressed error must still be VISIBLE: excluded from lesson
+        candidacy, not deleted from evidence. error_count/tool_errors come
+        from evidence collection independently of extract_patterns, so the
+        self-correcting call is still counted and shown there."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", '{"error": "query is required"}', "tool_search", now - 1, 1),
+        ])
+        evidence = core.collect_evidence(session_id="session")
+        self.assertEqual(evidence["error_count"], 1)
+        self.assertEqual(len(evidence["tool_errors"]), 1)
+        # But it produced no pattern for the proposer to act on.
+        self.assertEqual(evidence["error_patterns"], [])
 
     # ── §12 Round 10: deferred session-end queue drain ────────────────────
 

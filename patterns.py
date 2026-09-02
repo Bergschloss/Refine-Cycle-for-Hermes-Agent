@@ -334,6 +334,47 @@ def believable_ts(value: Any, *, now: float) -> Optional[float]:
     return ts
 
 
+# B1: a tool's own self-correcting refusal already states its remedy, so
+# recording it as a "lesson learned" teaches nothing about the agent's
+# behaviour. Measured on the live journal/state.db corpus, the only two
+# examples that exist are ``tool_search``'s ``"query is required"`` and
+# ``memory``'s ``"content is required for 'replace' action."``, both anchored
+# within the message's first dozen characters (a tool's structured refusal,
+# not prose deep in an unrelated error).
+#
+# The spec that motivated this also named two more shapes -- a "did you mean
+# X" suggestion and a usage line. Both were measured against the same corpus
+# and rejected: they matched Python's own ``AttributeError`` text (``... has
+# no attribute 'x'. Did you mean: '__dir__'?``) inside unrelated tracebacks,
+# which is a real recurring failure, not a self-correcting one. Shipping them
+# would have suppressed genuine signal on data this project actually has, so
+# only the measured rule ships; the other two can be added later against a
+# real self-correcting example that needs them.
+_SELF_CORRECTING_REQUIRED_PARAM_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9_]{1,40})\s+is\s+required\b"
+)
+# How close to the start of the message the match must land. A tool's own
+# structured refusal names the missing parameter immediately; "is required"
+# appearing only after this many characters is far more likely to be
+# incidental prose inside a longer, unrelated failure.
+_SELF_CORRECTING_ANCHOR_CHARS = 40
+
+
+def is_self_correcting_error(content: str) -> bool:
+    """Whether an error message states its own remedy, so nothing is learned.
+
+    Applied before the model call: the error text is already in the evidence
+    by the time this runs, so gating it out here costs no tokens. A suppressed
+    error is excluded from lesson candidacy (pattern/fingerprint aggregation)
+    only -- callers keep it in whatever raw "we saw this" list they already
+    maintain, so the pass can still say it happened.
+    """
+    if not content:
+        return False
+    match = _SELF_CORRECTING_REQUIRED_PARAM_RE.search(content)
+    return bool(match) and match.start() <= _SELF_CORRECTING_ANCHOR_CHARS
+
+
 FORMAT_PATTERNS_LIMIT = 8
 
 
@@ -350,6 +391,13 @@ def extract_patterns(
     for item in items:
         content = str(item.get("content") or "")
         if not content:
+            continue
+        if is_self_correcting_error(content):
+            # Excluded from lesson candidacy only. The item still reached
+            # here from evidence collection's raw error_items/tool_errors, so
+            # a caller inspecting those (not this aggregation) can still see
+            # it happened; it is simply never a repeated-failure pattern the
+            # proposer is asked to fix.
             continue
         tool = str(item.get("tool") or "")
         fp = fingerprint(tool, content)
