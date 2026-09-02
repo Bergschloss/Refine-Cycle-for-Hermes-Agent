@@ -42,6 +42,13 @@ logger = logging.getLogger(__name__)
 # same source of truth: JSON-escaped Markdown tokenizes worse than prose, and
 # under-budgeting silently truncates the proposals this limit permits.
 MAX_CONTENT_CHARS = 15000
+
+# B2: a memory entry has a length ceiling. Live distribution (18 entries):
+# median 124 chars, and exactly the 3 over 200 were the ones reviewed as
+# bloated/duplicated -- the hard bar comes from that measurement, not from
+# taste. Absolute, not proportional to the host's configured memory_char_limit:
+# a well-written lesson is ~130 chars whether the store holds 2200 or 4400.
+MEMORY_ENTRY_HARD_LIMIT_CHARS = 200
 # Durable proposal feedback is kept independently of configurable prompt overview
 # lines. Both fields are journaled and later shown to the model, so one limit
 # prevents storage and rendering from silently drifting apart.
@@ -500,7 +507,8 @@ REFINE_SYSTEM_PROMPT = (
     f"{_PROMPT_NOTE_ACTION_GUIDANCE}.\n"
     "7. Choose kind by what the lesson IS, not by how badly it is needed. A durable fact — a "
     "tool's required arguments, a value format, a limit, a name that must be spelled a "
-    "certain way — is kind=memory, stated as one plain sentence. kind=prompt is only for a "
+    "certain way — is kind=memory, stated as one plain sentence, target about 120 characters. "
+    "kind=prompt is only for a "
     "behavioral policy that fits rule 6's closed list. If the lesson matters but no allowed "
     "action form says it, use kind=memory or kind=skill; never bend it into a prompt note.\n"
     "8. Return no_op when no worthwhile edit exists.\n"
@@ -1476,6 +1484,53 @@ def _finalize_edit(
         return _semantic_failure("Name is required for skill and memory create/patch")
     if not content and not (action == "patch" and kind == "skill"):
         return _semantic_failure(f"{action.title()} requires non-empty content")
+
+    # B2: a memory entry has a length ceiling. Applies to kind=memory only --
+    # skills have no such ceiling (a SKILL.md is much larger by design), and a
+    # prompt note already has its own separate limit enforced elsewhere. Do
+    # not reject outright: reuse the existing semantic-retry mechanism for one
+    # shortening attempt, asking for the SAME lesson under the limit. Only a
+    # second failure becomes a refusal, with the distinct code so it can be
+    # counted apart from any other memory apply/validation failure.
+    if (
+        allow_content_retry
+        and kind == "memory"
+        and content
+        and len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS
+    ):
+        retry_text = (
+            instructions
+            + "\n\nThe memory entry you proposed is "
+            + f"{len(content)} characters; the hard limit is "
+            + f"{MEMORY_ENTRY_HARD_LIMIT_CHARS}. Return the SAME lesson, "
+            + "same kind=memory and name, shortened to fit -- one plain "
+            + "sentence, no lost meaning, target about 120 characters."
+        )
+        retry = _ensure_dict(
+            _propose_structured(
+                llm,
+                short,
+                [PluginLlmTextInput(text=retry_text)],
+                target=target,
+            )
+        )
+        if retry is not None and not retry.get("failure"):
+            for key in (
+                "action", "kind", "name", "category", "reason",
+                "expected_outcome", "evidence", "pattern_fingerprint",
+            ):
+                if not retry.get(key) and parsed.get(key):
+                    retry[key] = parsed[key]
+            parsed = retry
+            action, kind, name, content, category = _normalize_fields(parsed)
+        elif retry is not None and retry.get("failure"):
+            return sanitize(retry)
+        if kind == "memory" and content and len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
+            return _semantic_failure(
+                f"Memory entry is {len(content)} characters after one shortening "
+                f"retry; the hard limit is {MEMORY_ENTRY_HARD_LIMIT_CHARS}",
+                failure="memory_entry_too_long",
+            )
 
     initial_evidence = _ensure_list(parsed.get("evidence"))
     initial_fingerprint = _valid_fingerprint(parsed.get("pattern_fingerprint"))

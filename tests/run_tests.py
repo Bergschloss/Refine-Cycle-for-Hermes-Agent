@@ -2224,6 +2224,94 @@ class RefineTests(unittest.TestCase):
         # Fields NOT in retry fall back to original
         self.assertEqual(result["pattern_fingerprint"], "deadbeef1234")
 
+    # ── B2: a memory entry has a length ceiling ───────────────────────────
+
+    def test_oversized_memory_entry_triggers_one_shortening_retry_and_lands(self):
+        """A 260-char memory proposal triggers one retry and lands if compliant."""
+        original_parsed = {
+            "action": "create", "kind": "memory", "name": "long-lesson",
+            "content": "x" * 260,
+            "reason": "repeated failure", "evidence": [],
+        }
+        short_content = "y" * 120
+        model = MockLlm({
+            "action": "create", "kind": "memory", "name": "long-lesson",
+            "content": short_content,
+        })
+        result = llm._finalize_edit(
+            model, "short", "instructions", original_parsed,
+            allow_content_retry=True,
+        )
+        self.assertNotIn("failure", result)
+        self.assertEqual(result["content"], short_content)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_compliant_memory_entry_is_untouched(self):
+        """A 130-char proposal is untouched -- no retry call at all."""
+        content = "z" * 130
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = llm._finalize_edit(
+            model, "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "short-lesson",
+             "content": content, "reason": "r", "evidence": []},
+            allow_content_retry=True,
+        )
+        self.assertNotIn("failure", result)
+        self.assertEqual(result["content"], content)
+        self.assertEqual(len(model.calls), 0)
+
+    def test_oversized_skill_content_is_untouched_by_the_memory_ceiling(self):
+        """A skill proposal of 2000 chars is untouched -- the ceiling is
+        kind=memory only."""
+        content = skill_content("big-skill", "x" * 2000)
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = llm._finalize_edit(
+            model, "short", "instructions",
+            {"action": "create", "kind": "skill", "name": "big-skill",
+             "content": content, "reason": "r", "evidence": []},
+            allow_content_retry=True,
+        )
+        self.assertNotIn("failure", result)
+        self.assertEqual(result["content"], content)
+        self.assertEqual(len(model.calls), 0)
+
+    def test_still_oversized_after_retry_is_refused_with_the_distinct_code(self):
+        """Two failures produce a refusal with the distinct code, not a silent
+        drop -- the retry itself returned another over-limit entry."""
+        original_parsed = {
+            "action": "create", "kind": "memory", "name": "stubborn-lesson",
+            "content": "x" * 260,
+            "reason": "repeated failure", "evidence": [],
+        }
+        model = MockLlm({
+            "action": "create", "kind": "memory", "name": "stubborn-lesson",
+            "content": "y" * 250,
+        })
+        result = llm._finalize_edit(
+            model, "short", "instructions", original_parsed,
+            allow_content_retry=True,
+        )
+        self.assertEqual(result.get("failure"), "memory_entry_too_long")
+        self.assertEqual(len(model.calls), 1)
+
+    def test_memory_length_ceiling_end_to_end_carries_the_result_code(self):
+        """The refusal's code reaches llm_meta.result_code via the same
+        proposal['failure'] convention A2/B1 already rely on. Two structured
+        calls: the initial proposal, then the shortening retry, still too long."""
+        model = MockLlm(
+            {
+                "action": "create", "kind": "memory", "name": "too-long",
+                "content": "x" * 260, "reason": "r", "evidence": [],
+            },
+            {
+                "action": "create", "kind": "memory", "name": "too-long",
+                "content": "y" * 250,
+            },
+        )
+        result = core.refine_run(model, session_id="session")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_entry_too_long")
+
     def test_merge_journal_stats_preserves_reported_model(self):
         """Wave 3.6: entry without llm_meta keeps existing reported_model."""
         import ledger as _ledger
