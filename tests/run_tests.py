@@ -20659,6 +20659,76 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertEqual(after["host"], earlier["host"])
         self.assertEqual(after["mode"], "plugin-only")
 
+    def test_rollback_never_deletes_the_source_checkout(self):
+        """The documented live layout has the checkout AT the install destination."""
+        import install
+
+        mdir = install.metadata_dir(self.src)
+        mdir.mkdir(parents=True, exist_ok=True)
+        (mdir / install.METADATA_NAME).write_text(
+            json.dumps({"mode": "plugin-only", "host": {}, "plugin_dest": str(install.PLUGIN_DIR)}),
+            encoding="utf-8",
+        )
+        messages: list[str] = []
+        # Compared, not asserted absolutely: an installed copy of this tree is not
+        # a git checkout, and the test must not redden for that.
+        git_dir_before = (install.PLUGIN_DIR / ".git").exists()
+        with patch.object(install, "say", messages.append):
+            install.do_rollback(self._args(plugin_only=False))
+        self.assertTrue((install.PLUGIN_DIR / "install.py").is_file(), "rollback deleted the repo")
+        self.assertEqual((install.PLUGIN_DIR / ".git").exists(), git_dir_before)
+        self.assertTrue(any("keeping it" in message for message in messages))
+        self.assertFalse(any("Plugin removed" in message for message in messages))
+
+    def test_rollback_refuses_unreadable_metadata_instead_of_reporting_nothing(self):
+        """A patched host whose record will not parse is not "nothing to roll back"."""
+        import install
+
+        self._write_markers()
+        mdir = install.metadata_dir(self.src)
+        mdir.mkdir(parents=True, exist_ok=True)
+        (mdir / install.METADATA_NAME).write_text('{"host": {"backup"', encoding="utf-8")
+        (mdir / "host-backup-20260101T000000Z.zip").write_bytes(b"")
+        with patch.object(install, "fail", side_effect=SystemExit(1)) as fail:
+            with self.assertRaises(SystemExit):
+                install.do_rollback(self._args(plugin_only=False))
+        message = fail.call_args.args[0]
+        self.assertIn("does not parse as JSON", message)
+        self.assertIn("rollback cannot proceed", message)
+        self.assertIn("host-backup-20260101T000000Z.zip", message)
+        self.assertTrue((mdir / install.METADATA_NAME).is_file(), "the record was destroyed")
+
+    def test_a_patched_host_is_rollbackable_even_if_the_run_dies_later(self):
+        """The backup pointer must be on disk before anything else can fail()."""
+        import install
+
+        before = self._target_snapshot()
+        with self._as_stock_host(), \
+             patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "install_plugin", side_effect=SystemExit(1)):
+            with self.assertRaises(SystemExit):
+                install.do_install(self._args(plugin_only=False))
+        self.assertNotEqual(self._target_snapshot(), before, "the host was not patched at all")
+        self.assertTrue(self._read_metadata()["host"]["backup"], "no rollback pointer recorded")
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_rollback(self._args(plugin_only=False))
+        self.assertEqual(self._target_snapshot(), before, "the host could not be rolled back")
+
+    def test_a_later_patch_only_run_keeps_the_plugin_removable(self):
+        """Dropping plugin_dest left an installed plugin nothing could remove."""
+        import install
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args())
+        self.assertTrue((self.home / "plugins" / "refine" / "plugin.yaml").is_file())
+        with self._as_stock_host(), \
+             patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+            self.assertEqual(self._read_metadata()["plugin_dest"], str(self.home / "plugins" / "refine"))
+            install.do_rollback(self._args(plugin_only=False))
+        self.assertFalse((self.home / "plugins" / "refine").exists(), "plugin left unremovable")
+        self.assertEqual(install.applied_patch_files(self.src), [], "host not rolled back")
+
     def test_unreadable_metadata_is_refused_not_overwritten(self):
         """Overwriting it strands the backup zip it is the only pointer to."""
         import install

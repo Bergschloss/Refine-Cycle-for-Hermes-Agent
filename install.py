@@ -399,35 +399,50 @@ def metadata_dir(src: Path) -> Path:
     return src / ".refine-install"
 
 
-def previous_metadata(meta_dir: Path) -> dict:
-    """Metadata to carry forward, or a refusal when a file exists but will not parse.
+def metadata_or_refuse(meta_dir: Path, *, purpose: str) -> dict | None:
+    """Parsed metadata, or a refusal when the file exists and does not parse.
 
     load_metadata() returns None both for "no install yet" and for "the file is
-    corrupt", and the install paths then write a fresh document over it. The
-    corrupt case matters: that file holds the path of the backup that restores
-    the pre-install host, so overwriting it strands the backup and the next
-    --rollback finds no host block at all. Refuse instead of quietly discarding
-    the only rollback pointer.
+    corrupt", and every caller used to treat the two the same. Both directions of
+    that conflation lose the host: an install writes a fresh document over the
+    corrupt one, stranding the backup zip it was the only pointer to, and a
+    rollback reports "nothing to roll back" on a host that is still patched.
+    Refuse, name the backups that are sitting there, and change nothing.
     """
     path = meta_dir / METADATA_NAME
     meta = load_metadata(meta_dir)
     if meta is None and path.is_file():
+        zips = sorted(p.name for p in meta_dir.glob("host-backup-*.zip"))
         fail(
-            f"{path} exists but does not parse as JSON. It records the backup that "
-            "restores this host, so the installer will not overwrite it. Move it "
-            "aside deliberately (accepting the loss of rollback) and re-run."
+            f"{path} exists but does not parse as JSON, so {purpose} cannot proceed "
+            "safely. It is the only record of the backup that restores this host "
+            f"(backups present: {zips or 'none'}). Restore or move it aside "
+            "deliberately -- accepting the loss of rollback -- and re-run."
         )
-    return meta or {}
+    return meta
+
+
+def previous_metadata(meta_dir: Path) -> dict:
+    """Metadata an install carries forward, refusing rather than overwriting junk."""
+    return metadata_or_refuse(meta_dir, purpose="an install") or {}
 
 
 def new_metadata(src: Path, previous: dict, *, mode: str) -> dict:
     """Fresh install metadata. One builder so the modes cannot drift apart.
 
-    ``mode`` is what lets a later --rollback tell a plugin-only run, which never
-    touches the host, from a full install on an already-patched host: both leave
-    the host block empty, and only one of them means "the host was never ours".
+    Everything that says how to undo the install is carried forward, not just the
+    host block: a --patch-only run after a --plugin-only run used to drop
+    plugin_dest, and then --rollback removed the host patch, said "no plugin
+    destination in metadata", deleted the metadata, and left an installed plugin
+    that nothing could remove or find again.
+
+    ``mode`` is informational -- it records which path wrote the file so a later
+    diagnosis is not guesswork. It deliberately drives no behaviour: a full
+    install on an already-patched host also leaves the host block empty, so mode
+    cannot be used to decide whether the host was ever ours. Only the host block
+    and the markers on disk answer that.
     """
-    return {
+    meta = {
         "installer_version": 2,
         "installed_at": datetime.now(timezone.utc).isoformat(),
         "hermes_src": str(src),
@@ -437,6 +452,10 @@ def new_metadata(src: Path, previous: dict, *, mode: str) -> dict:
         # true pre-install state; later runs never mutated the host further.
         "host": previous.get("host", {}),
     }
+    for key in ("plugin_dest", "plugin_files"):
+        if previous.get(key):
+            meta[key] = previous[key]
+    return meta
 
 
 def do_status(args) -> None:
@@ -444,10 +463,17 @@ def do_status(args) -> None:
     state, detail = classify_host(src)
     say(f"Hermes checkout : {src}")
     say(f"State           : {state} — {detail}")
-    meta = load_metadata(metadata_dir(src))
+    mdir = metadata_dir(src)
+    meta = load_metadata(mdir)
     if meta:
-        say(f"Last install    : {meta.get('installed_at')} (installer {meta.get('installer_version')})")
+        say(f"Last install    : {meta.get('installed_at')} (installer {meta.get('installer_version')}, mode {meta.get('mode') or 'unknown'})")
         say(f"Backup          : {meta.get('host', {}).get('backup')}")
+    elif (mdir / METADATA_NAME).is_file():
+        # --status must not read as "never installed" when the record is simply
+        # unreadable; that is the state where a patched host has no rollback.
+        zips = sorted(p.name for p in mdir.glob("host-backup-*.zip"))
+        say(f"Last install    : UNREADABLE metadata at {mdir / METADATA_NAME}")
+        say(f"Backup          : not recoverable from metadata; zips present: {zips or 'none'}")
     plugin_dest = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "plugins" / "refine"
     say(f"Plugin installed: {(plugin_dest / 'plugin.yaml').is_file()} ({plugin_dest})")
 
@@ -455,7 +481,7 @@ def do_status(args) -> None:
 def do_rollback(args) -> None:
     src = find_hermes_src(args.hermes_src)
     mdir = metadata_dir(src)
-    meta = load_metadata(mdir)
+    meta = metadata_or_refuse(mdir, purpose="rollback")
     if not meta:
         fail("No rollback metadata found; nothing to roll back.")
 
@@ -488,8 +514,10 @@ def do_rollback(args) -> None:
         if orphans:
             say(
                 f"WARNING: {orphans} exist in {mdir} but no metadata references them. "
-                "Nothing was restored from them and they are left in place; if the "
-                "host needs reverting, use the newest one or `git apply -R` by hand."
+                "Nothing was restored from them and they are left in place. Do not "
+                "unpack one blindly: a zip can predate a host that has moved on, or "
+                "come from a run whose patch never applied. `git apply -R` against "
+                "the route patch, or `git checkout`, reverts a known-good base."
             )
         marked = applied_patch_files(src)
         if marked:
@@ -503,9 +531,27 @@ def do_rollback(args) -> None:
     mode = args.plugin_mode or "remove"
     plugin_dest_value = meta.get("plugin_dest")
     plugin_dest = Path(plugin_dest_value) if plugin_dest_value else None
-    if mode == "remove" and plugin_dest is not None and plugin_dest.is_dir():
+    if (
+        mode == "remove"
+        and plugin_dest is not None
+        and plugin_dest.resolve() == PLUGIN_DIR
+    ):
+        # The documented live layout has the git checkout AT the install
+        # destination (~/.hermes/plugins/refine), which install_plugin already
+        # recognises by copying nothing. Deleting it here would erase the
+        # repository, .git and any uncommitted work included, while printing
+        # "Plugin removed" and exiting 0. Refine may never delete the user's work.
+        say(
+            f"Plugin destination is this checkout ({plugin_dest}); keeping it. "
+            "Rollback removes copies it made, never the source repository. Delete "
+            "it yourself if that is what you want."
+        )
+    elif mode == "remove" and plugin_dest is not None and plugin_dest.is_dir():
         shutil.rmtree(plugin_dest, ignore_errors=True)
-        say(f"Plugin removed: {plugin_dest}")
+        if plugin_dest.exists():
+            say(f"WARNING: could not fully remove the plugin tree: {plugin_dest}")
+        else:
+            say(f"Plugin removed: {plugin_dest}")
     elif plugin_dest is not None:
         say(f"Plugin kept in place ({mode}): {plugin_dest}")
     else:
@@ -579,6 +625,12 @@ def do_install(args) -> None:
     if state == "stock":
         say("Applying host patch (with pre-mutation backup)…")
         meta["host"] = apply_patch_atomic(src, mdir)
+        # Persist the rollback pointer the moment the host is mutated, not at the
+        # end of the run. Everything after this line can fail() -- compile_all,
+        # install_plugin refusing an incomplete tree, import verification -- and
+        # a patched host whose backup nothing references is a host that cannot be
+        # rolled back at all: --rollback answers "No rollback metadata found".
+        write_metadata(mdir, meta)
         compile_all(src)
         say("Host patch applied and compiled.")
     elif state == "patched":
