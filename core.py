@@ -2741,6 +2741,11 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
             resource_error = _memory_resource_error(content)
             if resource_error:
                 return resource_error
+            # Both create and patch reach the host as the same "add" operation
+            # (see _apply_memory), so both must be checked, not only create.
+            duplicate_error = _memory_duplicate_error(content)
+            if duplicate_error:
+                return duplicate_error
     if kind == "prompt":
         if not config.prompt_notes_enabled():
             return "Prompt notes are disabled"
@@ -2847,6 +2852,74 @@ def _memory_entry_delimiter() -> str:
     except Exception:
         logger.debug("Host exports no memory entry delimiter", exc_info=True)
     return "\n\u00a7\n"
+
+
+# B3: do not add what the store already says. Threshold calibrated against
+# the live store (21 entries, 210 pairs): the highest pairwise score among
+# genuinely distinct entries was 0.324 (two entries sharing "trust denied"/
+# provider-routing vocabulary), so 0.55 catches nothing there while leaving
+# real room below the next band. The store is multilingual (Ukrainian and
+# English); a whitespace/word tokenizer needs no per-language logic, and the
+# stop list below removes function words from both so shared grammar alone
+# cannot inflate a score.
+_MEMORY_DUPLICATE_JACCARD_THRESHOLD = 0.55
+_MEMORY_DUPLICATE_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+_MEMORY_DUPLICATE_STOP_WORDS = frozenset({
+    # English
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of",
+    "in", "on", "for", "and", "or", "not", "it", "this", "that", "with", "as",
+    "at", "by", "from", "use", "using",
+    # Ukrainian
+    "і", "й", "та", "але", "або", "не", "це", "у", "в", "на", "з", "із",
+    "для", "як", "що", "щоб", "до", "від", "при", "яка", "який", "яке",
+})
+
+
+def _memory_token_set(content: str) -> frozenset:
+    words = _MEMORY_DUPLICATE_WORD_RE.findall(content.casefold())
+    return frozenset(word for word in words if word not in _MEMORY_DUPLICATE_STOP_WORDS)
+
+
+def _jaccard_similarity(a: frozenset, b: frozenset) -> float:
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
+def _memory_duplicate_error(content: str) -> Optional[str]:
+    """Refuse a memory proposal that merely restates an entry already in the
+    store, measured by token-set Jaccard similarity against every CURRENT
+    entry.
+
+    Deliberately excludes deleted entries: this reads ``MemoryStore.load_from_
+    disk()`` /``memory_entries``, the live on-disk state, never journal or
+    ledger history. A deletion is ambiguous -- the operator may have removed a
+    lesson only for space, and a recurring failure raising it again is exactly
+    the signal this plugin exists to surface. Blocking that would make refine
+    permanently blind to it, invisibly.
+    """
+    proposed_tokens = _memory_token_set(content)
+    if not proposed_tokens:
+        return None
+    try:
+        from tools.memory_tool import MemoryStore
+
+        store = MemoryStore()
+        store.load_from_disk()
+        entries = store.memory_entries
+    except Exception as exc:
+        logger.warning("Cannot read memory store for duplicate check: %s", scrub_text(str(exc)))
+        return None
+    for existing in entries:
+        score = _jaccard_similarity(proposed_tokens, _memory_token_set(existing))
+        if score >= _MEMORY_DUPLICATE_JACCARD_THRESHOLD:
+            return (
+                f"Memory entry is {score:.2f} similar to an entry already in "
+                "the store (token-set Jaccard >= "
+                f"{_MEMORY_DUPLICATE_JACCARD_THRESHOLD})"
+            )
+    return None
 
 
 def _memory_content_splits(content: str) -> bool:
@@ -4827,6 +4900,16 @@ def _apply_edit(
             "reversible": False,
             "edits_applied": 0,
         }
+        # B3: same in-memory-response-only pattern A2 established for
+        # memory_full -- llm_meta is journal-immutable (frozen at prepare()
+        # time), and this rejection never reaches prepare() at all, so the
+        # code cannot land in the durable record either way. Matched on the
+        # marker _memory_duplicate_error's own message carries, not by
+        # recomputing the check blind: a memory proposal can fail an EARLIER
+        # guardrail (injection, resource reference) whose message this must
+        # not relabel as a duplicate.
+        if "token-set Jaccard" in guardrail_error:
+            result["llm_meta"] = dict(llm_meta or {}, result_code="memory_duplicate")
         if entry_id:
             result["record_id"] = entry_id
         return result

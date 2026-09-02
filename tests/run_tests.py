@@ -15113,13 +15113,18 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         """An approved write the host then refuses must not be journaled applied.
 
         The gate stages before the store validates, so approval can still hit the
-        duplicate refusal, the char limit, or the content scan.
+        duplicate refusal, the char limit, or the content scan. The proposal
+        content must clear refine's OWN validation (including B3's similarity
+        guardrail against the current store) so the write actually reaches
+        staging; the host's own refusal is a separate, later check this test
+        exercises.
         """
-        FakeHost.memory_entries[:] = ["already stored"]
+        FakeHost.memory_entries[:] = ["an unrelated existing note"]
         FakeHost.stage_writes = True
         result = self.run_proposal({
             "action": "create", "kind": "memory", "name": "refused-lesson",
-            "content": "already stored", "reason": "why", "evidence": [],
+            "content": "a distinct new lesson about retry timing",
+            "reason": "why", "evidence": [],
         })
         entry = journal.get_entry(result["journal_id"])
         self.assertEqual(entry["outcome"], "pending_approval")
@@ -15131,7 +15136,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         core.refine_audit()
         reconciled = journal.get_entry(result["journal_id"])
         self.assertEqual(reconciled["outcome"], "rejected")
-        self.assertEqual(FakeHost.memory_entries, ["already stored"])
+        self.assertEqual(FakeHost.memory_entries, ["an unrelated existing note"])
 
     def test_memory_write_denied_by_the_gate_is_journaled_as_an_error(self):
         """The gate's third outcome: denied outright, neither staged nor written."""
@@ -15285,6 +15290,87 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         })
         self.assertFalse(result["success"])
         self.assertEqual(FakeHost.memory_entries, ["already stored"])
+
+    # ── B3: do not add what the store already says ────────────────────────
+
+    def test_the_known_duplicate_pair_is_refused(self):
+        """A near-duplicate that merely reorders/paraphrases an existing entry
+        is refused before any model or host call, with the distinct code."""
+        FakeHost.memory_entries[:] = [
+            "The API rate limit is 100 requests per minute per key",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "rate-limit-restated",
+            "content": "The API key rate limit is 100 requests per minute",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertIn("memory_duplicate", result.get("message", "") + str(result))
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
+        self.assertEqual(FakeHost.memory_entries, [
+            "The API rate limit is 100 requests per minute per key",
+        ])
+
+    def test_a_genuinely_new_lesson_sharing_vocabulary_is_accepted(self):
+        """Both directions: sharing SOME words with an existing entry must not
+        refuse a lesson that states a different fact."""
+        FakeHost.memory_entries[:] = [
+            "The API rate limit is 100 requests per minute per key",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "different-endpoint",
+            "content": "The upload endpoint requires a Content-Length header or it 400s",
+            "reason": "why", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        self.assertIn(
+            "The upload endpoint requires a Content-Length header or it 400s",
+            FakeHost.memory_entries,
+        )
+
+    def test_an_empty_store_never_refuses_for_similarity(self):
+        """Both directions: an empty store has nothing to be similar to."""
+        FakeHost.memory_entries[:] = []
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "first-lesson",
+            "content": "The first lesson this store has ever held",
+            "reason": "why", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+
+    def test_a_deleted_entry_is_not_deduped_against(self):
+        """Do NOT dedupe against entries the user has deleted -- the live
+        MemoryStore read is the current file, so a removed entry cannot be
+        matched at all; this proves the guardrail reads live state, not a
+        historical record of everything ever stored."""
+        FakeHost.memory_entries[:] = []  # the earlier entry was deleted
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "recurred-lesson",
+            "content": "The API rate limit is 100 requests per minute per key",
+            "reason": "the failure recurred after the earlier note was removed",
+            "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        self.assertIn(
+            "The API rate limit is 100 requests per minute per key",
+            FakeHost.memory_entries,
+        )
+
+    def test_memory_duplicate_check_does_not_relabel_an_earlier_guardrail_error(self):
+        """A memory proposal that fails an EARLIER guardrail (here: the
+        entry-delimiter check) must keep that error's own message and must not
+        be relabeled as memory_duplicate."""
+        FakeHost.memory_entries[:] = ["existing note"]
+        delimiter = core._memory_entry_delimiter()
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "bad-delimiter",
+            "content": f"before{delimiter}after",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertNotEqual(
+            result.get("llm_meta", {}).get("result_code"), "memory_duplicate"
+        )
 
     def test_session_end_waits_off_callback_then_journals_evidence_failure(self):
         preflight = {
