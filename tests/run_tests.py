@@ -20676,6 +20676,45 @@ class InstallerPluginOnlyTests(unittest.TestCase):
 
 
 
+class InstallerConsoleEncodingTests(unittest.TestCase):
+    """A legacy console encoding must not be able to abort an install mid-way."""
+
+    class _LegacyConsole:
+        encoding = "cp1251"
+
+        def __init__(self):
+            self.written: list[str] = []
+
+        def write(self, text: str) -> int:
+            text.encode(self.encoding)  # what a real cp1251 stream does
+            self.written.append(text)
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    def test_say_degrades_unencodable_text_instead_of_raising(self):
+        import install
+
+        stream = self._LegacyConsole()
+        with patch.object(sys, "stdout", stream):
+            install.say("Plugin files \u2192 /dest (12 files)")
+        joined = "".join(stream.written)
+        self.assertIn("/dest (12 files)", joined)
+        self.assertNotIn("\u2192", joined)
+
+    def test_fail_degrades_unencodable_text_instead_of_raising(self):
+        import install
+
+        stream = self._LegacyConsole()
+        with patch.object(sys, "stderr", stream):
+            with self.assertRaises(SystemExit):
+                install.fail("patch \u2192 rejected")
+        joined = "".join(stream.written)
+        self.assertIn("rejected", joined)
+        self.assertNotIn("\u2192", joined)
+
+
 class InstallerPluginContentTests(unittest.TestCase):
     """What install.py copies must be a plugin that actually runs.
 

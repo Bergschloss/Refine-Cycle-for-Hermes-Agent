@@ -102,12 +102,29 @@ def plugin_files() -> list[str]:
     return rels
 
 
+def _emit(stream, text: str) -> None:
+    """Print what the console can render; never raise on the console's encoding.
+
+    These messages carry '->' as U+2192 and '...' as U+2026. A legacy Windows
+    console is cp1251/cp866 and can encode neither, so a plain print raises
+    UnicodeEncodeError -- and the arrow line sits between copying the plugin
+    files and writing the metadata, so that crash leaves a copied plugin with no
+    metadata, after which --rollback reports "No rollback metadata found" and the
+    copy stays behind. Degrade the text, never the install.
+    """
+    try:
+        print(text, file=stream, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(stream, "encoding", None) or "ascii"
+        print(text.encode(enc, "replace").decode(enc, "replace"), file=stream, flush=True)
+
+
 def say(msg: str) -> None:
-    print(msg, flush=True)
+    _emit(sys.stdout, msg)
 
 
 def fail(msg: str, code: int = 1) -> None:
-    print(f"ERROR: {msg}", file=sys.stderr, flush=True)
+    _emit(sys.stderr, f"ERROR: {msg}")
     sys.exit(code)
 
 
