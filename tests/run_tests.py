@@ -20686,6 +20686,60 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertTrue(any("keeping it" in message for message in messages))
         self.assertFalse(any("Plugin removed" in message for message in messages))
 
+    def test_plugin_only_writes_nothing_into_the_host_tree_but_its_own_record(self):
+        """The byte-identity check covers 8 files; this covers the whole tree."""
+        import install
+
+        def tree() -> set[str]:
+            return {
+                str(p.relative_to(self.src)) for p in self.src.rglob("*")
+                if p.is_file() and ".git" not in p.parts
+            }
+
+        before = tree()
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args())
+        added = tree() - before
+        self.assertTrue(added, "the metadata record should have appeared")
+        self.assertTrue(
+            all(entry.startswith(".refine-install") for entry in added),
+            f"--plugin-only wrote into the host tree outside its own record: {added}",
+        )
+        self.assertEqual(before - tree(), set(), "--plugin-only removed host files")
+
+    def test_a_copy_the_installer_refuses_is_still_recorded_and_removable(self):
+        """A fatal verification must not orphan the tree it just copied."""
+        import install
+
+        def refuse(*a, **kw):
+            install.fail("simulated: the installed plugin does not parse")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "verify_plugin_imports", side_effect=refuse):
+            with self.assertRaises(SystemExit):
+                install.do_install(self._args())
+        self.assertTrue((self.home / "plugins" / "refine" / "plugin.yaml").is_file())
+        self.assertEqual(
+            Path(self._read_metadata()["plugin_dest"]).resolve(),
+            (self.home / "plugins" / "refine").resolve(),
+            "the refused copy is on disk with nothing recording it",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_rollback(self._args(plugin_only=False))
+        self.assertFalse((self.home / "plugins" / "refine").exists())
+
+    def test_an_unverified_import_does_not_report_a_plain_success(self):
+        import install
+
+        messages: list[str] = []
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "verify_plugin_imports", return_value="unclassified"), \
+             patch.object(install, "say", messages.append):
+            install.do_install(self._args())
+        self.assertTrue(any("NOT verified" in message for message in messages))
+
+
+
     def test_rollback_refuses_unreadable_metadata_instead_of_reporting_nothing(self):
         """A patched host whose record will not parse is not "nothing to roll back"."""
         import install
@@ -20832,6 +20886,45 @@ class InstallerHermesHomeTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HERMES_HOME", None)
             self.assertEqual(install.hermes_home_dir(), config.hermes_home())
+
+    def test_the_host_helper_in_the_checkout_is_actually_consulted(self):
+        """config.hermes_home() asks hermes_constants first; it must be reachable.
+
+        Without the checkout on sys.path that branch cannot run from a standalone
+        `python install.py`, so the installer would use the generic fallback while
+        the gateway used the host's answer -- the same divergence in a new place.
+        """
+        import install
+
+        with tempfile.TemporaryDirectory(prefix="refine-host-helper-") as td:
+            src = Path(td) / "hermes"
+            src.mkdir()
+            home = Path(td) / "host-declared-home"
+            home.mkdir()
+            (src / "hermes_constants.py").write_text(
+                f"def get_hermes_home():\n    return r'{home}'\n", encoding="utf-8"
+            )
+            # This suite injects a fake hermes_constants into sys.modules; leaving
+            # it there makes the test pass without the checkout being consulted.
+            with patch.dict(sys.modules, {}, clear=False), \
+                 patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("HERMES_HOME", None)
+                # Popped before each call: the first import caches the checkout's
+                # helper in sys.modules, and the second call would then find it
+                # without the checkout being on the path at all.
+                sys.modules.pop("hermes_constants", None)
+                without_src = install.hermes_home_dir()
+                sys.modules.pop("hermes_constants", None)
+                with_src = install.hermes_home_dir(src)
+        self.assertEqual(with_src, home.resolve())
+        self.assertNotEqual(
+            with_src, without_src,
+            "the checkout's host helper was not what produced the answer",
+        )
+        self.assertFalse(
+            list(src.rglob("__pycache__")),
+            "reading the host's answer wrote bytecode into the host checkout",
+        )
 
 
 class InstallerConsoleEncodingTests(unittest.TestCase):

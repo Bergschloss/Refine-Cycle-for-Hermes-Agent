@@ -109,7 +109,7 @@ def plugin_files() -> list[str]:
     return rels
 
 
-def hermes_home_dir() -> Path:
+def hermes_home_dir(src: Path | None = None) -> Path:
     """The Hermes data directory, resolved the way the plugin itself resolves it.
 
     Installing into a different directory than the one the plugin reads is the
@@ -117,13 +117,27 @@ def hermes_home_dir() -> Path:
     %LOCALAPPDATA%\\hermes, and an installer that hardcodes ~/.hermes copies the
     files somewhere nothing ever looks -- silently, exit 0. So an explicit
     HERMES_HOME wins (a user pointing somewhere is not to be second-guessed) and
-    everything else goes through config.hermes_home(), which is the one place
-    this project resolves Hermes paths. Loaded by file path rather than by import
-    name: the installer may be launched from any working directory.
+    everything else goes through config.hermes_home(), the one place this project
+    resolves Hermes paths.
+
+    ``src`` is the Hermes checkout, and it goes on sys.path for the duration:
+    config.hermes_home() asks the HOST helper ``hermes_constants`` first, and
+    without the checkout importable that branch is unreachable from a standalone
+    ``python install.py`` -- so the installer would silently use the generic
+    fallback while the gateway used the host's answer. That is the same divergence
+    in a new place. verify_plugin_imports already puts ``src`` on the subprocess
+    PYTHONPATH for this reason.
     """
     env = os.environ.get("HERMES_HOME", "").strip()
     if env:
         return Path(env).expanduser().resolve()
+    added = [str(p) for p in (src,) if p is not None]
+    sys.path[:0] = added
+    # Importing the host helper out of the checkout writes
+    # <checkout>/__pycache__/hermes_constants.*.pyc otherwise -- measured on a real
+    # 8.31 worktree. Reading the host's answer must not modify the host.
+    dont_write = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
         import importlib.util
 
@@ -134,13 +148,18 @@ def hermes_home_dir() -> Path:
         spec.loader.exec_module(module)
         return Path(module.hermes_home())
     except Exception:
-        # config.py is shipped beside this file, so this is the unreachable-in-
-        # practice branch; it still must not resolve to the wrong home.
+        # config.py ships beside this file, so reaching here means the plugin
+        # tree is broken; resolve the way config would have without the host.
         if os.name == "nt":
             local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
             if local_app_data:
                 return Path(local_app_data) / "hermes"
         return Path(os.path.expanduser("~/.hermes"))
+    finally:
+        sys.dont_write_bytecode = dont_write
+        for entry in added:
+            if entry in sys.path:
+                sys.path.remove(entry)
 
 
 def _emit(stream, text: str) -> None:
@@ -357,9 +376,9 @@ def python_of(src: Path) -> str:
     return sys.executable
 
 
-def install_plugin(meta: dict) -> str:
+def install_plugin(meta: dict, src: Path | None = None) -> str:
     """Copy plugin files into <hermes home>/plugins/refine (idempotent)."""
-    dest = hermes_home_dir() / "plugins" / "refine"
+    dest = hermes_home_dir(src) / "plugins" / "refine"
     files = plugin_files()
     absent = [m for m in REQUIRED_PLUGIN_MODULES if m not in files]
     if absent:
@@ -382,7 +401,7 @@ def install_plugin(meta: dict) -> str:
     return str(dest)
 
 
-def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
+def verify_plugin_imports(dest: Path, python: str, src: Path) -> str:
     """Import the tree that was just copied, using the interpreter that will load it.
 
     The pre-existing capability verification checks the HOST patch markers and
@@ -413,6 +432,11 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
     env = dict(os.environ)
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = os.pathsep.join([str(src)] + ([existing] if existing else []))
+    # Importing host modules from the checkout writes agent/__pycache__/*.pyc into
+    # it. Small, but --plugin-only promises not to write into the host tree, and a
+    # promise with an asterisk is not one. Measured: the pyc appeared next to the
+    # host sources on every plugin-only run.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     r = subprocess.run(
         [python, "-c", "import core"],
         cwd=str(dest), capture_output=True, text=True, timeout=120,
@@ -420,7 +444,7 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
     )
     if r.returncode == 0:
         say("Plugin import verified in a fresh interpreter.")
-        return
+        return "verified"
     stderr = r.stderr or ""
     tail = [line for line in stderr.strip().splitlines() if line.strip()]
     detail = tail[-1] if tail else "no stderr"
@@ -432,7 +456,14 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
             or f"No module named '{name}." in stderr
         )
 
-    absent = [name for name in owned if _unresolved(name)]
+    # Present on disk means the absence is not about our copy. The Hermes
+    # checkout is on this subprocess's PYTHONPATH, so host code runs during
+    # verification and a generic name it fails to import (``config`` is both a
+    # plugin module and a common host one) must not be read as a broken copy.
+    absent = [
+        name for name in owned
+        if _unresolved(name) and not (dest / f"{name}.py").is_file()
+    ]
     if absent:
         fail(
             f"the installed plugin is missing its own module(s) {absent}; the copy "
@@ -450,13 +481,14 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
             f"unresolved name is a Hermes host module {host_absent}, so this is "
             "host resolution in this environment, not an incomplete install."
         )
-        return
+        return "host-unresolved"
     say(
         f"NOTE: the plugin copy could NOT be imported here and the failure was not "
         f"classified ({detail}). No plugin module is missing and the copy parses, "
         "so it may still be fine -- but this run did not verify it. Check the tree "
         f"before relying on it: {dest}"
     )
+    return "unclassified"
 
 
 def write_metadata(meta_dir: Path, meta: dict) -> Path:
@@ -555,7 +587,7 @@ def do_status(args) -> None:
         zips = sorted(p.name for p in mdir.glob("host-backup-*.zip"))
         say(f"Last install    : UNREADABLE metadata at {mdir / METADATA_NAME}")
         say(f"Backup          : not recoverable from metadata; zips present: {zips or 'none'}")
-    plugin_dest = hermes_home_dir() / "plugins" / "refine"
+    plugin_dest = hermes_home_dir(src) / "plugins" / "refine"
     say(f"Plugin installed: {(plugin_dest / 'plugin.yaml').is_file()} ({plugin_dest})")
 
 
@@ -654,11 +686,15 @@ def do_install(args) -> None:
         meta: dict = new_metadata(src, previous_metadata(mdir), mode="plugin-only")
         say("--plugin-only: skipping host classification and host patching.")
         say("Installing Refine plugin…")
-        dest = install_plugin(meta)
+        dest = install_plugin(meta, src)
         say(f"Plugin files → {dest} ({len(meta.get('plugin_files') or [])} files)")
-        verify_plugin_imports(Path(dest), python_of(src), src)
+        # Record the copy before verifying it. Verification can fail() -- on a
+        # tree that does not parse, for instance -- and a copied plugin no
+        # metadata names is one --rollback cannot remove, while the gateway would
+        # still try to load it.
         write_metadata(mdir, meta)
         say(f"Metadata → {mdir / METADATA_NAME}")
+        verified = verify_plugin_imports(Path(dest), python_of(src), src)
         # Report the host across every patch target, not just plugins.py: a
         # partially patched host has the marker there and still cannot route,
         # and staying silent about it is the bug this flag work set out to end.
@@ -671,7 +707,10 @@ def do_install(args) -> None:
                 "targets carry the marker): refine_run will return "
                 "llm_invocation_unavailable until --patch-only is run."
             )
-        say("Done (--plugin-only).")
+        if verified == "unclassified":
+            say("Done (--plugin-only), but the plugin import was NOT verified (see the NOTE above).")
+        else:
+            say("Done (--plugin-only).")
         return
 
     state, detail = classify_host(src)
@@ -723,12 +762,13 @@ def do_install(args) -> None:
         return
 
     say("Installing Refine plugin…")
-    dest = install_plugin(meta)
+    dest = install_plugin(meta, src)
     say(f"Plugin files → {dest} ({len(meta.get('plugin_files') or [])} files)")
-    verify_plugin_imports(Path(dest), python_of(src), src)
-
+    # Before verification, for the same reason the host block is written before
+    # compile_all: a fatal after the copy must not orphan the copy.
     write_metadata(mdir, meta)
     say(f"Metadata → {mdir / METADATA_NAME}")
+    verified = verify_plugin_imports(Path(dest), python_of(src), src)
 
     # Capability verification: inside a fresh interpreter, ctx.llm must be bound
     # when a scope is active, and fail-closed when not.
@@ -751,7 +791,13 @@ print("CAPABILITY_OK")
     try:
         r = subprocess.run(
             [python_of(src), cap_script], capture_output=True, text=True, timeout=120,
-            env={**os.environ, "HERMES_HOME": os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))},
+            # Pass through what the user set; do not invent a home. Forcing
+            # ~/.hermes here told the subprocess a different home than the one
+            # the plugin was just installed into, and created that directory on
+            # a Windows box whose real home is %LOCALAPPDATA%\hermes.
+            # No bytecode: this imports host modules and would litter the
+            # checkout with __pycache__ entries the user did not ask for.
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         if "CAPABILITY_OK" not in (r.stdout or ""):
             fail(f"capability verification failed:\n{r.stdout}\n{r.stderr}")
@@ -759,7 +805,14 @@ print("CAPABILITY_OK")
         os.unlink(cap_script)
     say("Capability verified: invocation-bound machinery present and fail-closed.")
 
-    say("\nSUCCESS. Next steps:")
+    if verified == "unclassified":
+        # The banner is the only line most people read. It must not say the same
+        # thing after an import the installer could not classify as after one it
+        # verified. Exit stays 0: the copy may well be fine, and refusing here
+        # would block installs on hosts whose environment simply cannot import.
+        say("\nINSTALLED, PLUGIN IMPORT NOT VERIFIED. Next steps:")
+    else:
+        say("\nSUCCESS. Next steps:")
     say("  1. Restart the gateway OUTSIDE its own process:")
     say("     sudo systemd-run --unit=refine-gw-restart --collect -- systemctl restart hermes-gateway")
     say("  2. Verify: /refine-cycle status  (or refine_run in a turn)")
