@@ -20444,6 +20444,11 @@ class InstallerPluginOnlyTests(unittest.TestCase):
     """
 
     def setUp(self):
+        if not shutil.which("git"):
+            # The guard the install.sh tests in this file already use: an
+            # environment without git is not a defect, and a suite that reddens
+            # for environment reasons trains people to ignore red.
+            self.skipTest("git is required to build a stock-host fixture")
         self.temp = tempfile.TemporaryDirectory(prefix="refine-plugin-only-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -20463,7 +20468,8 @@ class InstallerPluginOnlyTests(unittest.TestCase):
             target = self.src / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("BASE = True\n", encoding="utf-8")
-        subprocess.run(["git", "init", "-q", "-b", "main", str(self.src)], check=True)
+        # No -b: it needs git >= 2.28 and the branch name is irrelevant here.
+        subprocess.run(["git", "init", "-q", str(self.src)], check=True)
         self._git("config", "user.email", "test@example.invalid")
         self._git("config", "user.name", "Refine test")
         self._git("add", "-A")
@@ -20744,6 +20750,82 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertIn("does not parse as JSON", fail.call_args.args[0])
         self.assertEqual(corrupt.read_text(encoding="utf-8"), '{"host": {"backup": "/tmp/x.zip"')
 
+
+
+class InstallerImportVerificationTests(unittest.TestCase):
+    """The import gate may report "not verified"; it may not report "this is fine"."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="refine-verify-")
+        self.addCleanup(self.temp.cleanup)
+        self.dest = Path(self.temp.name) / "refine"
+        self.dest.mkdir(parents=True)
+        self.src = Path(self.temp.name) / "hermes"
+        self.src.mkdir(parents=True)
+
+    def test_a_plugin_copy_that_does_not_parse_is_fatal(self):
+        """This installed with exit 0, called "host resolution in this environment"."""
+        import install
+
+        (self.dest / "core.py").write_text("this is not python (((\n", encoding="utf-8")
+        with patch.object(install, "fail", side_effect=SystemExit(1)) as fail:
+            with self.assertRaises(SystemExit):
+                install.verify_plugin_imports(self.dest, sys.executable, self.src)
+        self.assertIn("does not parse", fail.call_args.args[0])
+
+    def test_an_unresolved_host_module_is_a_note_not_a_failure(self):
+        """--plugin-only on an unpatched host must still succeed."""
+        import install
+
+        # A host package with an absent submodule: unresolvable both where Hermes
+        # is installed ("No module named 'gateway._refine_probe_absent'") and
+        # where it is not ("No module named 'gateway'"). Importing a real host
+        # module instead passes vacuously in the Hermes virtualenv, which is the
+        # interpreter this suite normally runs under.
+        (self.dest / "core.py").write_text("import gateway._refine_probe_absent\n", encoding="utf-8")
+        messages: list[str] = []
+        with patch.object(install, "say", messages.append), \
+             patch.object(install, "fail", side_effect=AssertionError("must not fail")):
+            install.verify_plugin_imports(self.dest, sys.executable, self.src)
+        joined = " ".join(messages)
+        self.assertIn("Hermes host module", joined)
+        self.assertIn("not an incomplete install", joined)
+
+    def test_an_unclassified_failure_does_not_claim_to_be_host_resolution(self):
+        import install
+
+        (self.dest / "core.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+        messages: list[str] = []
+        with patch.object(install, "say", messages.append), \
+             patch.object(install, "fail", side_effect=AssertionError("must not fail")):
+            install.verify_plugin_imports(self.dest, sys.executable, self.src)
+        joined = " ".join(messages)
+        self.assertIn("was not classified", joined)
+        self.assertIn("did not verify", joined)
+        self.assertNotIn("host resolution in this environment", joined)
+
+
+class InstallerHermesHomeTests(unittest.TestCase):
+    """The installer must copy the plugin where the plugin looks for itself.
+
+    A hardcoded ``~/.hermes`` is the defect that made this plugin inert on
+    Windows, where Hermes keeps its data under %LOCALAPPDATA%\\hermes.
+    """
+
+    def test_an_explicit_hermes_home_wins(self):
+        import install
+
+        target = Path(tempfile.gettempdir()) / "refine-home-probe"
+        with patch.dict(os.environ, {"HERMES_HOME": str(target)}):
+            self.assertEqual(install.hermes_home_dir(), target.expanduser().resolve())
+
+    def test_without_the_variable_the_installer_agrees_with_the_plugin(self):
+        import config
+        import install
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_HOME", None)
+            self.assertEqual(install.hermes_home_dir(), config.hermes_home())
 
 
 class InstallerConsoleEncodingTests(unittest.TestCase):

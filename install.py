@@ -51,6 +51,13 @@ PATCH_FILES = [
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 ALL_PATCH_CONTENT = PATCH_FILES + [PATCH_TEST_FILE]
 
+# Top-level packages that belong to the Hermes host, not to the plugin. An
+# unresolved one of these during import verification means this environment
+# cannot see Hermes, which is not an incomplete install.
+HOST_IMPORT_ROOTS = (
+    "agent", "gateway", "hermes_cli", "tui_gateway", "hermes_constants",
+)
+
 # Per-file applied-markers: each file gets a symbol only the patched version defines.
 FILE_MARKERS = {
     "agent/auxiliary_client.py": "_call_route_locked_once",
@@ -102,6 +109,40 @@ def plugin_files() -> list[str]:
     return rels
 
 
+def hermes_home_dir() -> Path:
+    """The Hermes data directory, resolved the way the plugin itself resolves it.
+
+    Installing into a different directory than the one the plugin reads is the
+    defect that made this plugin inert on Windows: Hermes stores its data in
+    %LOCALAPPDATA%\\hermes, and an installer that hardcodes ~/.hermes copies the
+    files somewhere nothing ever looks -- silently, exit 0. So an explicit
+    HERMES_HOME wins (a user pointing somewhere is not to be second-guessed) and
+    everything else goes through config.hermes_home(), which is the one place
+    this project resolves Hermes paths. Loaded by file path rather than by import
+    name: the installer may be launched from any working directory.
+    """
+    env = os.environ.get("HERMES_HOME", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_refine_install_config", PLUGIN_DIR / "config.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return Path(module.hermes_home())
+    except Exception:
+        # config.py is shipped beside this file, so this is the unreachable-in-
+        # practice branch; it still must not resolve to the wrong home.
+        if os.name == "nt":
+            local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+            if local_app_data:
+                return Path(local_app_data) / "hermes"
+        return Path(os.path.expanduser("~/.hermes"))
+
+
 def _emit(stream, text: str) -> None:
     """Print what the console can render; never raise on the console's encoding.
 
@@ -114,9 +155,20 @@ def _emit(stream, text: str) -> None:
     """
     try:
         print(text, file=stream, flush=True)
+        return
     except UnicodeEncodeError:
-        enc = getattr(stream, "encoding", None) or "ascii"
-        print(text.encode(enc, "replace").decode(enc, "replace"), file=stream, flush=True)
+        pass
+    enc = getattr(stream, "encoding", None) or "ascii"
+    try:
+        degraded = text.encode(enc, "replace").decode(enc, "replace")
+    except (LookupError, UnicodeError):
+        # A stream can name a codec Python does not have, or over-report what it
+        # can encode. ASCII is the floor every console renders.
+        degraded = text.encode("ascii", "replace").decode("ascii")
+    try:
+        print(degraded, file=stream, flush=True)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "replace").decode("ascii"), file=stream, flush=True)
 
 
 def say(msg: str) -> None:
@@ -306,9 +358,8 @@ def python_of(src: Path) -> str:
 
 
 def install_plugin(meta: dict) -> str:
-    """Copy plugin files into ~/.hermes/plugins/refine (idempotent)."""
-    hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-    dest = hermes_home / "plugins" / "refine"
+    """Copy plugin files into <hermes home>/plugins/refine (idempotent)."""
+    dest = hermes_home_dir() / "plugins" / "refine"
     files = plugin_files()
     absent = [m for m in REQUIRED_PLUGIN_MODULES if m not in files]
     if absent:
@@ -340,12 +391,20 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
     imports every sibling module at module level, so one import exercises the
     whole copy.
 
-    Only a missing PLUGIN module is fatal. A missing host module (``agent.*``,
-    ``gateway.*``) means this environment cannot resolve Hermes the way the
-    gateway does, not that the install is incomplete -- and failing on that would
-    refuse a perfectly good install. The Hermes checkout goes on PYTHONPATH first
-    so host modules usually do resolve; when they still do not, say so and carry
-    on rather than pretending the result is conclusive.
+    A missing PLUGIN module is fatal, and so is a copy that does not parse:
+    neither can come from anywhere but the copied tree, and both mean the plugin
+    cannot load anywhere. A missing HOST module (``agent.*``, ``gateway.*``) is
+    not fatal -- it means this environment cannot resolve Hermes the way the
+    gateway does, not that the install is incomplete, and failing on it would
+    refuse a good install. That distinction is why --plugin-only on an unpatched
+    host still succeeds: an unpatched host genuinely cannot satisfy the import.
+
+    What is not allowed is claiming to know which of the two it was. Anything
+    that is neither a known plugin-module absence nor an identifiable host
+    resolution failure is now reported as unclassified and NOT verified. The
+    previous wording asserted "this is host resolution in this environment" for
+    every failure it did not recognise -- including a syntax error in core.py,
+    which it waved through with exit 0.
     """
     owned = sorted(
         Path(rel).stem for rel in plugin_files()
@@ -365,16 +424,38 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> None:
     stderr = r.stderr or ""
     tail = [line for line in stderr.strip().splitlines() if line.strip()]
     detail = tail[-1] if tail else "no stderr"
-    absent = [name for name in owned if f"No module named '{name}'" in stderr]
+    def _unresolved(name: str) -> bool:
+        # "No module named 'gateway'" and "No module named 'gateway.run'" are the
+        # same finding; matching only the first form missed every submodule.
+        return (
+            f"No module named '{name}'" in stderr
+            or f"No module named '{name}." in stderr
+        )
+
+    absent = [name for name in owned if _unresolved(name)]
     if absent:
         fail(
             f"the installed plugin is missing its own module(s) {absent}; the copy "
             f"is incomplete and the plugin cannot load.\n  {detail}\n  tree: {dest}"
         )
+    if "SyntaxError" in stderr or "IndentationError" in stderr:
+        fail(
+            "the installed plugin does not parse; the copy cannot load in any "
+            f"environment.\n  {detail}\n  tree: {dest}"
+        )
+    host_absent = [name for name in HOST_IMPORT_ROOTS if _unresolved(name)]
+    if host_absent:
+        say(
+            f"NOTE: could not fully import the plugin here ({detail}). The "
+            f"unresolved name is a Hermes host module {host_absent}, so this is "
+            "host resolution in this environment, not an incomplete install."
+        )
+        return
     say(
-        f"NOTE: could not fully import the plugin here ({detail}). No plugin module "
-        "is missing, so this is host resolution in this environment, not an "
-        "incomplete install."
+        f"NOTE: the plugin copy could NOT be imported here and the failure was not "
+        f"classified ({detail}). No plugin module is missing and the copy parses, "
+        "so it may still be fine -- but this run did not verify it. Check the tree "
+        f"before relying on it: {dest}"
     )
 
 
@@ -474,7 +555,7 @@ def do_status(args) -> None:
         zips = sorted(p.name for p in mdir.glob("host-backup-*.zip"))
         say(f"Last install    : UNREADABLE metadata at {mdir / METADATA_NAME}")
         say(f"Backup          : not recoverable from metadata; zips present: {zips or 'none'}")
-    plugin_dest = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "plugins" / "refine"
+    plugin_dest = hermes_home_dir() / "plugins" / "refine"
     say(f"Plugin installed: {(plugin_dest / 'plugin.yaml').is_file()} ({plugin_dest})")
 
 
