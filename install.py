@@ -321,6 +321,14 @@ def backup_host(src: Path, meta_dir: Path) -> Path:
     meta_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_path = meta_dir / f"host-backup-{stamp}.zip"
+    # The stamp has one-second resolution and ZipFile("w") truncates, so two
+    # backups inside the same second silently became one -- measured: a second
+    # run's backup overwrote the first, and rollback then restored the
+    # installer's own intermediate state instead of the user's.
+    counter = 1
+    while backup_path.exists():
+        backup_path = meta_dir / f"host-backup-{stamp}-{counter}.zip"
+        counter += 1
     with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for rel in PATCH_FILES:
             f = src / rel
@@ -340,11 +348,31 @@ def record_host_backup(src: Path, meta_dir: Path, meta: dict) -> None:
     this: a partial host whose apply failed marker verification lost the user's
     three patched files, wrote two orphan zips, and denied anything had happened.
     """
-    meta["host"] = {
-        "backup": str(backup_host(src, meta_dir)),
-        # Computed here, before the mutation: afterwards they exist.
-        "created_files": sorted(rel for rel in ALL_PATCH_CONTENT if not (src / rel).is_file()),
+    previous = dict(meta.get("host") or {})
+    fresh = str(backup_host(src, meta_dir))
+    # Computed before the mutation: afterwards they exist. Unioned with what an
+    # earlier run recorded, or a second run would drop the file the first one
+    # created and rollback would leave it on the host.
+    created = set(previous.get("created_files") or [])
+    created |= {rel for rel in ALL_PATCH_CONTENT if not (src / rel).is_file()}
+
+    keep = previous.get("backup") if previous.get("backup") and Path(previous["backup"]).is_file() else None
+    host = {
+        # The FIRST backup stays the restore target: it holds the state the user
+        # actually had before any of our runs. A later run's zip holds whatever
+        # this installer had already done to the host, and restoring that would
+        # reinstate an intermediate state while claiming a faithful undo.
+        "backup": keep or fresh,
+        "created_files": sorted(created),
+        # Stamped when the backup is taken, not refreshed per run: the top-level
+        # base_head moves with every invocation, so a --plugin-only run on an
+        # upgraded host used to make an old backup look current and silence the
+        # moved-on warning entirely.
+        "base_head": previous.get("base_head") or git_head_short(src),
     }
+    if keep and fresh != keep:
+        host["extra_backups"] = sorted((previous.get("extra_backups") or []) + [fresh])
+    meta["host"] = host
     write_metadata(meta_dir, meta)
 
 
@@ -422,9 +450,14 @@ def python_of(src: Path) -> str:
     return sys.executable
 
 
+def plugin_dest_for(src: Path | None = None) -> Path:
+    """Where the plugin goes. Known before any copying, so it can be recorded first."""
+    return hermes_home_dir(src) / "plugins" / "refine"
+
+
 def install_plugin(meta: dict, src: Path | None = None) -> str:
     """Copy plugin files into <hermes home>/plugins/refine (idempotent)."""
-    dest = hermes_home_dir(src) / "plugins" / "refine"
+    dest = plugin_dest_for(src)
     files = plugin_files()
     absent = [m for m in REQUIRED_PLUGIN_MODULES if m not in files]
     if absent:
@@ -637,7 +670,7 @@ def do_status(args) -> None:
         zips = sorted(p.name for p in mdir.glob("host-backup-*.zip"))
         say(f"Last install    : UNREADABLE metadata at {mdir / METADATA_NAME}")
         say(f"Backup          : not recoverable from metadata; zips present: {zips or 'none'}")
-    plugin_dest = hermes_home_dir(src) / "plugins" / "refine"
+    plugin_dest = plugin_dest_for(src)
     say(f"Plugin installed: {(plugin_dest / 'plugin.yaml').is_file()} ({plugin_dest})")
 
 
@@ -656,7 +689,10 @@ def do_rollback(args) -> None:
         backup = Path(backup_value)
         if not backup.is_file():
             fail(f"Backup zip missing: {backup}")
-        recorded_head = meta.get("base_head")
+        # The head recorded WITH the backup; the top-level base_head is refreshed
+        # by every run and says nothing about when the zip was taken. Older
+        # records have no host-level head, so fall back to it for them.
+        recorded_head = host.get("base_head") or meta.get("base_head")
         current_head = git_head_short(src)
         moved_on = bool(recorded_head and current_head and recorded_head != current_head)
         if moved_on:
@@ -796,12 +832,16 @@ def do_install(args) -> None:
         meta: dict = new_metadata(src, previous_metadata(mdir), mode="plugin-only")
         say("--plugin-only: skipping host classification and host patching.")
         say("Installing Refine plugin…")
+        # Recorded before the first copy, not after the last one: install_plugin
+        # can die mid-copy (permissions, a full disk) and a tree no metadata names
+        # is one --rollback cannot remove, while the gateway still tries to load
+        # it. The destination is known without copying anything.
+        meta["plugin_dest"] = str(plugin_dest_for(src))
+        write_metadata(mdir, meta)
         dest = install_plugin(meta, src)
         say(f"Plugin files → {dest} ({len(meta.get('plugin_files') or [])} files)")
-        # Record the copy before verifying it. Verification can fail() -- on a
-        # tree that does not parse, for instance -- and a copied plugin no
-        # metadata names is one --rollback cannot remove, while the gateway would
-        # still try to load it.
+        # Again after the copy: plugin_files is only known once it has happened,
+        # and verification below can fail() on a tree that does not parse.
         write_metadata(mdir, meta)
         say(f"Metadata → {mdir / METADATA_NAME}")
         verified = verify_plugin_imports(Path(dest), python_of(src), src)
@@ -883,10 +923,13 @@ def do_install(args) -> None:
         return
 
     say("Installing Refine plugin…")
+    # Before the copy starts, so a copy that dies mid-way is still removable.
+    meta["plugin_dest"] = str(plugin_dest_for(src))
+    write_metadata(mdir, meta)
     dest = install_plugin(meta, src)
     say(f"Plugin files → {dest} ({len(meta.get('plugin_files') or [])} files)")
-    # Before verification, for the same reason the host block is written before
-    # compile_all: a fatal after the copy must not orphan the copy.
+    # And again: the file list is only known after the copy, and everything below
+    # here -- import verification, capability verification -- can still fail().
     write_metadata(mdir, meta)
     say(f"Metadata → {mdir / METADATA_NAME}")
     verified = verify_plugin_imports(Path(dest), python_of(src), src)
@@ -924,7 +967,10 @@ print("CAPABILITY_OK")
             fail(f"capability verification failed:\n{r.stdout}\n{r.stderr}")
     finally:
         os.unlink(cap_script)
-    say("Capability verified: invocation-bound machinery present and fail-closed.")
+    # Says what the probe checked, not what the feature does: the probe asserts
+    # the host markers are importable and that entering the scope works. The
+    # fail-closed binding itself is exercised by the host route tests.
+    say("Capability verified: host markers importable and the invocation scope entered.")
 
     if verified != "verified":
         # The banner is the only line most people read, so it must not read the

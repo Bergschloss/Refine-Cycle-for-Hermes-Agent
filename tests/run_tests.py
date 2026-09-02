@@ -20499,11 +20499,17 @@ class InstallerPluginOnlyTests(unittest.TestCase):
             (self.src / rel).write_text(f"BASE = True\n{marker} = True\n", encoding="utf-8")
 
     def _as_stock_host(self):
-        """Make the real classify_host see this fixture as a supported stock base."""
+        """Make the real classify_host see this fixture as a supported stock base.
+
+        HEAD is read at call time, not from setUp: tests that commit to the
+        fixture (a host upgraded in place, a file removed) otherwise fall off the
+        pinned prefix and the installer refuses them as an unsupported base.
+        """
         import install
 
+        head = self._git("rev-parse", "--short=10", "HEAD").stdout.decode().strip()
         return patch.multiple(
-            install, EXPECTED_BASE_PREFIX=self.head[:8], PATCH_FILE=self.patch_file
+            install, EXPECTED_BASE_PREFIX=head[:8], PATCH_FILE=self.patch_file
         )
 
     def _args(self, *, patch_only: bool = False, plugin_only: bool = True):
@@ -20731,7 +20737,9 @@ class InstallerPluginOnlyTests(unittest.TestCase):
              patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
             install.do_install(self._args(patch_only=True, plugin_only=False))
         meta = self._read_metadata()
-        meta["base_head"] = "0000deadbeef"
+        # The head stamped WITH the backup is what rollback compares; the
+        # top-level base_head is refreshed by every run.
+        meta["host"]["base_head"] = "0000deadbeef"
         (install.metadata_dir(self.src) / install.METADATA_NAME).write_text(
             json.dumps(meta), encoding="utf-8"
         )
@@ -20889,6 +20897,95 @@ class InstallerPluginOnlyTests(unittest.TestCase):
             Path(self._read_metadata()["plugin_dest"]).resolve(),
             (self.home / "plugins" / "refine").resolve(),
             "the refused copy is on disk with nothing recording it",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_rollback(self._args(plugin_only=False))
+        self.assertFalse((self.home / "plugins" / "refine").exists())
+
+    def test_a_moved_on_host_is_still_flagged_after_a_later_plugin_only_run(self):
+        """base_head is refreshed every run; the backup's own head is not.
+
+        Measured before the fix: install, upgrade the host in place, run
+        --plugin-only (which touches no host file), and --rollback then overwrote
+        all eight files with pre-upgrade content while printing "byte-for-byte".
+        """
+        import install
+
+        with self._as_stock_host(), \
+             patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+        # The host moves on: a new commit, so HEAD is not what the backup was taken at.
+        (self.src / "cli.py").write_text("BASE = True\nUPGRADED = True\n", encoding="utf-8")
+        self._git("commit", "-qam", "host upgraded in place")
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args())  # --plugin-only: refreshes base_head
+        messages: list[str] = []
+        with patch.object(install, "say", messages.append):
+            install.do_rollback(self._args(plugin_only=False))
+        joined = " ".join(messages)
+        self.assertIn("but the checkout is now at", joined)
+        self.assertNotIn("byte-for-byte", joined)
+
+    def test_a_second_run_keeps_the_first_backup_as_the_restore_target(self):
+        """Restoring an intermediate state is not an undo of the install."""
+        import install
+
+        # The real patch creates this file; the fixture ships it, so remove it
+        # first or created_files is empty and the union has nothing to preserve.
+        self._git("rm", "-q", install.PATCH_TEST_FILE)
+        self._git("commit", "-qm", "without the route test file")
+        stock = self._target_snapshot()
+        mdir = install.metadata_dir(self.src)
+        with self._as_stock_host(), \
+             patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+        first = self._read_metadata()["host"]
+        created_first = first["created_files"]
+        self.assertEqual(created_first, [install.PATCH_TEST_FILE])
+        # What the real patch would have written, so rollback has it to remove.
+        created = self.src / install.PATCH_TEST_FILE
+        created.parent.mkdir(parents=True, exist_ok=True)
+        created.write_text("ROUTE_TESTS = True\n", encoding="utf-8")
+
+        # The host goes partial, and a second run records a backup of THAT.
+        three = list(install.PATCH_FILES[:3])
+        partial_patch = self._generate_patch("generated-partial.patch", rels=three)
+        self._write_markers(rels=three)
+        with self._as_stock_host(), patch.object(install, "PATCH_FILE", partial_patch), \
+             patch.object(install, "fail", side_effect=SystemExit(1)):
+            with self.assertRaises(SystemExit):
+                install.do_install(self._args(patch_only=True, plugin_only=False))
+
+        second = self._read_metadata()["host"]
+        self.assertEqual(second["backup"], first["backup"], "the first backup stopped being the target")
+        self.assertTrue(Path(second["backup"]).is_file())
+        self.assertEqual(second["created_files"], created_first, "created_files shrank across runs")
+        self.assertEqual(len(sorted(mdir.glob("host-backup-*.zip"))), 2, "a backup was overwritten")
+
+        install.do_rollback(self._args(plugin_only=False))
+        self.assertEqual(self._target_snapshot(), stock, "rollback restored an intermediate state")
+        self.assertFalse(
+            (self.src / install.PATCH_TEST_FILE).is_file(),
+            "the file the first run created was left on the host",
+        )
+
+    def test_a_copy_that_dies_midway_is_still_recorded(self):
+        import install
+
+        def half_copy(meta, src=None):
+            dest = install.plugin_dest_for(src)
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "plugin.yaml").write_text("half\n", encoding="utf-8")
+            raise OSError("simulated: disk full mid-copy")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+             patch.object(install, "install_plugin", side_effect=half_copy):
+            with self.assertRaises(OSError):
+                install.do_install(self._args())
+        self.assertEqual(
+            Path(self._read_metadata()["plugin_dest"]).resolve(),
+            (self.home / "plugins" / "refine").resolve(),
+            "a half-copied tree with nothing recording it",
         )
         with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
             install.do_rollback(self._args(plugin_only=False))
