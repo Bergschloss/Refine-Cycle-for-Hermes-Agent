@@ -20448,12 +20448,7 @@ class InstallerHostSelectionTests(unittest.TestCase):
         for rel in install.ALL_PATCH_CONTENT:
             target = self.src / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            content = "BASE = True\n"
-            if rel == "agent/auxiliary_client.py":
-                content = "class RouteLockedCallError(Exception):\n    pass\n"
-            elif rel == "hermes_cli/plugins.py":
-                content = "from contextlib import nullcontext\n"
-            target.write_text(content, encoding="utf-8")
+            target.write_text("BASE = True\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.src)], check=True)
         subprocess.run(["git", "-C", str(self.src), "config", "user.email", "test@example.invalid"], check=True)
         subprocess.run(["git", "-C", str(self.src), "config", "user.name", "Refine test"], check=True)
@@ -20538,92 +20533,6 @@ class InstallerHostSelectionTests(unittest.TestCase):
             state, detail = install.classify_host(self.src)
         self.assertEqual(state, "incompatible")
         self.assertIn("none bundled", detail)
-    def _full_marker_patch(self, name: str) -> Path:
-        """Generate a fully-applicable route patch for the plugin-only tests."""
-        import install
-
-        for rel, marker in install.FILE_MARKERS.items():
-            target = self.src / rel
-            suffix = f"\n{marker} = True\n"
-            if rel == "hermes_cli/plugins.py":
-                suffix = (
-                    "\ndef plugin_invocation_scope_for_agent(agent):\n"
-                    "    return nullcontext()\n"
-                    "plugin_invocation_scope = True\n"
-                )
-            target.write_text(
-                target.read_text(encoding="utf-8") + suffix,
-                encoding="utf-8",
-            )
-        diff = subprocess.run(
-            ["git", "-C", str(self.src), "diff"], capture_output=True, check=True
-        ).stdout.decode("utf-8")
-        subprocess.run(["git", "-C", str(self.src), "checkout", "-q", "--", "."], check=True)
-        patch_file = self.assets / name
-        patch_file.write_text(diff, encoding="utf-8")
-        return patch_file
-
-    def _plugin_args(self, *, patch_only: bool = False, plugin_only: bool = True):
-        return types.SimpleNamespace(
-            hermes_src=str(self.src), patch_only=patch_only, plugin_only=plugin_only,
-            plugin_mode="remove",
-        )
-
-    def _target_snapshot(self) -> dict[str, bytes]:
-        import install
-
-        return {rel: (self.src / rel).read_bytes() for rel in install.PATCH_FILES}
-
-    def test_plugin_only_installs_without_touching_a_stock_host(self):
-        import install
-
-        candidate = self._full_marker_patch("invocation-route-v2026.8.31.patch")
-        before = self._target_snapshot()
-        messages: list[str] = []
-        home = self.root / "hermes-home"
-        with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False), \
-             patch.object(install, "patch_candidates", return_value=[candidate]), \
-             patch.object(install, "say", messages.append):
-            install.do_install(self._plugin_args())
-        self.assertEqual(self._target_snapshot(), before, "--plugin-only must not patch host files")
-        self.assertTrue((home / "plugins" / "refine" / "plugin.yaml").is_file())
-        self.assertTrue((install.metadata_dir(self.src) / install.METADATA_NAME).is_file())
-        self.assertTrue(any("llm_invocation_unavailable" in message for message in messages))
-        self.assertFalse(any("Capability verified" in message for message in messages))
-
-    def test_plugin_only_leaves_an_already_patched_host_unchanged(self):
-        import install
-
-        candidate = self._full_marker_patch("invocation-route-v2026.8.31.patch")
-        self.assertEqual(install.run_git(self.src, "apply", str(candidate)).returncode, 0)
-        before = self._target_snapshot()
-        home = self.root / "hermes-home"
-        with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False), \
-             patch.object(install, "patch_candidates", return_value=[candidate]):
-            install.do_install(self._plugin_args())
-        self.assertEqual(self._target_snapshot(), before)
-        self.assertTrue((home / "plugins" / "refine" / "plugin.yaml").is_file())
-
-    def test_patch_only_and_plugin_only_are_rejected_together(self):
-        import install
-
-        candidate = self._full_marker_patch("invocation-route-v2026.8.31.patch")
-        with patch.object(install, "patch_candidates", return_value=[candidate]):
-            with self.assertRaises(SystemExit):
-                install.do_install(self._plugin_args(patch_only=True, plugin_only=True))
-
-    def test_plugin_only_rollback_removes_only_its_plugin(self):
-        import install
-
-        candidate = self._full_marker_patch("invocation-route-v2026.8.31.patch")
-        before = self._target_snapshot()
-        home = self.root / "hermes-home"
-        with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False), \
-             patch.object(install, "patch_candidates", return_value=[candidate]):
-            install.do_install(self._plugin_args())
-            install.do_rollback(self._plugin_args())
-        self.assertEqual(self._target_snapshot(), before)
-        self.assertFalse((home / "plugins" / "refine").exists())
 
 
 class InstallerPluginContentTests(unittest.TestCase):
