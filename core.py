@@ -1487,6 +1487,11 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         "error_count": 0,
         "tool_errors": [],
         "error_patterns": [],
+        # How many occurrences were dropped from lesson candidacy by
+        # patterns.is_self_correcting_error. Present on every shape of this
+        # dict, zero included: "no suppression" and "field absent" must not
+        # look alike to a reader of a journaled summary.
+        "self_correcting_suppressed": 0,
         "user_corrections": [],
         "session_id": "",
         "session_id_source": "unknown",
@@ -1652,11 +1657,16 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 previous_was_assistant_response = bool(content.strip())
             elif role == "user":
                 previous_was_assistant_response = False
+        _suppressed: Dict[str, int] = {}
+        _current_patterns = patterns.extract_patterns(
+            error_items, suppressed_out=_suppressed
+        )
         return {
             "messages": messages[-limit:],
             "error_count": len(tool_errors),
             "tool_errors": tool_errors[-10:],
-            "error_patterns": patterns.extract_patterns(error_items),
+            "error_patterns": _current_patterns,
+            "self_correcting_suppressed": int(_suppressed.get("self_correcting", 0)),
             "user_corrections": corrections[-5:],
             "session_id": resolved,
             "session_id_source": how,
@@ -1683,6 +1693,7 @@ def collect_cross_session_patterns(
     max_sessions: Optional[int] = None,
     strict: bool = False,
     truncation_out: Optional[Dict[str, bool]] = None,
+    suppressed_out: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """
     ``truncation_out``, when given a dict, is filled in place with
@@ -1691,6 +1702,11 @@ def collect_cross_session_patterns(
     thread and an interactive call can run this at the same time. A
     no_signal journal entry that folds these in can finally say whether
     the window it judged was clipped, instead of only THAT it was quiet.
+
+    ``suppressed_out`` is the same kind of out-parameter, carrying how many
+    occurrences ``extract_patterns`` dropped from lesson candidacy in this
+    window, so a gate closed by suppression can be told apart from a genuinely
+    quiet one.
     """
     if not config.cross_session_enabled():
         if strict:
@@ -1807,7 +1823,9 @@ def collect_cross_session_patterns(
         # Signal gating must see every observed pattern. Prompt construction applies
         # FORMAT_PATTERNS_LIMIT separately at its rendering boundary, so truncating
         # here cannot hide a qualifying lower-ranked failure from has_signal().
-        result = patterns.extract_patterns(iter_items(), limit=None)
+        result = patterns.extract_patterns(
+            iter_items(), limit=None, suppressed_out=suppressed_out
+        )
         rows_truncated = max_rows is not None and rows_seen >= max_rows
         if rows_truncated:
             logger.warning(
@@ -2863,7 +2881,54 @@ def _memory_entry_delimiter() -> str:
 # stop list below removes function words from both so shared grammar alone
 # cannot inflate a score.
 _MEMORY_DUPLICATE_JACCARD_THRESHOLD = 0.55
+# The message markers that tie a refusal's text to the caller that classifies
+# it (see _apply_edit). Matching the prose by hand there meant rewording a
+# message silently dropped the classification.
+_MEMORY_DUPLICATE_MARKER = "token-set Jaccard"
+# A store that cannot be read is an ENVIRONMENTAL failure, not a verdict about
+# the content, and it now refuses every memory write. It gets its own code for
+# the reason its sibling above does: two causes that share one code are one
+# line in the journal, and this is the one that means "the host changed under
+# refine", which nobody would go looking for in a content rejection.
+_MEMORY_STORE_UNAVAILABLE_MARKER = "Memory store is unavailable"
 _MEMORY_DUPLICATE_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+# Numbers are compared separately from words, and only for a pair the word
+# score has ALREADY judged a duplicate. A memory entry's whole payload is
+# often a number -- a limit, a port, a retry count -- and two entries whose
+# numbers CONFLICT are not a duplicate but a correction and the value it
+# corrects. Measured on the live store: 11 of 21 entries contain digits, and
+# with digits merely dropped from the token set, a digit-corrected version of
+# every one of those 11 scored 1.00 and was refused. Since refine may never
+# propose a delete and a memory patch reaches the host as an add, that made a
+# wrong number permanent and its correction structurally unproposable -- while
+# the proposer prompt tells the model that exactly such values belong in
+# memory.
+#
+# "Conflict" is deliberately narrower than "differ". Each side must assert a
+# number the other does not: {100} vs {500} is a correction, {100} vs
+# {100, 2} is the same lesson that merely gained a version number or a
+# footnote, and treating the second as a correction would let any incidental
+# digit walk a near-duplicate straight past the guardrail.
+_MEMORY_DUPLICATE_NUMBER_RE = re.compile(r"\d+")
+# Comma and whitespace separators BETWEEN DIGITS are collapsed before the
+# digits are read, so ``2,200``, ``2 200`` and ``2200`` are one number. That is
+# the reformatting that actually happens here, because the host writes
+# ``{value:,}`` in its own messages and a lesson quoting it either keeps the
+# separator or drops it.
+#
+# This is a token rule, not a number parser, and the cases it does NOT cover
+# are named here rather than left to be discovered from a bloated store. Each
+# of these reads as two conflicting values, so a word-identical restatement of
+# it is allowed through as a correction and the store keeps both entries:
+#   * a reordered list -- ``443,8080`` versus ``8080,443``;
+#   * a decimal rewritten -- ``1.5`` versus ``1.50``;
+#   * a European thousands separator or a Python underscore -- ``2.200`` or
+#     ``1_000`` versus ``2200``/``1000``.
+# An earlier version tried to collapse only three-digit groupings and was
+# worse: ``429,503`` is indistinguishable from a thousands grouping, so it
+# turned a formatting-only restatement of a status-code list into a
+# "correction", which is the common case rather than a rare one.
+_MEMORY_NUMBER_SEPARATOR_RE = re.compile(r"(?<=\d)[,\u00a0\u202f\s]+(?=\d)")
 _MEMORY_DUPLICATE_STOP_WORDS = frozenset({
     # English
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of",
@@ -2878,6 +2943,33 @@ _MEMORY_DUPLICATE_STOP_WORDS = frozenset({
 def _memory_token_set(content: str) -> frozenset:
     words = _MEMORY_DUPLICATE_WORD_RE.findall(content.casefold())
     return frozenset(word for word in words if word not in _MEMORY_DUPLICATE_STOP_WORDS)
+
+
+def _memory_number_set(content: str) -> frozenset:
+    """The numeric facts an entry asserts, compared apart from its words.
+
+    Digit-adjacent separators are collapsed first, so ``2,200`` and ``2200``
+    are one number rather than ``{2, 200}`` versus ``{2200}`` -- which would
+    otherwise read as a conflict and wave a pure reformatting of the same entry
+    through as a "correction". The host writes both forms: its own messages use
+    ``{value:,}``. This is a token rule, not a number parser --
+    ``_MEMORY_NUMBER_SEPARATOR_RE`` lists the reformattings it does not cover.
+    """
+    return frozenset(
+        _MEMORY_DUPLICATE_NUMBER_RE.findall(
+            _MEMORY_NUMBER_SEPARATOR_RE.sub("", content)
+        )
+    )
+
+
+def _memory_numbers_conflict(proposed: frozenset, existing: frozenset) -> bool:
+    """Whether two entries assert numbers that contradict each other.
+
+    Both sides must carry a number the other lacks. A proposal that only ADDS
+    a number to an entry it otherwise restates is not a correction, so this is
+    False for it -- see ``_MEMORY_DUPLICATE_NUMBER_RE``.
+    """
+    return bool(proposed - existing) and bool(existing - proposed)
 
 
 def _jaccard_similarity(a: frozenset, b: frozenset) -> float:
@@ -2898,27 +2990,55 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
     lesson only for space, and a recurring failure raising it again is exactly
     the signal this plugin exists to surface. Blocking that would make refine
     permanently blind to it, invisibly.
+
+    A pair whose words match but whose numbers conflict is allowed through as a
+    correction (see ``_MEMORY_DUPLICATE_NUMBER_RE``). Allowed through, not
+    substituted: the host call is an ``add`` and refine may never propose a
+    delete, so the store then holds BOTH the corrected entry and the value it
+    corrects, and only the operator can remove the stale one. That is the
+    lesser of the two harms -- the alternative was a wrong number no proposal
+    could ever correct -- but it is not supersession. Superseding would need
+    the host's ``replace`` action, which refine does not use.
     """
     proposed_tokens = _memory_token_set(content)
     if not proposed_tokens:
         return None
+    proposed_numbers = _memory_number_set(content)
     try:
-        from tools.memory_tool import MemoryStore
-
-        store = MemoryStore()
+        store = _memory_store()
         store.load_from_disk()
         entries = store.memory_entries
     except Exception as exc:
+        # Fail closed, like the prompt-note duplicate check twenty lines up:
+        # an unreadable store means this guardrail cannot answer its question,
+        # and what it would have judged is a write into the agent's own future
+        # context.
+        #
+        # Stated precisely, because this is a deliberate trade and not a free
+        # one: for the common causes (``tools.memory_tool`` missing,
+        # ``load_from_disk`` raising) ``_apply_memory`` would fail on the same
+        # store anyway, so only the message changes. On a host that exposes
+        # ``memory_tool`` but no ``memory_entries``, the apply would have
+        # succeeded and is now refused instead. That is the safer direction --
+        # a refusal is journaled, countable and reversible by fixing the host;
+        # an unchecked write is permanent -- and the code below makes the cause
+        # visible rather than leaving it to look like a content rejection.
         logger.warning("Cannot read memory store for duplicate check: %s", scrub_text(str(exc)))
-        return None
+        return f"{_MEMORY_STORE_UNAVAILABLE_MARKER} for the duplicate check"
     for existing in entries:
         score = _jaccard_similarity(proposed_tokens, _memory_token_set(existing))
-        if score >= _MEMORY_DUPLICATE_JACCARD_THRESHOLD:
-            return (
-                f"Memory entry is {score:.2f} similar to an entry already in "
-                "the store (token-set Jaccard >= "
-                f"{_MEMORY_DUPLICATE_JACCARD_THRESHOLD})"
-            )
+        if score < _MEMORY_DUPLICATE_JACCARD_THRESHOLD:
+            continue
+        # Words already say "duplicate"; numbers get the last word, and only
+        # here. Asking about numbers first would let any pair with a differing
+        # digit skip the word comparison entirely.
+        if _memory_numbers_conflict(proposed_numbers, _memory_number_set(existing)):
+            continue
+        return (
+            f"Memory entry is {score:.2f} similar to an entry already in "
+            f"the store ({_MEMORY_DUPLICATE_MARKER} >= "
+            f"{_MEMORY_DUPLICATE_JACCARD_THRESHOLD})"
+        )
     return None
 
 
@@ -3009,6 +3129,16 @@ def _memory_full_result_code(apply_result: Dict[str, Any]) -> str:
 
     Returns "" when the failure is not a memory-full/consolidation-exhausted
     one at all, so the caller can fall back to its existing generic code.
+
+    Reachability, measured against the installed host rather than assumed:
+    ``memory_full`` is what refine actually sees. The exhausted reply needs
+    ``_consolidation_failures`` to exceed ``_MAX_CONSOLIDATION_FAILURES_PER_TURN``
+    (3), that counter lives on a ``MemoryStore`` instance, and ``_apply_memory``
+    builds a fresh store and performs exactly one ``add`` -- so the counter
+    reaches 1 and the terminal text cannot be produced through this path today.
+    The branch is kept because the classification is correct if the host's
+    turn-scoped store ever reaches refine, and the test that covers it asserts
+    the regex contract against the host's wording, not production reachability.
     """
     if apply_result.get("success"):
         return ""
@@ -3053,9 +3183,16 @@ def _memory_store() -> "Any":
     handler, so this stays behind the same single source of truth rather than
     re-deriving the config path here.
     """
-    from tools.memory_tool import MemoryStore, load_on_disk_store
+    # Imported separately, and the host-helper import kept inside the try: a
+    # host that does not export ``load_on_disk_store`` is exactly the case the
+    # fallback exists for, and importing both together made that ImportError
+    # escape the function instead -- turning every memory write on such a host
+    # into a generic apply error. The same file runs on two hosts.
+    from tools.memory_tool import MemoryStore
 
     try:
+        from tools.memory_tool import load_on_disk_store
+
         return load_on_disk_store()
     except Exception as exc:
         logger.warning(
@@ -3414,6 +3551,7 @@ def _handle_no_signal(
     run_target_unusable: bool,
     intended_target: Dict[str, str],
     cross_session_truncation: Optional[Dict[str, bool]] = None,
+    evidence_suppression: Optional[Dict[str, int]] = None,
 ) -> Union[Dict[str, Any], Tuple[str, str]]:
     """Handle a gate-closed pass: reviewer fallback or journaled no_op.
 
@@ -3426,6 +3564,11 @@ def _handle_no_signal(
     into every meta dict this function journals so a no_signal entry does
     not merely say the window was quiet -- it says whether the window was
     the whole picture.
+
+    ``evidence_suppression`` is folded in the same way and for the same
+    reason: a gate closed because every observed failure was suppressed as
+    self-correcting is a different fact from a gate closed on thin evidence,
+    and only the count makes them distinguishable in the journal.
     """
     _signal_path = "no_signal"
     should_review = (
@@ -3467,6 +3610,8 @@ def _handle_no_signal(
         }
         if cross_session_truncation:
             reviewer_llm_meta.update(cross_session_truncation)
+        if evidence_suppression:
+            reviewer_llm_meta.update(evidence_suppression)
         reviewer_substituted = _model_substituted(
             intended_target.get("provider", ""), intended_target.get("model", ""),
             str(reviewer_call_meta.get("reported_provider", "")),
@@ -3624,6 +3769,7 @@ def _handle_no_signal(
             llm_meta={
                 "signal_path": _signal_path,
                 **(cross_session_truncation or {}),
+                **(evidence_suppression or {}),
             },
         )
         if not entry_id:
@@ -4298,11 +4444,41 @@ def _refine_once(
     # no_signal journal entry below so a clipped window is visible, not
     # just its quietness.
     _cross_session_truncation: Dict[str, bool] = {}
+    # Suppression is counted across BOTH windows for the same reason the
+    # truncation flags are journaled: a pass that saw failures and dropped all
+    # of them from lesson candidacy must not read afterwards like a pass that
+    # saw nothing (AGENTS.md, silent no_op).
+    _cross_session_suppressed: Dict[str, int] = {}
     cross_session_patterns = (
         []
         if explicit_session
-        else collect_cross_session_patterns(truncation_out=_cross_session_truncation)
+        else collect_cross_session_patterns(
+            truncation_out=_cross_session_truncation,
+            suppressed_out=_cross_session_suppressed,
+        )
     )
+    # max(), never a sum: the cross-session window includes the current
+    # session's rows, so adding the two counts reports the same suppressed
+    # occurrence twice -- the double counting this module already has a test
+    # against for patterns themselves. The two windows are bounded differently
+    # (the cross-session one has a horizon and row/session caps, the current
+    # one does not), so when they suppress disjoint occurrences this is a lower
+    # bound rather than a total. It is read as "was anything suppressed, and
+    # roughly how much", which that supports.
+    _suppressed_total = max(
+        int(evidence.get("self_correcting_suppressed", 0) or 0),
+        int(_cross_session_suppressed.get("self_correcting", 0) or 0),
+    )
+    # Recorded even when zero, like the truncation flags beside it and for the
+    # reason _journal_nonmutation gives about result_code: an absent key reads
+    # as "measured zero", "field did not exist yet" and "nobody looked" at
+    # once, and only one of those is a fact about this pass.
+    #
+    # What the number counts, exactly: occurrences suppressed in the windows
+    # that were actually read. A window that could not be read at all
+    # (cross-session collection disabled, or the DB unavailable) contributes
+    # nothing and is reported by its own existing signals, not by this field.
+    _evidence_suppression = {"self_correcting_suppressed": _suppressed_total}
     all_error_patterns = patterns.merge_patterns(
         evidence.get("error_patterns", []), cross_session_patterns
     )
@@ -4334,6 +4510,7 @@ def _refine_once(
             run_target_unusable=_run_target_unusable,
             intended_target=_intended_target,
             cross_session_truncation=_cross_session_truncation,
+            evidence_suppression=_evidence_suppression,
         )
         if isinstance(_handled, dict):
             return _handled
@@ -4403,7 +4580,11 @@ def _refine_once(
                     },
                     outcome="subagent_strict_error",
                     error=failure_message,
-                    llm_meta=dict(_subagent_meta),
+                    # The suppression count is already known here, and this
+                    # exit is a lost pass like any other: without it, a strict
+                    # failure over a window whose every failure was suppressed
+                    # cannot be told from one over a quiet window.
+                    llm_meta=dict(_subagent_meta, **_evidence_suppression),
                 )
                 response = {
                     "success": False,
@@ -4519,6 +4700,10 @@ def _refine_once(
     )
     if _run_target_issues:
         _run_llm_meta["target_issues"] = _run_target_issues
+    # A pass that proceeded still records what its evidence lost, so an edit
+    # proposed from a partly-suppressed window is readable as such later.
+    if _evidence_suppression:
+        _run_llm_meta.update(_evidence_suppression)
     proposal = sanitize(proposal)
     proposal = dict(
         proposal,
@@ -4596,6 +4781,11 @@ def _refine_once(
         "errors": evidence.get("error_count", 0),
         "fingerprint_offered": _run_llm_meta["fingerprint_offered"],
         "grounded": _run_llm_meta["grounded"],
+        # Reported next to ``errors`` because the two are read together: a
+        # summary saying five errors and showing no pattern is otherwise
+        # unexplained. The gate-closed exit returns the whole evidence dict,
+        # which already carries the field; this is the proceeded exit's copy.
+        **_evidence_suppression,
     }
     failure = scrub_text(str(proposal.get("failure", "")).strip())
     if failure:
@@ -4871,13 +5061,12 @@ def _refine_once(
         )
     response["evidence"] = evidence_summary
     # A2: _apply_edit already sets response["llm_meta"], normally to this same
-    # _run_llm_meta object -- except when the apply hit the memory-full path,
-    # where it is a distinct copy carrying result_code=memory_full/
-    # memory_consolidation_exhausted. Only fall back to _run_llm_meta for the
-    # early-return paths inside _apply_edit that do not set the key at all
-    # (guardrail rejection, backup failure, etc.), so this never overwrites
-    # that override.
-    response["llm_meta"] = response.get("llm_meta", _run_llm_meta)
+    # _run_llm_meta object -- except where an edit-specific classification
+    # applies (memory_full, memory_consolidation_exhausted, memory_duplicate),
+    # in which case it is a distinct copy that must not be overwritten here.
+    # Fall back to _run_llm_meta only for the early-return paths that leave
+    # the key absent or empty (evidence_invalidated, backup failure, etc.).
+    response["llm_meta"] = response.get("llm_meta") or _run_llm_meta
     return response
 
 
@@ -4939,6 +5128,24 @@ def _apply_edit(
         return result
     guardrail_error = _validate_proposal(proposal)
     if guardrail_error:
+        # B3: a duplicate refusal is journaled with its own result_code, not
+        # only echoed on the response. This path never reaches
+        # ``journal.prepare()`` -- it writes through ``_journal_nonmutation``,
+        # which passes ``llm_meta`` straight to ``journal.log`` and only fills
+        # ``result_code`` when the caller left it unset -- so the durable
+        # record can carry the classification, and an earlier version that
+        # attached it to the response alone left the journal saying only
+        # "rejected" with the reason in prose.
+        #
+        # Keyed on the marker the message is built from, not on a re-run of
+        # the check: a memory proposal can fail an EARLIER guardrail
+        # (injection, resource reference, delimiter) whose message this must
+        # not relabel as a duplicate.
+        rejection_meta = dict(llm_meta or {})
+        if _MEMORY_DUPLICATE_MARKER in guardrail_error:
+            rejection_meta["result_code"] = "memory_duplicate"
+        elif _MEMORY_STORE_UNAVAILABLE_MARKER in guardrail_error:
+            rejection_meta["result_code"] = "memory_store_unavailable"
         entry_id = _journal_nonmutation(
             trigger=trigger,
             reason=safe_reason,
@@ -4947,7 +5154,7 @@ def _apply_edit(
             outcome="rejected",
             error=guardrail_error,
             group=group,
-            llm_meta=llm_meta,
+            llm_meta=rejection_meta,
         )
         result = {
             "success": False,
@@ -4955,17 +5162,11 @@ def _apply_edit(
             "proposal": proposal,
             "reversible": False,
             "edits_applied": 0,
+            # A copy, never the caller's dict: the run-level meta is read by
+            # the caller after this returns and shared across a transaction's
+            # edits, so one edit's classification must not appear on another's.
+            "llm_meta": rejection_meta,
         }
-        # B3: same in-memory-response-only pattern A2 established for
-        # memory_full -- llm_meta is journal-immutable (frozen at prepare()
-        # time), and this rejection never reaches prepare() at all, so the
-        # code cannot land in the durable record either way. Matched on the
-        # marker _memory_duplicate_error's own message carries, not by
-        # recomputing the check blind: a memory proposal can fail an EARLIER
-        # guardrail (injection, resource reference) whose message this must
-        # not relabel as a duplicate.
-        if "token-set Jaccard" in guardrail_error:
-            result["llm_meta"] = dict(llm_meta or {}, result_code="memory_duplicate")
         if entry_id:
             result["record_id"] = entry_id
         return result
@@ -5239,13 +5440,19 @@ def _apply_edit(
             if used is not None and limit is not None:
                 llm_meta["memory_used"] = used
                 llm_meta["memory_limit"] = limit
-    # B4: the operator must see the pressure at every write, not only inside a
-    # failure. Same llm_meta fields A2 sets on the failure path -- one shape
-    # for both -- computed fresh from the host AFTER this edit landed, so the
-    # number reflects the store this write actually produced. A skill or
-    # prompt edit gets neither field; a host whose memory config cannot be
-    # read (bare-module run) applies cleanly with the fields simply absent
-    # rather than a guessed number.
+    # B4: report the pressure at every write, not only inside a failure. Same
+    # llm_meta fields A2 sets on the failure path -- one shape for both --
+    # computed fresh from the host AFTER this edit landed, so the number
+    # reflects the store this write actually produced. A skill or prompt edit
+    # gets neither field; a host whose memory config cannot be read
+    # (bare-module run) applies cleanly with the fields simply absent rather
+    # than a guessed number.
+    #
+    # Where this surfaces, stated precisely rather than aspirationally: the
+    # ``refine_run`` tool serializes the whole response, so the AGENT reads
+    # these fields in the same turn. ``/refine`` renders ``message`` only, so
+    # a human operator does not see them yet; that is a renderer change, not
+    # something this block can claim.
     if kind == "memory" and outcome == "applied":
         used, limit = _memory_usage()
         if used is not None and limit is not None:

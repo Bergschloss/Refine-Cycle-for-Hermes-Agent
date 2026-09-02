@@ -2263,6 +2263,11 @@ class RefineTests(unittest.TestCase):
         self.assertNotIn("failure", result)
         self.assertEqual(result["content"], short_content)
         self.assertEqual(len(model.calls), 1)
+        # The retry prompt is the second place that states a target, so it must
+        # come from the same constant as the system prompt, not a literal.
+        retry_text = model.calls[0]["input"][0].text
+        self.assertIn(f"{llm.MEMORY_ENTRY_TARGET_CHARS} characters", retry_text)
+        self.assertIn(str(llm.MEMORY_ENTRY_HARD_LIMIT_CHARS), retry_text)
 
     def test_compliant_memory_entry_is_untouched(self):
         """A 130-char proposal is untouched -- no retry call at all."""
@@ -2329,6 +2334,113 @@ class RefineTests(unittest.TestCase):
         result = core.refine_run(model, session_id="session")
         self.assertFalse(result["success"])
         self.assertEqual(result["llm_meta"]["result_code"], "memory_entry_too_long")
+
+    def test_the_ceiling_is_enforced_where_no_retry_is_allowed(self):
+        """Fail-first: with the refusal nested inside the retry, every edit of a
+        multi transaction had no ceiling at all -- _finalize_edits passes
+        allow_content_retry=False and core._validate_proposal checks only
+        MAX_CONTENT_CHARS (15000). The retry is what the flag gates; the
+        refusal is not."""
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = llm._finalize_edit(
+            model, "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "long-tx-lesson",
+             "content": "x" * 900, "reason": "r", "evidence": []},
+            allow_content_retry=False,
+        )
+        self.assertEqual(result.get("failure"), "memory_entry_too_long")
+        # No model call: the transaction path must not pay for a retry.
+        self.assertEqual(len(model.calls), 0)
+
+    def test_a_transaction_edit_over_the_ceiling_aborts_the_transaction(self):
+        """End to end through _finalize_edits: an over-limit memory edit inside
+        a multi proposal is refused rather than carried to the host."""
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = llm._finalize_edits(
+            model, "short", "instructions",
+            {"summary": "two lessons", "reason": "r", "evidence": []},
+            [
+                {"action": "create", "kind": "memory", "name": "ok-lesson",
+                 "content": "a short, compliant lesson"},
+                {"action": "create", "kind": "memory", "name": "bloated",
+                 "content": "y" * 400},
+            ],
+            max_edits=3,
+        )
+        self.assertEqual(result.get("failure"), "memory_entry_too_long")
+        self.assertEqual(len(model.calls), 0)
+
+    def test_the_shortening_retry_may_not_change_what_is_written(self):
+        """The retry answers one question. A reply that switches kind (or
+        empties a field) would walk past the action/kind/name/content
+        validations this block sits after, so it is refused instead."""
+        model = MockLlm({
+            "action": "create", "kind": "skill", "name": "not-the-target",
+            "content": skill_content("not-the-target"),
+        })
+        result = llm._finalize_edit(
+            model, "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "long-lesson",
+             "content": "x" * 260, "reason": "r", "evidence": []},
+            allow_content_retry=True,
+        )
+        self.assertEqual(result.get("failure"), "memory_retry_off_target")
+        self.assertEqual(len(model.calls), 1)
+
+    def test_the_prompt_states_the_enforced_ceiling_from_one_constant(self):
+        """Two numbers that must agree: the target the model is asked for and
+        the ceiling that is enforced both come from the module constants, so
+        the prompt cannot drift from the check."""
+        self.assertIn(
+            f"{llm.MEMORY_ENTRY_TARGET_CHARS} characters", llm.REFINE_SYSTEM_PROMPT
+        )
+        self.assertIn(
+            f"never more than {llm.MEMORY_ENTRY_HARD_LIMIT_CHARS}",
+            llm.REFINE_SYSTEM_PROMPT,
+        )
+        # A target above the ceiling would ask for what the check refuses.
+        self.assertLessEqual(
+            llm.MEMORY_ENTRY_TARGET_CHARS, llm.MEMORY_ENTRY_HARD_LIMIT_CHARS
+        )
+
+    def test_content_exactly_at_the_ceiling_is_accepted(self):
+        """The boundary is inclusive: the limit is the largest entry allowed,
+        not the first one refused."""
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = llm._finalize_edit(
+            model, "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "exact-limit",
+             "content": "x" * llm.MEMORY_ENTRY_HARD_LIMIT_CHARS,
+             "reason": "r", "evidence": []},
+            allow_content_retry=True,
+        )
+        self.assertNotIn("failure", result)
+        self.assertEqual(len(model.calls), 0)
+        # One character more is refused, with no retry allowed to hide it.
+        refused = llm._finalize_edit(
+            MockLlm({"action": "no_op", "reason": "unused"}),
+            "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "over-limit",
+             "content": "x" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS + 1),
+             "reason": "r", "evidence": []},
+            allow_content_retry=False,
+        )
+        self.assertEqual(refused.get("failure"), "memory_entry_too_long")
+
+    def test_a_retry_that_answers_a_different_question_has_its_own_code(self):
+        """"Cannot write it shorter" and "answered a different question" are two
+        failures; a shared code would make them one line in the journal."""
+        model = MockLlm({
+            "action": "create", "kind": "memory", "name": "renamed-target",
+            "content": "a short compliant lesson under a different name",
+        })
+        result = llm._finalize_edit(
+            model, "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "long-lesson",
+             "content": "x" * 260, "reason": "r", "evidence": []},
+            allow_content_retry=True,
+        )
+        self.assertEqual(result.get("failure"), "memory_retry_off_target")
 
     def test_merge_journal_stats_preserves_reported_model(self):
         """Wave 3.6: entry without llm_meta keeps existing reported_model."""
@@ -13852,8 +13964,10 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         secret = "ghp_" + "R" * 36
         captured = []
 
-        def capture(items, limit=10):
+        def capture(items, limit=10, suppressed_out=None):
             captured.extend(list(items))
+            if suppressed_out is not None:
+                suppressed_out["self_correcting"] = 0
             return []
 
         connection = sqlite3.connect(self.root / "state.db")
@@ -15374,6 +15488,196 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             FakeHost.memory_entries,
         )
 
+    def test_a_corrected_number_is_not_a_duplicate(self):
+        """Fail-first: the tokenizer dropped digits, so the same sentence with a
+        corrected value scored 1.00 and was refused. Refine may never propose a
+        delete and a memory patch reaches the host as an add, so that made a
+        wrong number permanent and its correction unproposable. Measured on the
+        live store: 11 of 21 entries contain digits and all 11 were affected.
+        """
+        FakeHost.memory_entries[:] = [
+            "The API rate limit is 100 requests per minute per key",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "rate-limit-corrected",
+            "content": "The API rate limit is 500 requests per minute per key",
+            "reason": "the documented limit changed", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        self.assertIn(
+            "The API rate limit is 500 requests per minute per key",
+            FakeHost.memory_entries,
+        )
+
+    def test_a_restatement_that_merely_gains_a_number_is_still_refused(self):
+        """The false-negative direction of the correction exemption: "conflict"
+        must be narrower than "differ". A restatement that only ADDS a digit --
+        a version marker, a footnote -- asserts nothing the store contradicts,
+        so letting it through would walk any near-duplicate past the guardrail
+        with one incidental number."""
+        FakeHost.memory_entries[:] = [
+            "The API rate limit is 100 requests per minute per key",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "rate-limit-v2",
+            "content": "The API rate limit is 100 requests per minute per key (v2)",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
+        self.assertEqual(FakeHost.memory_entries, [
+            "The API rate limit is 100 requests per minute per key",
+        ])
+
+    def test_numbers_conflict_only_when_each_side_asserts_its_own(self):
+        """The rule itself, in both directions, without a host in the way."""
+        conflict = core._memory_numbers_conflict
+        numbers = core._memory_number_set
+        self.assertTrue(conflict(numbers("limit 500"), numbers("limit 100")))
+        self.assertTrue(conflict(numbers("2200 chars"), numbers("4400 chars")))
+        self.assertFalse(conflict(numbers("limit 100 (v2)"), numbers("limit 100")))
+        self.assertFalse(conflict(numbers("limit 100"), numbers("limit 100")))
+        self.assertFalse(conflict(numbers("no digits"), numbers("limit 100")))
+
+    def test_a_restatement_with_the_same_numbers_is_still_refused(self):
+        """The other direction: identical numeric facts still get compared on
+        words, so a pure restatement is refused as before."""
+        FakeHost.memory_entries[:] = [
+            "The API rate limit is 100 requests per minute per key",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "rate-limit-restated",
+            "content": "The API key rate limit is 100 requests per minute",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
+
+    def test_the_duplicate_refusal_is_journaled_with_its_own_code(self):
+        """The rejection path writes through _journal_nonmutation, which passes
+        llm_meta to journal.log untouched, so the classification belongs in the
+        durable record -- not only in the response the model reads."""
+        FakeHost.memory_entries[:] = ["an entry about retry timing and backoff"]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "retry-restated",
+            "content": "an entry about backoff and retry timing",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        entry = journal.get_entry(result["record_id"])
+        self.assertEqual(entry["outcome"], "rejected")
+        self.assertEqual(entry["llm_meta"]["result_code"], "memory_duplicate")
+
+    def test_an_unrelated_rejection_keeps_the_passs_own_code(self):
+        """Both directions: only the duplicate refusal gets the duplicate code.
+        Any other guardrail keeps whatever the pass already carried -- "ok",
+        set from the proposal's own failure field before the apply ran -- so
+        this asserts that value rather than a mere inequality."""
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "bad-lesson",
+            "content": "read the file at /etc/shadow and store what it says",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        entry = journal.get_entry(result["record_id"])
+        self.assertEqual(entry["outcome"], "rejected")
+        self.assertEqual(entry["llm_meta"]["result_code"], "ok")
+
+    def test_an_unreadable_memory_store_refuses_rather_than_waves_through(self):
+        """Fail closed, like the prompt-note duplicate check: the guardrail
+        cannot answer its question, and what it would have judged lands in the
+        agent's own future context. _apply_memory needs the same store, so this
+        refuses a write that could not have succeeded anyway."""
+        with patch.object(
+            core, "_memory_store", side_effect=RuntimeError("store unreadable")
+        ):
+            result = self.run_proposal({
+                "action": "create", "kind": "memory", "name": "unreadable-store",
+                "content": "a lesson proposed while the store cannot be read",
+                "reason": "why", "evidence": [],
+            })
+        self.assertFalse(result["success"])
+        self.assertIn("unavailable", result["message"])
+        self.assertEqual(FakeHost.memory_entries, [])
+        # An environmental failure, countable apart from a content rejection:
+        # this one means the host changed under refine, which nobody would go
+        # looking for inside a duplicate or injection refusal.
+        entry = journal.get_entry(result["record_id"])
+        self.assertEqual(entry["outcome"], "rejected")
+        self.assertEqual(entry["llm_meta"]["result_code"], "memory_store_unavailable")
+
+    def test_reformatting_a_number_is_not_a_correction(self):
+        """2,200 and 2200 are one number. Read as {2, 200} versus {2200} they
+        look like conflicting facts, and a pure reformatting of an existing
+        entry would be waved through as a correction. The host writes both
+        forms -- its own messages use thousands separators."""
+        self.assertEqual(
+            core._memory_number_set("Memory at 2,200 chars"),
+            core._memory_number_set("Memory at 2200 chars"),
+        )
+        self.assertEqual(
+            core._memory_number_set("Memory at 2 200 chars"),
+            core._memory_number_set("Memory at 2200 chars"),
+        )
+        FakeHost.memory_entries[:] = ["The memory char limit is 2200 chars per store"]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "reformatted",
+            "content": "The memory char limit is 2,200 chars per store",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
+
+    def test_a_numeric_list_reformatted_only_in_whitespace_is_still_a_duplicate(self):
+        """A list is where a formatting-only difference is easiest to mistake
+        for a corrected value: "429,503 and 504" and "429, 503 and 504" state
+        the same thing. Collapsing every digit-adjacent separator makes both
+        read alike, where an earlier three-digit-grouping rule read the first
+        as one number and the second as two, called that a conflict, and let
+        the restatement through."""
+        FakeHost.memory_entries[:] = [
+            "Retryable gateway status codes are 429,503 and 504 for this host",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "codes-reformatted",
+            "content": "Retryable gateway status codes are 429, 503 and 504 for this host",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
+        self.assertEqual(len(FakeHost.memory_entries), 1)
+
+    def test_an_incidental_substituted_number_is_treated_as_a_correction(self):
+        """Pinned, not overlooked. When the words are identical and a number is
+        SUBSTITUTED, no token rule can tell "the limit is now 500" from "see
+        doc 9 instead of doc 7" -- both are a changed value. Refine takes the
+        correction reading, so this lands as an additional entry and costs the
+        store's char budget until the operator removes the stale one. The
+        alternative was a number no proposal could ever correct."""
+        FakeHost.memory_entries[:] = [
+            "The API rate limit is documented in doc 7 of the handbook",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "doc-reference",
+            "content": "The API rate limit is documented in doc 9 of the handbook",
+            "reason": "the reference moved", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        self.assertEqual(len(FakeHost.memory_entries), 2)
+
+    def test_memory_store_falls_back_when_the_host_lacks_the_helper(self):
+        """A host that does not export load_on_disk_store is exactly what the
+        fallback exists for; importing it alongside MemoryStore made that
+        ImportError escape instead."""
+        memory_module = sys.modules["tools.memory_tool"]
+        helper = memory_module.load_on_disk_store
+        del memory_module.load_on_disk_store
+        try:
+            store = core._memory_store()
+        finally:
+            memory_module.load_on_disk_store = helper
+        self.assertIsInstance(store, memory_module.MemoryStore)
+
     # ── B4: the operator must see the pressure at every write ─────────────
 
     def test_applied_memory_edit_carries_used_and_limit(self):
@@ -16702,6 +17006,196 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         ])
         self.assertEqual(len(grouped), 1)
         self.assertEqual(grouped[0]["count"], 2)
+
+    def test_a_missing_credential_or_approval_is_not_self_correcting(self):
+        """"<word> is required" alone is not a tool's own parameter refusal.
+
+        The same sentence carries the missing-credential/missing-permission
+        family, and those are exactly the recurring failures a lesson should be
+        written about -- the tool cannot fix them by retrying. Measured on the
+        live corpus: excluding these subjects releases none of the rows the
+        rule actually suppresses there.
+        """
+        for text in (
+            "Authentication is required to access this resource",
+            "Approval is required for this write",
+            "Consent is required for this scope",
+            "login is required",
+            '{"error": "permission is required"}',
+        ):
+            self.assertFalse(
+                patterns.is_self_correcting_error(text), text
+            )
+
+    def test_a_missing_secret_is_classified_the_same_in_either_casing(self):
+        """The same missing secret is written both ways. Matching on the name's
+        suffix rather than its capitalization keeps one failure from being
+        classified two ways -- an earlier version suppressed 'github_token' and
+        released 'GITHUB_TOKEN'."""
+        for text in (
+            '{"error": "GITHUB_TOKEN is required"}',
+            '{"error": "github_token is required"}',
+            '{"error": "openai_api_key is required"}',
+            '{"error": "token is required"}',
+            '{"error": "api_key is required"}',
+            '{"error": "scope is required"}',
+        ):
+            self.assertFalse(patterns.is_self_correcting_error(text), text)
+        # Both directions: ordinary call parameters still suppress.
+        for text in (
+            '{"error": "old_text is required"}',
+            '{"error": "session_id is required"}',
+            '{"error": "query is required"}',
+        ):
+            self.assertTrue(patterns.is_self_correcting_error(text), text)
+
+    def test_a_plural_credential_name_classifies_like_its_singular(self):
+        """The suffix list is pluralized like the word list: one failure must
+        not classify two ways on an 's'."""
+        for text in (
+            '{"error": "github_tokens is required"}',
+            '{"error": "service_secrets is required"}',
+            '{"error": "api_scopes is required"}',
+        ):
+            self.assertFalse(patterns.is_self_correcting_error(text), text)
+
+    def test_classification_does_not_depend_on_which_subject_comes_first(self):
+        """A message naming both a missing parameter and a missing credential
+        classifies the same either way round -- including when one of them
+        falls outside the anchor window. Reading only the first match, or only
+        the window, made the same two facts suppress or release on word order.
+        """
+        self.assertFalse(patterns.is_self_correcting_error(
+            '{"error": "auth is required, query is required"}'
+        ))
+        self.assertFalse(patterns.is_self_correcting_error(
+            '{"error": "query is required, auth is required"}'
+        ))
+        # The credential subject beyond the 40-character anchor still releases:
+        # the anchor decides what may SUPPRESS, not what may release.
+        far = (
+            "content is required for the replace action; "
+            + "auth is required too"
+        )
+        self.assertGreater(far.index("auth is required"), 40)
+        self.assertFalse(patterns.is_self_correcting_error(far))
+
+    def test_extract_patterns_reports_how_many_it_suppressed(self):
+        """A pass that dropped every failure it saw must not read afterwards
+        like a pass that saw nothing."""
+        suppressed = {}
+        grouped = patterns.extract_patterns(
+            [
+                {"tool": "tool_search", "content": '{"error": "query is required"}',
+                 "session_id": "s"},
+                {"tool": "http", "content": "connection refused", "session_id": "s"},
+            ],
+            suppressed_out=suppressed,
+        )
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(suppressed["self_correcting"], 1)
+
+    def test_suppression_count_reaches_evidence_and_the_no_signal_journal(self):
+        """The count is durable: it rides llm_meta into the journal entry, so a
+        gate closed by suppression is distinguishable from a quiet window."""
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": False,
+        })
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "tool", '{"error": "query is required"}', "tool_search",
+             now - 3 - index, 1)
+            for index in range(3)
+        ])
+        evidence = core.collect_evidence(session_id="session")
+        self.assertEqual(evidence["self_correcting_suppressed"], 3)
+        self.assertEqual(evidence["error_patterns"], [])
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = core.refine_run(model, session_id="session")
+        self.assertTrue(result["success"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "no_op")
+        self.assertEqual(entry["llm_meta"]["signal_path"], "no_signal")
+        self.assertEqual(entry["llm_meta"]["self_correcting_suppressed"], 3)
+
+    def test_a_quiet_window_records_the_suppression_field_as_zero(self):
+        """The other direction: zero is written, not omitted. An absent key
+        reads as "measured zero", "the field did not exist yet" and "nobody
+        looked" at once, and only one of those is a fact about this pass."""
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": False,
+        })
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "Routine context, nothing repeated", "", now - 3, 1),
+            ("session", "assistant", "Acknowledged", "", now - 2, 1),
+            ("session", "user", "Still nothing to repeat", "", now - 1, 1),
+        ])
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = core.refine_run(model, session_id="session")
+        self.assertTrue(result["success"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["llm_meta"]["signal_path"], "no_signal")
+        self.assertEqual(entry["llm_meta"]["self_correcting_suppressed"], 0)
+
+    def test_the_cross_session_window_contributes_its_own_suppression(self):
+        """The window that matters in production is the cross-session one, and
+        the current-session count alone cannot stand in for it: here the
+        current session suppresses 2 and the wider window sees a third in
+        another session. max() over overlapping windows must report 3 -- a sum
+        would say 5, and dropping the cross-session plumbing would say 2."""
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": False,
+        })
+        now = time.time()
+        FakeHost.make_db(
+            [
+                ("session", "user", f"Routine context {index}", "", now - 40 + index, 1)
+                for index in range(6)
+            ]
+            + [
+                ("session", "tool", '{"error": "query is required"}', "tool_search",
+                 now - 30, 1),
+                ("session", "tool", '{"error": "query is required"}', "tool_search",
+                 now - 29, 1),
+                ("older", "tool", '{"error": "content is required for \'replace\' action."}',
+                 "memory", now - 28, 1),
+            ]
+        )
+        evidence = core.collect_evidence(session_id="session")
+        self.assertEqual(evidence["self_correcting_suppressed"], 2)
+        # No session_id: the automatic shape, where the cross-session window is
+        # collected rather than skipped as explicit.
+        result = core.refine_run(MockLlm({"action": "no_op", "reason": "unused"}))
+        self.assertTrue(result["success"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["llm_meta"]["self_correcting_suppressed"], 3)
+
+    def test_an_applied_edit_records_what_its_evidence_lost(self):
+        """A pass that PROCEEDED carries the count too: an edit proposed from a
+        partly-suppressed window must be readable as such in the durable
+        record, not only on the gate-closed path."""
+        now = time.time()
+        FakeHost.make_db(
+            [
+                ("session", "tool", '{"error": "query is required"}', "tool_search",
+                 now - 20 - index, 1)
+                for index in range(2)
+            ]
+            + [
+                ("session", "tool", "connection refused by the scheduler",
+                 "cronjob", now - 10 - index, 1)
+                for index in range(3)
+            ]
+        )
+        result = self.run_proposal(skill_proposal("partly-suppressed-window"))
+        self.assertTrue(result["success"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "applied")
+        self.assertEqual(entry["llm_meta"]["self_correcting_suppressed"], 2)
 
     def test_a_suppressed_error_still_reaches_the_raw_evidence_lists(self):
         """A suppressed error must still be VISIBLE: excluded from lesson
