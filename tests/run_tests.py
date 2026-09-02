@@ -15734,6 +15734,31 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn("memory_used", result["llm_meta"])
         self.assertNotIn("memory_limit", result["llm_meta"])
 
+    def test_dry_run_preview_refuses_an_over_long_memory_entry(self):
+        """The length ceiling lived only in llm._finalize_edit.
+
+        Production is covered -- both proposer arms finalize through it -- but
+        ``_validate_proposal`` is what the dry-run preview calls, so a preview
+        reported an entry as applyable that the real run would refuse. A preview
+        that disagrees with the run it is previewing is worse than no preview.
+        """
+        error = core._validate_proposal({
+            "action": "create", "kind": "memory", "name": "over-long",
+            "content": "x" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS + 1),
+            "reason": "why", "evidence": [],
+        })
+        self.assertIsNotNone(error, "an over-long memory entry was reported applyable")
+        self.assertIn(str(llm.MEMORY_ENTRY_HARD_LIMIT_CHARS), error)
+
+    def test_an_entry_at_the_ceiling_is_still_accepted(self):
+        """Both directions: the ceiling is inclusive, so exactly at it passes."""
+        error = core._validate_proposal({
+            "action": "create", "kind": "memory", "name": "at-ceiling",
+            "content": "x" * llm.MEMORY_ENTRY_HARD_LIMIT_CHARS,
+            "reason": "why", "evidence": [],
+        })
+        self.assertIsNone(error, f"an entry exactly at the ceiling was refused: {error}")
+
     def test_memory_duplicate_check_does_not_relabel_an_earlier_guardrail_error(self):
         """A memory proposal that fails an EARLIER guardrail (here: the
         entry-delimiter check) must keep that error's own message and must not

@@ -2759,6 +2759,18 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
             resource_error = _memory_resource_error(content)
             if resource_error:
                 return resource_error
+            # The same ceiling ``llm._finalize_edit`` enforces, applied here as
+            # well. Production never lacked it -- both proposer arms finalize
+            # through that path -- but the dry-run preview calls THIS function and
+            # not the finalizer, so a preview reported an entry as applyable that
+            # the real run refuses. A preview that disagrees with the run it
+            # previews is worse than no preview. Cheap and deterministic, so it
+            # runs before the duplicate check, which has to read the store.
+            if len(content) > _llm.MEMORY_ENTRY_HARD_LIMIT_CHARS:
+                return (
+                    f"Memory entry too long ({len(content)} chars; max "
+                    f"{_llm.MEMORY_ENTRY_HARD_LIMIT_CHARS})"
+                )
             # Both create and patch reach the host as the same "add" operation
             # (see _apply_memory), so both must be checked, not only create.
             duplicate_error = _memory_duplicate_error(content)
