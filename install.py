@@ -600,10 +600,25 @@ def do_rollback(args) -> None:
 
     host = meta.get("host") or {}
     backup_value = host.get("backup")
+    moved_on = False
+    recorded_head = current_head = None
     if backup_value:
         backup = Path(backup_value)
         if not backup.is_file():
             fail(f"Backup zip missing: {backup}")
+        recorded_head = meta.get("base_head")
+        current_head = git_head_short(src)
+        moved_on = bool(recorded_head and current_head and recorded_head != current_head)
+        if moved_on:
+            # Restoring pre-install content over a checkout that has since moved
+            # on is not a restore, it is a downgrade of eight files. Say so
+            # before doing it, and do not call the result byte-for-byte after.
+            say(
+                f"WARNING: this backup was taken at {recorded_head} but the checkout is "
+                f"now at {current_head}. Restoring it overwrites the current versions of "
+                f"{len(PATCH_FILES)} host files with pre-install content. If the host was "
+                "upgraded since, `git apply -R` against the route patch is the safer undo."
+            )
         with tempfile.TemporaryDirectory(prefix="refine-rollback-") as td:
             with zipfile.ZipFile(backup) as z:
                 z.extractall(td)
@@ -644,10 +659,20 @@ def do_rollback(args) -> None:
     mode = args.plugin_mode or "remove"
     plugin_dest_value = meta.get("plugin_dest")
     plugin_dest = Path(plugin_dest_value) if plugin_dest_value else None
+    def _would_delete_this_checkout(dest: Path) -> bool:
+        # Equality covers the documented layout (the checkout IS the
+        # destination). Containment covers a checkout nested under it, where
+        # rmtree(dest) takes the repository with it just as thoroughly.
+        try:
+            resolved = dest.resolve()
+        except OSError:
+            return False
+        return resolved == PLUGIN_DIR or PLUGIN_DIR.is_relative_to(resolved)
+
     if (
         mode == "remove"
         and plugin_dest is not None
-        and plugin_dest.resolve() == PLUGIN_DIR
+        and _would_delete_this_checkout(plugin_dest)
     ):
         # The documented live layout has the git checkout AT the install
         # destination (~/.hermes/plugins/refine), which install_plugin already
@@ -670,7 +695,12 @@ def do_rollback(args) -> None:
     else:
         say("No plugin destination in metadata; no plugin files were removed.")
     (mdir / METADATA_NAME).unlink(missing_ok=True)
-    if backup_value:
+    if backup_value and moved_on:
+        say(
+            f"Rollback complete: host files restored from the backup taken at "
+            f"{recorded_head}, which is NOT the state the checkout was in ({current_head})."
+        )
+    elif backup_value:
         say("Rollback complete: host restored byte-for-byte from backup.")
     else:
         say("Rollback complete.")
@@ -723,6 +753,11 @@ def do_install(args) -> None:
     if state == "incompatible":
         fail(f"Incompatible host: {detail}")
     if state == "partial":
+        # Backup first: this reverse is a host mutation like any other, and
+        # "backup before edit" has no exception for the tidy-up path. A reverse
+        # that half-applies used to leave a third state with nothing to restore.
+        partial_backup = backup_host(src, metadata_dir(src))
+        say(f"Pre-reverse backup: {partial_backup}")
         rb = run_git(src, "apply", "-R", str(PATCH_FILE))
         say(f"Partial patch state detected; attempted reverse to reach stock (rc={rb.returncode}).")
         state, detail = classify_host(src)

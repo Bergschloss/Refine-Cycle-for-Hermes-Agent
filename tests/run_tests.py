@@ -20665,26 +20665,92 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertEqual(after["host"], earlier["host"])
         self.assertEqual(after["mode"], "plugin-only")
 
-    def test_rollback_never_deletes_the_source_checkout(self):
-        """The documented live layout has the checkout AT the install destination."""
+    def _rollback_with_plugin_dest(self, dest: Path, checkout: Path) -> list[str]:
+        """Roll back a recorded install whose plugin_dest is ``dest``.
+
+        ``install.PLUGIN_DIR`` is patched to ``checkout``, so the tree at risk is a
+        sacrificial one. The first version of this test recorded the real
+        repository as plugin_dest and called do_rollback for real: the only thing
+        between the working tree and shutil.rmtree(..., ignore_errors=True) was
+        the guard under test. Weakening that guard by one comparison deleted 59
+        files including .git -- measured -- and the test then reported it. No test
+        may put the user's work inside an rmtree argument.
+        """
         import install
 
         mdir = install.metadata_dir(self.src)
         mdir.mkdir(parents=True, exist_ok=True)
         (mdir / install.METADATA_NAME).write_text(
-            json.dumps({"mode": "plugin-only", "host": {}, "plugin_dest": str(install.PLUGIN_DIR)}),
+            json.dumps({"mode": "plugin-only", "host": {}, "plugin_dest": str(dest)}),
             encoding="utf-8",
         )
         messages: list[str] = []
-        # Compared, not asserted absolutely: an installed copy of this tree is not
-        # a git checkout, and the test must not redden for that.
-        git_dir_before = (install.PLUGIN_DIR / ".git").exists()
-        with patch.object(install, "say", messages.append):
+        with patch.object(install, "PLUGIN_DIR", checkout), \
+             patch.object(install, "say", messages.append):
             install.do_rollback(self._args(plugin_only=False))
-        self.assertTrue((install.PLUGIN_DIR / "install.py").is_file(), "rollback deleted the repo")
-        self.assertEqual((install.PLUGIN_DIR / ".git").exists(), git_dir_before)
+        return messages
+
+    def test_rollback_never_deletes_the_source_checkout(self):
+        """The documented live layout has the checkout AT the install destination."""
+        checkout = self.root / "sacrificial-checkout"
+        (checkout / ".git").mkdir(parents=True)
+        (checkout / "UNCOMMITTED_WORK.txt").write_text("keep me\n", encoding="utf-8")
+
+        messages = self._rollback_with_plugin_dest(checkout, checkout)
+
+        self.assertTrue((checkout / "UNCOMMITTED_WORK.txt").is_file(), "rollback deleted the checkout")
+        self.assertTrue((checkout / ".git").is_dir())
         self.assertTrue(any("keeping it" in message for message in messages))
         self.assertFalse(any("Plugin removed" in message for message in messages))
+
+    def test_rollback_never_deletes_a_checkout_nested_under_the_destination(self):
+        """rmtree(dest) takes a checkout below dest just as thoroughly."""
+        dest = self.root / "hermes-home" / "plugins" / "refine"
+        checkout = dest / "Refine-Cycle"
+        checkout.mkdir(parents=True)
+        (checkout / "UNCOMMITTED_WORK.txt").write_text("keep me\n", encoding="utf-8")
+
+        messages = self._rollback_with_plugin_dest(dest, checkout)
+
+        self.assertTrue((checkout / "UNCOMMITTED_WORK.txt").is_file(), "rollback deleted the checkout")
+        self.assertTrue(any("keeping it" in message for message in messages))
+
+    def test_rollback_says_so_when_the_checkout_moved_since_the_backup(self):
+        """Restoring pre-install files over a newer host is a downgrade, not a restore."""
+        import install
+
+        with self._as_stock_host(), \
+             patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+        meta = self._read_metadata()
+        meta["base_head"] = "0000deadbeef"
+        (install.metadata_dir(self.src) / install.METADATA_NAME).write_text(
+            json.dumps(meta), encoding="utf-8"
+        )
+        messages: list[str] = []
+        with patch.object(install, "say", messages.append):
+            install.do_rollback(self._args(plugin_only=False))
+        joined = " ".join(messages)
+        self.assertIn("0000deadbeef", joined)
+        self.assertIn("overwrites the current versions", joined)
+        self.assertNotIn("byte-for-byte", joined)
+
+    def test_a_partial_host_is_backed_up_before_the_reverse_touches_it(self):
+        """The tidy-up reverse is a host mutation; backup-before-edit has no exception."""
+        import install
+
+        self._write_markers(rels=list(install.PATCH_FILES[:3]))
+        mdir = install.metadata_dir(self.src)
+        with self._as_stock_host():
+            state, _ = install.classify_host(self.src)
+            self.assertEqual(state, "partial")
+            with patch.object(install, "fail", side_effect=SystemExit(1)):
+                with self.assertRaises(SystemExit):
+                    install.do_install(self._args(patch_only=True, plugin_only=False))
+        self.assertTrue(
+            sorted(mdir.glob("host-backup-*.zip")),
+            "the reverse ran with nothing to restore from",
+        )
 
     def test_plugin_only_writes_nothing_into_the_host_tree_but_its_own_record(self):
         """The byte-identity check covers 8 files; this covers the whole tree."""
