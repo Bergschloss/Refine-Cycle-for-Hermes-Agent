@@ -358,6 +358,54 @@ _SELF_CORRECTING_REQUIRED_PARAM_RE = re.compile(
 # appearing only after this many characters is far more likely to be
 # incidental prose inside a longer, unrelated failure.
 _SELF_CORRECTING_ANCHOR_CHARS = 40
+# "<word> is required" alone does not mean a parameter was omitted. The same
+# sentence carries the whole missing-credential / missing-permission family --
+# "Authentication is required", "Approval is required for this write",
+# "GITHUB_TOKEN is required" -- and those are neither self-correcting nor
+# unactionable: they are exactly the recurring failures a lesson should be
+# written about (export the token, request the scope, expect the gate). The
+# test that separates them is not grammar but whether the tool could have
+# supplied the value by retrying: it can supply ``query`` or ``content``, and
+# it cannot conjure a credential, a permission or an approval.
+#
+# Two forms, because the same missing secret is written both ways. An exact
+# subject, and a suffix for the compound names that carry the same meaning
+# (``github_token``, ``openai_api_key``, ``write_approval``) -- suffixes, not
+# case, so ``GITHUB_TOKEN`` and ``github_token`` classify identically instead
+# of splitting one failure two ways on capitalization. A trailing "s" is
+# stripped before both lookups for the same reason, so a plural cannot classify
+# opposite to its singular; listing both forms by hand is how that asymmetry
+# gets in.
+#
+# One limit worth naming rather than discovering later: the regex captures the
+# word immediately before "is required", so a compound phrase is judged by its
+# last word -- "Authorization header is required" is classified on ``header``,
+# not on ``authorization``. Widening that needs a different rule than a word
+# list, and no live example has needed it yet.
+#
+# Some of these words are also plausible parameter names -- a kv-store tool
+# really does take ``key``, an auth tool ``session``. That direction is chosen
+# deliberately, not overlooked: releasing a self-correcting refusal costs one
+# unhelpful lesson candidate, which the proposer can still decline and which is
+# visible in the evidence; suppressing a real failure costs a lesson that is
+# never written and leaves no trace of the loss. When the two errors are not
+# equally bad, take the visible one.
+#
+# On the live corpus (582 error rows) this list releases none of the rows the
+# rule actually suppresses -- the three real cases are ``query``/``content``,
+# both call parameters. That measurement describes today's corpus; it is not a
+# guarantee about words this install has not seen yet.
+_SELF_CORRECTING_NON_PARAM_SUBJECTS = frozenset({
+    "access", "account", "apikey", "approval", "auth", "authentication",
+    "authorisation", "authorization", "certificate", "confirmation", "consent",
+    "credential", "credentials", "key", "keys", "license", "licence", "login",
+    "password", "payment", "permission", "permissions", "scope", "scopes",
+    "secret", "session", "signature", "subscription", "token", "tokens",
+    "verification",
+})
+_SELF_CORRECTING_NON_PARAM_SUFFIXES = tuple(
+    f"_{word}" for word in sorted(_SELF_CORRECTING_NON_PARAM_SUBJECTS)
+)
 
 
 def is_self_correcting_error(content: str) -> bool:
@@ -371,22 +419,58 @@ def is_self_correcting_error(content: str) -> bool:
     """
     if not content:
         return False
-    match = _SELF_CORRECTING_REQUIRED_PARAM_RE.search(content)
-    return bool(match) and match.start() <= _SELF_CORRECTING_ANCHOR_CHARS
+    # The two halves of the decision read different spans, deliberately.
+    #
+    # To SUPPRESS, a parameter-shaped subject must appear inside the anchor
+    # window -- that is what makes it the tool's own structured refusal rather
+    # than prose in a longer failure. To RELEASE, a non-parameter subject
+    # anywhere in the message is enough: a credential or an approval named at
+    # character 500 is still a real failure, and one message must not classify
+    # two ways depending on which of its two subjects came first.
+    matched_in_window = False
+    for match in _SELF_CORRECTING_REQUIRED_PARAM_RE.finditer(content):
+        subject = match.group(1).casefold()
+        # Singular and plural must land on the same side, so both the word and
+        # its de-pluralized form are looked up. "access" and "credentials"
+        # are in the set in the form they are actually written, so stripping an
+        # "s" that was never a plural costs nothing: the raw form is checked
+        # first.
+        forms = {subject}
+        if subject.endswith("s"):
+            forms.add(subject[:-1])
+        if forms & _SELF_CORRECTING_NON_PARAM_SUBJECTS:
+            return False
+        if any(form.endswith(_SELF_CORRECTING_NON_PARAM_SUFFIXES) for form in forms):
+            return False
+        if match.start() <= _SELF_CORRECTING_ANCHOR_CHARS:
+            matched_in_window = True
+    return matched_in_window
 
 
 FORMAT_PATTERNS_LIMIT = 8
 
 
 def extract_patterns(
-    items: Iterable[Dict[str, Any]], limit: Optional[int] = FORMAT_PATTERNS_LIMIT
+    items: Iterable[Dict[str, Any]],
+    limit: Optional[int] = FORMAT_PATTERNS_LIMIT,
+    suppressed_out: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Group error occurrences into counted patterns.
 
     ``limit=None`` returns every pattern and is used by the post-edit audit and
     signal gating. Prompt rendering separately retains the small interactive budget.
+
+    ``suppressed_out``, when given a dict, is filled in place with
+    ``self_correcting`` -- how many occurrences this call dropped from lesson
+    candidacy. An out-parameter rather than a second return value or a module
+    global: this module is pure and has several callers, and the automatic
+    thread and an interactive call can run it at the same time. Without the
+    count, a pass whose only evidence was suppressed journals the same
+    ``no_op`` as a pass that saw nothing at all, which is the one thing this
+    project requires to stay distinguishable afterwards.
     """
     grouped: Dict[str, Dict[str, Any]] = {}
+    suppressed = 0
 
     for item in items:
         content = str(item.get("content") or "")
@@ -398,6 +482,7 @@ def extract_patterns(
             # a caller inspecting those (not this aggregation) can still see
             # it happened; it is simply never a repeated-failure pattern the
             # proposer is asked to fix.
+            suppressed += 1
             continue
         tool = str(item.get("tool") or "")
         fp = fingerprint(tool, content)
@@ -444,6 +529,8 @@ def extract_patterns(
         out.append(entry)
 
     out.sort(key=lambda entry: (entry["sessions_seen"], entry["count"]), reverse=True)
+    if suppressed_out is not None:
+        suppressed_out["self_correcting"] = suppressed
     return out if limit is None else out[:limit]
 
 
