@@ -12,8 +12,8 @@ Usage:
   python install.py --status        # report detected state, change nothing
   python install.py --hermes-src PATH  # point at a specific Hermes checkout
 
-Supported Hermes bases are identified by the bundled route patch that applies
-cleanly. The installer classifies the host as stock / patched / partial / dirty / incompatible and
+Supported Hermes base: stock v2026.8.16 (commit df4b65147d...). The installer
+classifies the host as stock / patched / partial / dirty / incompatible and
 refuses anything it cannot handle instead of half-applying. Every mutation is
 preceded by a backup recorded in rollback metadata.
 """
@@ -23,7 +23,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -33,9 +32,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent
-PATCH_DIR = PLUGIN_DIR / "assets"
-PATCH_GLOB = "invocation-route-*.patch"
+PATCH_FILE = PLUGIN_DIR / "assets" / "invocation-route-v2026.8.16.patch"
 METADATA_NAME = "refine-install-metadata.json"
+EXPECTED_BASE_PREFIX = "df4b6514"
 PATCHED_MARKER = "plugin_invocation_scope"
 
 # The nine files the patch touches (relative to the Hermes checkout root).
@@ -183,42 +182,12 @@ def git_head_short(repo: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def _patch_sort_key(path: Path) -> tuple[int, ...]:
-    """Sort route patches by numeric version components, newest first."""
-    return tuple(int(number) for number in re.findall(r"\d+", path.name))
-
-
-def patch_candidates() -> list[Path]:
-    """Return bundled route patches in descending numeric version order."""
-    return sorted(PATCH_DIR.glob(PATCH_GLOB), key=_patch_sort_key, reverse=True)
-
-
-def select_patch(src: Path) -> Path | None:
-    """Return the newest bundled patch that applies cleanly to ``src``."""
-    for candidate in patch_candidates():
-        if run_git(src, "apply", "--check", str(candidate)).returncode == 0:
-            return candidate
-    return None
-
-
-def select_reverse_patch(src: Path) -> Path | None:
-    """Return the bundled patch that cleanly reverses the partial host state."""
-    for candidate in patch_candidates():
-        if run_git(src, "apply", "-R", "--check", str(candidate)).returncode == 0:
-            return candidate
-    return None
-
-
 def classify_host(src: Path) -> tuple[str, str]:
     """Return (state_class, detail). States: stock, patched, partial, dirty, incompatible."""
     head = git_head_short(src)
-    if head is None:
-        return ("incompatible", "not a git checkout; refusing to patch blind")
-
     plugins_py = src / "hermes_cli" / "plugins.py"
     text = plugins_py.read_text(encoding="utf-8", errors="replace")
     has_marker = PATCHED_MARKER in text
-
     def _applied(rel: str) -> bool:
         f = src / rel
         if not f.is_file():
@@ -227,28 +196,24 @@ def classify_host(src: Path) -> tuple[str, str]:
         return FILE_MARKERS.get(rel, PATCHED_MARKER) in body
 
     applied_count = sum(1 for rel in PATCH_FILES if _applied(rel))
+    if head is None:
+        return ("incompatible", "not a git checkout; refusing to patch blind")
+    if not head.startswith(EXPECTED_BASE_PREFIX) and not has_marker:
+        return ("incompatible", f"unsupported base {head}; this patch targets stock v2026.8.16")
     if has_marker and applied_count == len(PATCH_FILES):
         return ("patched", f"all {len(PATCH_FILES)} files carry the marker at {head}")
     if 0 < applied_count < len(PATCH_FILES):
         return ("partial", f"{applied_count}/{len(PATCH_FILES)} files patched at {head}")
     if has_marker and applied_count == 0:
         return ("incompatible", f"marker found only outside expected files at {head}")
-
-    st = run_git(src, "status", "--short", "--", *PATCH_FILES)
-    if st.returncode == 0 and st.stdout.strip():
-        touched = [line.split()[-1] for line in st.stdout.splitlines()]
-        return ("dirty", f"user-modified patch targets before install: {touched}")
-
-    chosen = select_patch(src)
-    if chosen is not None:
-        return ("stock", f"clean base {head}; {chosen.name} applies")
-    candidates = patch_candidates()
-    tried = ", ".join(candidate.name for candidate in candidates) or "none bundled"
-    return (
-        "incompatible",
-        f"no bundled route patch applies to base {head}; tried: {tried}. "
-        "The patch needs rebasing onto this host's version.",
-    )
+    # stock base — but is the tree clean enough to patch?
+    if head and head.startswith(EXPECTED_BASE_PREFIX):
+        st = run_git(src, "status", "--short", "--", *PATCH_FILES)
+        if st.returncode == 0 and st.stdout.strip():
+            touched = [l.split()[-1] for l in st.stdout.splitlines()]
+            return ("dirty", f"user-modified patch targets before install: {touched}")
+        return ("stock", f"clean stock base {head}")
+    return ("incompatible", f"unclassified state at {head}")
 
 
 def backup_host(src: Path, meta_dir: Path) -> Path:
@@ -264,7 +229,7 @@ def backup_host(src: Path, meta_dir: Path) -> Path:
     return backup_path
 
 
-def apply_patch_atomic(src: Path, meta_dir: Path, patch: Path) -> dict:
+def apply_patch_atomic(src: Path, meta_dir: Path) -> dict:
     """Apply the patch via git apply in a temp index-safe way.
 
     git is already required (we classified via HEAD); `git apply` is used on
@@ -273,10 +238,10 @@ def apply_patch_atomic(src: Path, meta_dir: Path, patch: Path) -> dict:
     """
     created_before = {rel for rel in ALL_PATCH_CONTENT if not (src / rel).is_file()}
     backup = backup_host(src, meta_dir)
-    r = run_git(src, "apply", "--check", str(patch))
+    r = run_git(src, "apply", "--check", str(PATCH_FILE))
     if r.returncode != 0:
         fail(f"patch does not apply cleanly; aborting without changes.\n{r.stderr}")
-    r = run_git(src, "apply", str(patch))
+    r = run_git(src, "apply", str(PATCH_FILE))
     if r.returncode != 0:
         fail(f"patch application failed mid-way; restoring backup.\n{r.stderr}")
     # verify markers landed everywhere
@@ -287,7 +252,7 @@ def apply_patch_atomic(src: Path, meta_dir: Path, patch: Path) -> dict:
         if not f.is_file() or marker not in f.read_text(encoding="utf-8", errors="replace"):
             missing.append(rel)
     if missing:
-        rb = run_git(src, "apply", "-R", str(patch))
+        rb = run_git(src, "apply", "-R", str(PATCH_FILE))
         fail(f"verification failed ({missing}); patch reversed rc={rb.returncode}")
     return {"backup": str(backup), "created_files": sorted(created_before)}
 
@@ -466,11 +431,7 @@ def do_install(args) -> None:
     if state == "incompatible":
         fail(f"Incompatible host: {detail}")
     if state == "partial":
-        reverse_patch = select_reverse_patch(src)
-        if reverse_patch is None:
-            tried = ", ".join(candidate.name for candidate in patch_candidates()) or "none bundled"
-            fail(f"Partial patch state cannot be reversed; tried: {tried}")
-        rb = run_git(src, "apply", "-R", str(reverse_patch))
+        rb = run_git(src, "apply", "-R", str(PATCH_FILE))
         say(f"Partial patch state detected; attempted reverse to reach stock (rc={rb.returncode}).")
         state, detail = classify_host(src)
         if state not in ("stock", "patched"):
@@ -497,12 +458,8 @@ def do_install(args) -> None:
     }
 
     if state == "stock":
-        chosen_patch = select_patch(src)
-        if chosen_patch is None:
-            fail("No bundled route patch applies after classification; aborting without changes.")
-        say(f"Applying host patch {chosen_patch.name} (with pre-mutation backup)…")
-        meta["host"] = apply_patch_atomic(src, mdir, chosen_patch)
-        meta["host"]["patch"] = chosen_patch.name
+        say("Applying host patch (with pre-mutation backup)…")
+        meta["host"] = apply_patch_atomic(src, mdir)
         compile_all(src)
         say("Host patch applied and compiled.")
     elif state == "patched":
