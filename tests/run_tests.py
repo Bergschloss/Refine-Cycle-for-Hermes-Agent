@@ -138,6 +138,7 @@ class FakeHost:
     user_entries = []
     memory_events = []
     memory_drift = ""
+    memory_char_limit = 2200
     usage_counts = {}
     config = {}
     pending = {}
@@ -156,6 +157,7 @@ class FakeHost:
         cls.user_entries = []
         cls.memory_events = []
         cls.memory_drift = ""
+        cls.memory_char_limit = 2200
         cls.usage_counts = {}
         cls.pending = {}
         cls.pending_counter = 0
@@ -318,9 +320,15 @@ def install_fake_host():
         return json.dumps({"success": True, "message": f"{action} ok"})
 
     class MemoryStore:
+        # Mirrors the host's configurable char limit. B4 tests override this
+        # via FakeHost to prove refine reads it rather than a restated copy.
+        memory_char_limit = 2200
+        user_char_limit = 1375
+
         def __init__(self):
             self.memory_entries = FakeHost.memory_entries
             self.user_entries = FakeHost.user_entries
+            self.memory_char_limit = FakeHost.memory_char_limit
 
         def load_from_disk(self):
             return None
@@ -440,6 +448,16 @@ def install_fake_host():
     memory.MemoryStore = MemoryStore
     memory.memory_tool = memory_tool
     memory.get_memory_dir = lambda: str(FakeHost.root)
+    memory.ENTRY_DELIMITER = "\n\u00a7\n"
+
+    def load_on_disk_store():
+        # Mirrors the host: build a fresh store honoring the configured char
+        # limit, then load current entries from disk (FakeHost, here).
+        store = MemoryStore()
+        store.load_from_disk()
+        return store
+
+    memory.load_on_disk_store = load_on_disk_store
     approval.get_pending = lambda subsystem, pending_id: FakeHost.pending.get(
         (subsystem, pending_id)
     )
@@ -15355,6 +15373,62 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "The API rate limit is 100 requests per minute per key",
             FakeHost.memory_entries,
         )
+
+    # ── B4: the operator must see the pressure at every write ─────────────
+
+    def test_applied_memory_edit_carries_used_and_limit(self):
+        """An applied memory edit carries both fields with values matching a
+        direct read of the store, including the entry the write just added."""
+        FakeHost.memory_entries[:] = ["existing"]
+        FakeHost.memory_char_limit = 500
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "pressure-lesson",
+            "content": "a brand new fact", "reason": "why", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        delimiter = core._memory_entry_delimiter()
+        expected_used = len(delimiter.join(["existing", "a brand new fact"]))
+        self.assertEqual(result["llm_meta"]["memory_used"], expected_used)
+        self.assertEqual(result["llm_meta"]["memory_limit"], 500)
+
+    def test_a_skill_edit_gains_no_memory_fields(self):
+        """A skill or prompt edit does not gain memory fields."""
+        result = self.run_proposal(skill_proposal("no-memory-fields"))
+        self.assertTrue(result["success"])
+        self.assertNotIn("memory_used", result["llm_meta"])
+        self.assertNotIn("memory_limit", result["llm_meta"])
+
+    def test_memory_usage_reads_the_hosts_configured_limit_not_a_restated_default(self):
+        """Regression: a bare MemoryStore() silently used the class default
+        (2200) instead of the host's configured limit, so a host raising its
+        limit (as the reference host does, to 4400) had refine enforce a
+        limit 2200 chars too small -- refusing writes the host's own /memory
+        command would accept. Prove refine now reads the SAME limit the host
+        configured, not a restated copy."""
+        FakeHost.memory_char_limit = 4400
+        FakeHost.memory_entries[:] = ["x" * 2300]  # over the OLD hardcoded 2200
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "big-store-lesson",
+            "content": "a fact that fits under 4400 but not under 2200",
+            "reason": "why", "evidence": [],
+        })
+        self.assertTrue(result["success"])
+        self.assertEqual(result["llm_meta"]["memory_limit"], 4400)
+
+    def test_a_host_without_the_memory_constants_still_applies_with_fields_absent(self):
+        """A host that cannot be read for its memory config must not fail the
+        edit or guess a number -- it applies cleanly with the fields absent."""
+        with patch.object(
+            core, "_memory_usage", return_value=(None, None)
+        ):
+            result = self.run_proposal({
+                "action": "create", "kind": "memory", "name": "bare-module-lesson",
+                "content": "a fact recorded with no host memory config available",
+                "reason": "why", "evidence": [],
+            })
+        self.assertTrue(result["success"])
+        self.assertNotIn("memory_used", result["llm_meta"])
+        self.assertNotIn("memory_limit", result["llm_meta"])
 
     def test_memory_duplicate_check_does_not_relabel_an_earlier_guardrail_error(self):
         """A memory proposal that fails an EARLIER guardrail (here: the

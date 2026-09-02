@@ -3040,12 +3040,61 @@ def _memory_full_usage(apply_result: Dict[str, Any]) -> "Tuple[Optional[int], Op
     return used, limit
 
 
+def _memory_store() -> "Any":
+    """Build a MemoryStore honoring the host's configured char limits.
+
+    A bare ``MemoryStore()`` silently falls back to the class's built-in
+    defaults (2200/1375 chars) rather than the host's actual configuration --
+    on a host that raised its limit (4400 on the reference install), refine
+    would then enforce a limit 2200 chars too small, refusing writes the
+    host's own ``/memory`` command accepts. ``load_on_disk_store()`` is the
+    host's own helper for exactly this situation (no live agent instance),
+    already used by the messaging gateway and the bare CLI ``/memory``
+    handler, so this stays behind the same single source of truth rather than
+    re-deriving the config path here.
+    """
+    from tools.memory_tool import MemoryStore, load_on_disk_store
+
+    try:
+        return load_on_disk_store()
+    except Exception as exc:
+        logger.warning(
+            "Cannot read host memory config; falling back to built-in "
+            "defaults: %s", scrub_text(str(exc)),
+        )
+        return MemoryStore()
+
+
+def _memory_usage() -> "Tuple[Optional[int], Optional[int]]":
+    """Return (used, limit) chars for the ``memory`` store, read from the host.
+
+    Never hardcode 2200/4400: read entries via ``MemoryStore``, the delimiter
+    via ``_memory_entry_delimiter()``, and the limit from the store the host
+    itself would build. Returns ``(None, None)`` rather than guessing when the
+    host cannot be read (e.g. a bare-module run with no Hermes installed), so
+    a caller can omit the fields instead of asserting a number that is not
+    actually known.
+    """
+    try:
+        store = _memory_store()
+        store.load_from_disk()
+    except Exception as exc:
+        logger.warning("Cannot read memory usage: %s", scrub_text(str(exc)))
+        return None, None
+    delimiter = _memory_entry_delimiter()
+    used = len(delimiter.join(store.memory_entries)) if store.memory_entries else 0
+    limit = getattr(store, "memory_char_limit", None)
+    if not isinstance(limit, int):
+        return None, None
+    return used, limit
+
+
 def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
     # ``memory_tool`` is the entry point that owns the host's ``write_approval``
     # gate; ``MemoryStore.add`` performs the write with no gate at all. Calling
     # the store directly made refine the one writer that could never be staged,
     # so a host configured to require approval for memory was silently bypassed.
-    from tools.memory_tool import MemoryStore, memory_tool
+    from tools.memory_tool import memory_tool
 
     # ``kind`` is constrained to skill/memory/prompt by REFINE_PROPOSAL_SCHEMA's
     # enum, so a proposal reaching this function is always kind="memory" and the
@@ -3055,7 +3104,14 @@ def _apply_memory(proposal: Dict[str, Any]) -> Dict[str, Any]:
     target = "memory"
     if proposal.get("action") not in ("create", "patch"):
         return {"success": False, "error": f"Unknown memory action: {proposal.get('action')}"}
-    store = MemoryStore()
+    # Bare MemoryStore() uses the class's built-in defaults (2200/1375 chars),
+    # not the host's configured memory_char_limit -- on the reference host
+    # (configured at 4400) this made every refine memory write validate
+    # against a limit 2200 chars too small, refusing writes the host's own
+    # /memory command would accept. _memory_store() reads the same config the
+    # host's load_on_disk_store() does, so refine enforces the limit the user
+    # actually configured, never a restated copy of it.
+    store = _memory_store()
     store.load_from_disk()
     # With the gate on and a foreground CLI callback registered, this call can
     # prompt the user inline while the refine pass holds the mutation lock, so an
@@ -5183,6 +5239,19 @@ def _apply_edit(
             if used is not None and limit is not None:
                 llm_meta["memory_used"] = used
                 llm_meta["memory_limit"] = limit
+    # B4: the operator must see the pressure at every write, not only inside a
+    # failure. Same llm_meta fields A2 sets on the failure path -- one shape
+    # for both -- computed fresh from the host AFTER this edit landed, so the
+    # number reflects the store this write actually produced. A skill or
+    # prompt edit gets neither field; a host whose memory config cannot be
+    # read (bare-module run) applies cleanly with the fields simply absent
+    # rather than a guessed number.
+    if kind == "memory" and outcome == "applied":
+        used, limit = _memory_usage()
+        if used is not None and limit is not None:
+            llm_meta = dict(llm_meta or {})
+            llm_meta["memory_used"] = used
+            llm_meta["memory_limit"] = limit
     try:
         finalized = journal.finalize(
             entry_id,
