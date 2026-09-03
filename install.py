@@ -180,6 +180,14 @@ def plugin_files() -> list[str]:
         for p in sorted((PLUGIN_DIR / "tests").glob("*.py"))
         if _is_shipped(p)
     ]
+    # The route patches travel with install.py, because install.py travels with
+    # the plugin. The SUCCESS banner tells the operator to run
+    # `python install.py --rollback` from the installed tree, and a re-install or
+    # --patch-only from there needs the patches. Without them patch_candidates()
+    # is empty and the installer refuses its own host with "none bundled" --
+    # measured on a real clean install, where the shipped suite also failed for
+    # the same reason. A few KB against an installer that cannot install.
+    rels += [f"assets/{p.name}" for p in sorted(PATCH_DIR.glob(PATCH_GLOB))]
     return rels
 
 

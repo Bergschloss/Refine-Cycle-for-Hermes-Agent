@@ -19990,8 +19990,16 @@ class InstallScriptTests(unittest.TestCase):
 
     BASH = _working_bash()
     GIT = shutil.which("git")
+    # install.sh is POSIX-only and deliberately NOT shipped into an installed
+    # plugin, so the suite that ships with the plugin must skip these rather than
+    # fail. Measured on a real clean install: six of these errored with
+    # FileNotFoundError purely because the script was not there to copy.
+    SCRIPT = (ROOT / "install.sh") if (ROOT / "install.sh").is_file() else None
 
-    @unittest.skipUnless(BASH and GIT, "a working bash and git are required for install.sh tests")
+    @unittest.skipUnless(
+        BASH and GIT and SCRIPT,
+        "install.sh tests need a working bash, git, and install.sh in the tree",
+    )
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="installsh-")
         self.addCleanup(self.tmp.cleanup)
