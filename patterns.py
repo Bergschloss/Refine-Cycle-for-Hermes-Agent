@@ -240,12 +240,11 @@ def normalize_error(content: str) -> str:
                 else len(lines)
             )
             block = lines[start:end]
-            # A traceback exception is its block's terminal non-wrapper line.
-            # Permitting arbitrary indented candidates makes typed source
-            # statements such as ``ConnectionError: annotation`` look like an
-            # exception and hides the actual terminal failure.
+            # Find the block's terminal non-wrapper line, and its index, so a
+            # multiline message can be joined back from it.
             terminal = ""
-            for line in reversed(block):
+            terminal_index = None
+            for rev_offset, line in enumerate(reversed(block)):
                 if not line.strip():
                     continue
                 if (
@@ -255,10 +254,59 @@ def normalize_error(content: str) -> str:
                 ):
                     continue
                 terminal = line
+                terminal_index = len(block) - 1 - rev_offset
                 break
-            exception_line = (
-                terminal.strip() if terminal and _is_python_exception_line(terminal) else None
-            )
+            if terminal and _is_python_exception_line(terminal):
+                # The terminal line is itself the exception (single-line
+                # message). Indented or not, it is the whole thing -- this is
+                # the path that already worked, and the indented case
+                # (``ConnectionError: timed out`` as the last line) must keep
+                # working.
+                exception_line = terminal.strip()
+            elif terminal_index is not None:
+                # The terminal line is NOT an exception line: it may be the
+                # continuation of a multiline exception whose message ran past
+                # its type. A REAL printed exception line begins at column 0;
+                # frames and typed source annotations (``ConnectionError:
+                # annotation`` inside a frame) are indented, so requiring
+                # column 0 here is exactly what keeps genuine terminal prose
+                # (with only an indented, annotation-shaped line above it) from
+                # being mistaken for the exception. Scan back for that column-0
+                # exception line; a frame (``File "``) between it and the
+                # terminal means the terminal is unrelated prose, not a
+                # continuation, so stop.
+                exception_start = None
+                for offset in range(terminal_index - 1, -1, -1):
+                    line = block[offset]
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith('File "'):
+                        break
+                    if line[:1].isspace():
+                        continue
+                    if _is_python_exception_line(line):
+                        exception_start = offset
+                    break
+                if exception_start is not None:
+                    # Join the column-0 exception line with the continuation
+                    # lines down to the terminal, dropping the frames above it
+                    # exactly as the single-line path does. Stop at a new frame
+                    # so an interleaved block cannot fold stack text back in.
+                    message_lines = []
+                    for line in block[exception_start:terminal_index + 1]:
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        if (
+                            stripped.startswith('File "')
+                            or _TRACEBACK_WRAPPER_LINE.match(stripped)
+                            or _TRACEBACK_CHAIN_LINE.match(stripped)
+                            or _TRACEBACK_RUNNER_FOOTER_LINE.match(stripped)
+                        ):
+                            break
+                        message_lines.append(stripped)
+                    exception_line = " ".join(message_lines)
             if exception_line:
                 break
         if exception_line:

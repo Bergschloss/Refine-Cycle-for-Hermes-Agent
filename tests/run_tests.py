@@ -19063,6 +19063,137 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             patterns.fingerprint("http", "permission denied"),
         )
 
+    def test_multiline_exception_from_two_call_sites_aggregates(self):
+        """The exact reproduction from the evidence file. When an exception
+        message spans several lines, the last line is a continuation that
+        _is_python_exception_line rejects, so the old backward scan left the
+        stack frames in the fingerprinted text -- and frames carry file and
+        function names, so the same error raised from two call sites
+        fingerprinted apart and never reached the signal gate's recurrence>=2.
+        """
+        call_a = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/handler_a.py", line 10, in handler_a\n'
+            "    do_work()\n"
+            "ValueError: bad value\n"
+            "    with extra context on a second line"
+        )
+        call_b = (
+            "Traceback (most recent call last):\n"
+            '  File "/svc/handler_b.py", line 44, in handler_b\n'
+            "    do_work()\n"
+            "ValueError: bad value\n"
+            "    with extra context on a second line"
+        )
+        self.assertEqual(
+            patterns.normalize_error(call_a),
+            "valueerror: bad value with extra context on a second line",
+        )
+        self.assertEqual(
+            patterns.fingerprint("bash", call_a),
+            patterns.fingerprint("bash", call_b),
+            "a multiline exception from two call sites must aggregate",
+        )
+
+    def test_single_line_exception_from_two_call_sites_still_aggregates(self):
+        """Regression guard on the behaviour that already worked: a single-line
+        exception from two call sites must keep aggregating."""
+        call_a = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/a.py", line 1, in a\n'
+            "    a()\n"
+            "ValueError: bad value"
+        )
+        call_b = (
+            "Traceback (most recent call last):\n"
+            '  File "/svc/b.py", line 9, in b\n'
+            "    b()\n"
+            "ValueError: bad value"
+        )
+        self.assertEqual(patterns.normalize_error(call_a), "valueerror: bad value")
+        self.assertEqual(
+            patterns.fingerprint("bash", call_a),
+            patterns.fingerprint("bash", call_b),
+        )
+
+    def test_two_different_multiline_exceptions_stay_apart(self):
+        """The opposing direction, and the one that catches an over-collapsing
+        fix: two genuinely different multiline exceptions must still fingerprint
+        differently. A message that legitimately contains a volatile path must
+        still collapse across call sites -- otherwise one aggregation failure is
+        traded for another."""
+        exc_a = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/x.py", line 3, in run\n'
+            "    run()\n"
+            "ValueError: bad value\n"
+            "    context line one"
+        )
+        exc_b = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/x.py", line 3, in run\n'
+            "    run()\n"
+            "KeyError: missing thing\n"
+            "    context line two"
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("bash", exc_a),
+            patterns.fingerprint("bash", exc_b),
+        )
+        # A path inside the multiline message is volatile and must still
+        # collapse across call sites.
+        path_a = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/x.py", line 3, in run\n'
+            "    run()\n"
+            "FileNotFoundError: cannot open /var/data/8821/file.txt\n"
+            "    while loading config"
+        )
+        path_b = (
+            "Traceback (most recent call last):\n"
+            '  File "/svc/y.py", line 7, in go\n'
+            "    go()\n"
+            "FileNotFoundError: cannot open /var/data/9134/file.txt\n"
+            "    while loading config"
+        )
+        self.assertEqual(
+            patterns.fingerprint("bash", path_a),
+            patterns.fingerprint("bash", path_b),
+        )
+
+    def test_chained_multiline_traceback_uses_the_terminal_exception(self):
+        """A chained traceback whose terminal exception is multiline. Decision:
+        the terminal (last) exception wins -- it is the failure that actually
+        surfaced -- matching the single-line chained behaviour the suite already
+        pins. The earlier exception in the chain must not influence the
+        fingerprint, and its own frames must be dropped."""
+        chained = (
+            "Traceback (most recent call last):\n"
+            '  File "/a.py", line 1, in a\n'
+            "    a()\n"
+            "KeyError: the first cause\n"
+            "\n"
+            "During handling of the above exception, another exception occurred:\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            '  File "/b.py", line 2, in b\n'
+            "    b()\n"
+            "RuntimeError: the terminal failure\n"
+            "    with a second message line"
+        )
+        self.assertEqual(
+            patterns.normalize_error(chained),
+            "runtimeerror: the terminal failure with a second message line",
+        )
+        # The first cause must not leak in: a chained traceback whose only
+        # difference is the FIRST exception must still aggregate on the
+        # terminal one.
+        other = chained.replace("KeyError: the first cause", "TypeError: a different first cause")
+        self.assertEqual(
+            patterns.fingerprint("bash", chained),
+            patterns.fingerprint("bash", other),
+        )
+
     def test_nullable_proposal_fields_do_not_become_literal_none(self):
         self.assertEqual(llm._normalize_fields({"action": None})[0], "no_op")
         self.assertEqual(
