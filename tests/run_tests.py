@@ -326,10 +326,20 @@ def install_fake_host():
         memory_char_limit = 2200
         user_char_limit = 1375
 
-        def __init__(self):
+        def __init__(self, memory_char_limit=None):
             self.memory_entries = FakeHost.memory_entries
             self.user_entries = FakeHost.user_entries
-            self.memory_char_limit = FakeHost.memory_char_limit
+            # The real host's signature is ``__init__(memory_char_limit=2200)``,
+            # so a BARE MemoryStore() carries the class default and only
+            # load_on_disk_store() supplies the configured number. This fake used
+            # to copy FakeHost.memory_char_limit unconditionally, which made the
+            # two indistinguishable -- and made every test of the fallback path
+            # unable to fail, because the fallback's store looked exactly like
+            # the helper's. Mirror the host instead.
+            self.memory_char_limit = (
+                MemoryStore.memory_char_limit if memory_char_limit is None
+                else memory_char_limit
+            )
 
         def load_from_disk(self):
             return None
@@ -453,8 +463,10 @@ def install_fake_host():
 
     def load_on_disk_store():
         # Mirrors the host: build a fresh store honoring the configured char
-        # limit, then load current entries from disk (FakeHost, here).
-        store = MemoryStore()
+        # limit, then load current entries from disk (FakeHost, here). Passing
+        # the limit explicitly is what the host does and what makes this
+        # distinguishable from the bare-constructor fallback.
+        store = MemoryStore(memory_char_limit=FakeHost.memory_char_limit)
         store.load_from_disk()
         return store
 
@@ -16134,8 +16146,14 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_memory_store_falls_back_when_the_host_lacks_the_helper(self):
         """A host that does not export load_on_disk_store is exactly what the
         fallback exists for; importing it alongside MemoryStore made that
-        ImportError escape instead."""
+        ImportError escape instead.
+
+        Asserts the limit and not only the type: load_on_disk_store returns a
+        MemoryStore too, so isinstance alone held on both sides of the branch
+        and this could not fail.
+        """
         memory_module = sys.modules["tools.memory_tool"]
+        FakeHost.memory_char_limit = 4400
         helper = memory_module.load_on_disk_store
         del memory_module.load_on_disk_store
         try:
@@ -16143,6 +16161,62 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         finally:
             memory_module.load_on_disk_store = helper
         self.assertIsInstance(store, memory_module.MemoryStore)
+        self.assertEqual(
+            store.memory_char_limit, memory_module.MemoryStore.memory_char_limit,
+            "the fallback must be the bare class default, not the host's number",
+        )
+        self.assertNotEqual(
+            store.memory_char_limit, 4400,
+            "the fallback cannot know the configured limit; if it does, this "
+            "test proves nothing about the fallback",
+        )
+
+    def test_an_unreadable_memory_config_reports_no_limit_rather_than_the_default(self):
+        """_memory_usage promises silence and delivered a guess.
+
+        Its docstring, _lesson_body's, and the B4 block's all say the same thing:
+        a host whose memory config cannot be read yields no number rather than a
+        guessed one. But _memory_store() swallows that failure and hands back a
+        bare MemoryStore(), which carries the class default -- so _memory_usage
+        read 2200 off it and reported it as the host's limit. On the reference
+        host, configured at 4400, that renders a store at 2903 chars as
+        "memory 2903/2200 (131%)" and tells the operator it is "getting tight",
+        and _apply_memory enforces 2200 against a host that accepts 4400: the
+        exact harm _memory_store's own docstring describes.
+        """
+        memory_module = sys.modules["tools.memory_tool"]
+        FakeHost.memory_char_limit = 4400
+        FakeHost.memory_entries[:] = ["x" * 300]
+        helper = memory_module.load_on_disk_store
+        del memory_module.load_on_disk_store
+        try:
+            used, limit = core._memory_usage()
+        finally:
+            memory_module.load_on_disk_store = helper
+        self.assertEqual(used, 300, "usage is read from the files and is known")
+        self.assertIsNone(
+            limit, "a limit that was fallen back to is not the host's limit"
+        )
+
+    def test_an_unreadable_memory_config_renders_no_clause_and_no_warning(self):
+        """The consequence, at both surfaces the number reaches."""
+        memory_module = sys.modules["tools.memory_tool"]
+        FakeHost.memory_char_limit = 4400
+        FakeHost.memory_entries[:] = ["x" * 2100]
+        helper = memory_module.load_on_disk_store
+        del memory_module.load_on_disk_store
+        try:
+            result = self.run_proposal({
+                "action": "create", "kind": "memory", "name": "fallback-render",
+                "content": "a fact stored while the host config was unreadable",
+                "reason": "why", "evidence": [],
+            })
+        finally:
+            memory_module.load_on_disk_store = helper
+        self.assertTrue(result["success"], result.get("message"))
+        self.assertNotIn("| memory ", result["message"])
+        self.assertNotIn("memory_limit", result["llm_meta"])
+        self.assertNotIn("2200", result["message"])
 
     # ── B4: the operator must see the pressure at every write ─────────────
 

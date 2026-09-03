@@ -3251,7 +3251,7 @@ def _memory_full_usage(apply_result: Dict[str, Any]) -> "Tuple[Optional[int], Op
     return used, limit
 
 
-def _memory_store() -> "Any":
+def _memory_store(fallback_out: Optional[Dict[str, bool]] = None) -> "Any":
     """Build a MemoryStore honoring the host's configured char limits.
 
     A bare ``MemoryStore()`` silently falls back to the class's built-in
@@ -3263,7 +3263,18 @@ def _memory_store() -> "Any":
     already used by the messaging gateway and the bare CLI ``/memory``
     handler, so this stays behind the same single source of truth rather than
     re-deriving the config path here.
+
+    ``fallback_out``, when given a dict, is filled in place with
+    ``built_in_defaults`` -- True when the helper could not be used and the store
+    below carries the class default rather than the host's number. Without it
+    the fallback is indistinguishable from success, and _memory_usage reported
+    the default AS the host's limit: the very harm the paragraph above describes,
+    arriving through this function's own except branch. The same out-parameter
+    idiom as ``truncation_out`` and ``suppressed_out``, and for the same reason
+    -- a degraded result must not read like a healthy one.
     """
+    if fallback_out is not None:
+        fallback_out["built_in_defaults"] = False
     # Imported separately, and the host-helper import kept inside the try: a
     # host that does not export ``load_on_disk_store`` is exactly the case the
     # fallback exists for, and importing both together made that ImportError
@@ -3280,6 +3291,8 @@ def _memory_store() -> "Any":
             "Cannot read host memory config; falling back to built-in "
             "defaults: %s", scrub_text(str(exc)),
         )
+        if fallback_out is not None:
+            fallback_out["built_in_defaults"] = True
         return MemoryStore()
 
 
@@ -3292,15 +3305,30 @@ def _memory_usage() -> "Tuple[Optional[int], Optional[int]]":
     host cannot be read (e.g. a bare-module run with no Hermes installed), so
     a caller can omit the fields instead of asserting a number that is not
     actually known.
+
+    A store the host helper could not build counts as "cannot be read", and did
+    not used to. ``_memory_store`` catches that failure and returns a bare
+    ``MemoryStore``, so this function read the CLASS DEFAULT off it and reported
+    it as the host's configured limit -- the promise above, broken by the layer
+    below. On the reference host, configured at 4400, a store holding 2903 chars
+    rendered as "memory 2903/2200 (131%)" and warned that memory was getting
+    tight. Usage is still known in that case (the entries are read from the
+    files), so it is returned; only the limit is withheld, and the callers'
+    existing ``used is not None and limit is not None`` guard then omits both
+    fields exactly as it does for a bare-module run.
     """
+    fell_back: Dict[str, bool] = {}
     try:
-        store = _memory_store()
+        store = _memory_store(fallback_out=fell_back)
         store.load_from_disk()
     except Exception as exc:
         logger.warning("Cannot read memory usage: %s", scrub_text(str(exc)))
         return None, None
     delimiter = _memory_entry_delimiter()
     used = len(delimiter.join(store.memory_entries)) if store.memory_entries else 0
+    if fell_back.get("built_in_defaults"):
+        # Usage is real; the limit on this store is a default nobody configured.
+        return used, None
     limit = getattr(store, "memory_char_limit", None)
     if not isinstance(limit, int):
         return None, None
