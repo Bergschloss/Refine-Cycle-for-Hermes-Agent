@@ -3802,6 +3802,36 @@ class RefineTests(unittest.TestCase):
             "action": "create", "kind": "skill", "name": "x", "content": "body"
         }))
 
+    def test_the_validation_layer_refuses_every_action_but_create_and_patch(self):
+        """AGENTS.md invariant 1: refine may create or patch, never propose a delete.
+
+        ``llm.propose`` already rejects a delete payload as malformed and that
+        test does run. This pins the OTHER gate -- the one the dry-run preview and
+        the apply path both pass through -- so the invariant does not rest on a
+        single layer. The equivalent assertion in tests/test_usefulness.py has
+        never executed: that file is not imported by this suite and CI runs only
+        this file.
+        """
+        for action in ("delete", "remove", "replace", "rename"):
+            with self.subTest(action=action):
+                error = core._validate_proposal({
+                    "action": action, "kind": "skill", "name": "x",
+                    "content": skill_content("x"), "reason": "r", "evidence": [],
+                })
+                self.assertIsNotNone(error, f"action={action} was accepted")
+                self.assertIn(action, error)
+
+    def test_the_two_permitted_actions_are_not_refused_for_their_action(self):
+        """Both directions: the gate must not have closed on create/patch too."""
+        for action in ("create", "patch"):
+            with self.subTest(action=action):
+                error = core._validate_proposal({
+                    "action": action, "kind": "memory", "name": "permitted",
+                    "content": "a fact that no other entry states",
+                    "reason": "r", "evidence": [],
+                })
+                self.assertIsNone(error, f"action={action} was refused: {error}")
+
     def test_kind_user_is_consistently_unreachable(self):
         """R9 §6: kind="user" must be rejected everywhere, not handled in some
         places and rejected in others.
