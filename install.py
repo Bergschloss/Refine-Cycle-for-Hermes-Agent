@@ -682,12 +682,13 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> str:
 # file, so only the default matters. Doing one and not the other leaves half of
 # all users at 2200.
 #
-# Only a value that is still EXACTLY the stock default is moved. Any other number
-# is a deliberate choice and is left alone. That single rule gives three
-# properties at once: the operator's own setting is never overwritten, the
-# operation is idempotent, and it can never lower a limit.
+# The rule is a FLOOR: anything below it comes up to it, anything at or above it is
+# the operator's own number and is left exactly as it is. So a stock 2200 and a
+# hand-set 3000 both become 4400, while 20000 stays 20000. One rule, three
+# properties: a bigger budget is never reduced, the operation is idempotent, and
+# nobody's deliberate choice is overwritten.
 MEMORY_LIMIT_STOCK_DEFAULT = 2200
-MEMORY_LIMIT_RAISED = 4400
+MEMORY_LIMIT_FLOOR = 4400
 CONFIG_DEFAULTS_REL = "hermes_cli/config_defaults.py"
 
 # Only the digits are replaced, so indentation, quoting and any trailing comment
@@ -705,101 +706,133 @@ def _limit_regex_for(path: Path) -> "re.Pattern[str]":
     return _YAML_LIMIT_RE if path.suffix in (".yaml", ".yml") else _DEFAULTS_LIMIT_RE
 
 
-def _retune_limit(path: Path, *, frm: int, to: int) -> str:
-    """Move one integer from ``frm`` to ``to`` in ``path``; report what happened.
+def _find_limit(path: Path) -> tuple[str, int, str, tuple[int, int]]:
+    """Locate the single memory_char_limit value in ``path``.
 
-    Never raises for a file that is absent or configured differently -- every
-    outcome is a status string the caller prints, because a silent skip here is
-    indistinguishable from success and this runs on the user's live config.
+    Returns ``(status, value, text, span)``. An empty status means exactly one
+    value was found and the other three are usable; any other status is the reason
+    the file cannot be touched, and the caller prints it. Nothing here raises: a
+    silent skip on a user's live config is indistinguishable from success.
 
-    Newlines are read and written verbatim (``newline=""``). Without that, editing
-    an LF config on Windows rewrites every line in the file to CRLF and the diff
-    the user sees is their whole config rather than one number.
+    Read with ``newline=""`` so the caller can write the file back verbatim.
+    Without it, editing an LF config on Windows rewrites every line to CRLF and
+    the diff the user sees is their whole config instead of one number.
     """
     if not path.is_file():
-        return "absent"
-    regex = _limit_regex_for(path)
+        return "absent", 0, "", (0, 0)
     with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
-        original = handle.read()
-    matches = list(regex.finditer(original))
+        text = handle.read()
+    matches = list(_limit_regex_for(path).finditer(text))
     if not matches:
-        return "key-absent"
+        return "key-absent", 0, text, (0, 0)
     if len(matches) > 1:
         # Two declarations mean the effective value is not knowable from a regex,
         # and guessing which one wins is how a config gets silently broken.
-        return f"ambiguous ({len(matches)} occurrences)"
+        return f"ambiguous ({len(matches)} occurrences)", 0, text, (0, 0)
     match = matches[0]
-    value = int(match.group("value"))
-    if value == to:
-        return "already"
-    if value != frm:
-        return f"left alone (operator set {value})"
-    updated = original[: match.start("value")] + str(to) + original[match.end("value") :]
+    return "", int(match.group("value")), text, (match.start("value"), match.end("value"))
+
+
+def _write_limit(path: Path, text: str, span: tuple[int, int], value: int) -> None:
+    """Replace just the digits, so indentation, quoting and comments survive."""
+    updated = text[: span[0]] + str(value) + text[span[1] :]
     with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write(updated)
-    return "raised"
+
+
+def _raise_limit(path: Path, *, floor: int) -> tuple[str, int]:
+    """Bring one integer up to ``floor`` when it is below it.
+
+    The rule is a FLOOR, not an exact match: anything under ``floor`` comes up to
+    it, anything at or above it is the operator's own number and is left as it is.
+    So a stock 2200 and a hand-set 3000 both become 4400, while 20000 stays 20000.
+    This can therefore never lower a limit, and running it twice changes nothing.
+
+    Returns ``(status, previous_value)``. The previous value is what rollback
+    restores -- assuming everyone started at the stock default would hand a user
+    who had 3000 a 2200 they never chose.
+    """
+    status, value, text, span = _find_limit(path)
+    if status:
+        return status, 0
+    if value == floor:
+        return f"already {floor}", value
+    if value > floor:
+        return f"left alone (operator set {value}, above {floor})", value
+    _write_limit(path, text, span, floor)
+    return "raised", value
+
+
+def _lower_limit(path: Path, *, expect: int, restore: int) -> str:
+    """Put one integer back, but only if it is still the number we wrote."""
+    status, value, text, span = _find_limit(path)
+    if status:
+        return status
+    if value != expect:
+        return f"left alone (now {value}, not the {expect} this install wrote)"
+    if value == restore:
+        return f"already {restore}"
+    _write_limit(path, text, span, restore)
+    return "restored"
 
 
 def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
-    """Raise the memory budget for this install, and record how to undo it."""
-    targets: dict[str, str] = {}
-    config_yaml = hermes_home_dir(src) / "config.yaml"
-    status = _retune_limit(
-        config_yaml, frm=MEMORY_LIMIT_STOCK_DEFAULT, to=MEMORY_LIMIT_RAISED
-    )
-    targets[str(config_yaml)] = status
-    say(f"  {config_yaml}: {status}")
+    """Bring the memory budget up to the floor, and record how to undo it."""
+    targets: dict[str, dict] = {}
+
+    def apply_to(path: Path, label: str) -> str:
+        status, previous = _raise_limit(path, floor=MEMORY_LIMIT_FLOOR)
+        targets[str(path)] = {"status": status, "previous": previous}
+        say(f"  {label}: {status}")
+        return status
+
+    apply_to(hermes_home_dir(src) / "config.yaml", str(hermes_home_dir(src) / "config.yaml"))
     if include_host:
-        defaults = src / CONFIG_DEFAULTS_REL
-        status = _retune_limit(
-            defaults, frm=MEMORY_LIMIT_STOCK_DEFAULT, to=MEMORY_LIMIT_RAISED
-        )
-        targets[str(defaults)] = status
-        say(f"  {CONFIG_DEFAULTS_REL}: {status}")
+        apply_to(src / CONFIG_DEFAULTS_REL, CONFIG_DEFAULTS_REL)
     else:
-        # Saying it out loud: --plugin-only promises no writes into the host
-        # checkout, and a silently skipped half leaves a future reader guessing
-        # why a fresh config still says 2200.
+        # Said out loud: --plugin-only promises no writes into the host checkout,
+        # and a silently skipped half leaves a future reader wondering why a
+        # config generated later is still below the floor.
         say(
             f"  {CONFIG_DEFAULTS_REL}: skipped (--plugin-only writes nothing into "
             "the host checkout; a config generated later will still say "
             f"{MEMORY_LIMIT_STOCK_DEFAULT})"
         )
-    meta["memory_limit"] = {
-        "from": MEMORY_LIMIT_STOCK_DEFAULT,
-        "to": MEMORY_LIMIT_RAISED,
-        "targets": targets,
-    }
-    if "raised" in targets.values():
+    meta["memory_limit"] = {"floor": MEMORY_LIMIT_FLOOR, "targets": targets}
+    if any(t["status"] == "raised" for t in targets.values()):
         say(
-            f"Memory budget raised to {MEMORY_LIMIT_RAISED} chars. Takes effect on "
+            f"Memory budget raised to {MEMORY_LIMIT_FLOOR} chars. Takes effect on "
             "the next gateway restart."
         )
 
 
 def restore_memory_limit(meta: dict) -> None:
-    """Undo the raise by reversing the same one-number substitution.
+    """Undo the raise by putting each file's own previous number back.
 
     Deliberately NOT a file restore. config.yaml is a live file the user edits;
     putting a pre-install copy back would silently destroy every unrelated change
     made since. Reversing one integer cannot.
 
-    A value that is no longer the one this installer wrote is left alone and
-    reported: the user changed it afterwards, and their number outranks our undo.
+    Each target restores the value IT had, not a global default: a user who ran the
+    install at 3000 gets 3000 back. And a value that is no longer the one this
+    install wrote is left alone -- they changed it afterwards, and their number
+    outranks our undo.
     """
     record = meta.get("memory_limit") or {}
     targets = record.get("targets") or {}
-    frm = record.get("from")
-    to = record.get("to")
-    if not targets or not isinstance(frm, int) or not isinstance(to, int):
+    floor = record.get("floor")
+    if not isinstance(floor, int):
         return
-    for path_str, previous_status in sorted(targets.items()):
-        if previous_status != "raised":
+    for path_str, entry in sorted(targets.items()):
+        if not isinstance(entry, dict) or entry.get("status") != "raised":
             # We did not change this file, so rollback does not touch it.
             continue
-        # Reversed: what we wrote is now the value to find.
-        status = _retune_limit(Path(path_str), frm=to, to=frm)
-        say(f"  memory limit {path_str}: {'restored' if status == 'raised' else status}")
+        previous = entry.get("previous")
+        if not isinstance(previous, int) or previous <= 0:
+            say(f"  memory limit {path_str}: no previous value recorded; left alone")
+            continue
+        status = _lower_limit(Path(path_str), expect=floor, restore=previous)
+        say(f"  memory limit {path_str}: {status}")
 
 
 def write_metadata(meta_dir: Path, meta: dict) -> Path:
