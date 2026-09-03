@@ -2440,6 +2440,68 @@ class RefineTests(unittest.TestCase):
         )
         self.assertEqual(refused.get("failure"), "memory_entry_too_long")
 
+    def test_the_ceiling_measures_the_content_that_will_actually_be_stored(self):
+        """Two enforcement points, one limit, and they measured different strings.
+
+        llm._finalize_edit reads len(content) on the model's raw text, then
+        sanitizes on the way out. core._validate_proposal reads len(content) on
+        the sanitized value -- which is what reaches the store. Redaction is not
+        length-preserving: 'password=hunter2' (16) becomes 'password=[REDACTED]'
+        (19). So an entry at the ceiling that names a credential passes the
+        proposer and is then refused by the apply, with the shortening retry --
+        the whole point of the ceiling being enforced there -- never getting a
+        chance to fire. Same failure mode as the token/character budget pair that
+        drifted apart at 2048 vs 15000: two views of one limit.
+        """
+        secret = "password=hunter2"
+        filler = "a" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - len(secret))
+        content = filler + secret
+        stored = sanitization.scrub_text(content)
+        self.assertEqual(len(content), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS)
+        self.assertGreater(
+            len(stored), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS,
+            "fixture no longer exercises an expanding redaction",
+        )
+
+        # The apply refuses it, because it measures the stored form.
+        self.assertIsNotNone(core._validate_proposal({
+            "action": "create", "kind": "memory", "name": "credential-lesson",
+            "content": stored, "reason": "r", "evidence": [],
+        }))
+        # So the proposer must refuse it too, rather than declaring it applyable.
+        result = llm._finalize_edit(
+            MockLlm({"action": "no_op", "reason": "unused"}),
+            "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "credential-lesson",
+             "content": content, "reason": "r", "evidence": []},
+            allow_content_retry=False,
+        )
+        self.assertEqual(result.get("failure"), "memory_entry_too_long")
+
+    def test_a_redacted_entry_that_fits_once_stored_is_still_accepted(self):
+        """The other direction: measuring the stored form must not refuse an
+        entry that fits. A redaction that SHRINKS ('sk-...' -> '[REDACTED]') can
+        bring an over-length entry under the ceiling, and the stored form is what
+        the limit is about."""
+        secret = "sk-" + "a" * 40
+        filler = "b" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - 10)
+        content = filler + secret
+        stored = sanitization.scrub_text(content)
+        self.assertGreater(len(content), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS)
+        self.assertLessEqual(
+            len(stored), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS,
+            "fixture no longer exercises a shrinking redaction",
+        )
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = llm._finalize_edit(
+            model, "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "shrinking-secret",
+             "content": content, "reason": "r", "evidence": []},
+            allow_content_retry=True,
+        )
+        self.assertNotIn("failure", result)
+        self.assertEqual(len(model.calls), 0, "no retry was needed")
+
     def test_a_retry_that_answers_a_different_question_has_its_own_code(self):
         """"Cannot write it shorter" and "answered a different question" are two
         failures; a shared code would make them one line in the journal."""

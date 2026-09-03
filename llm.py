@@ -1506,12 +1506,25 @@ def _finalize_edit(
     # inside a multi proposal with no ceiling at all (``core._validate_proposal``
     # checks MAX_CONTENT_CHARS=15000, never the entry ceiling), which is
     # precisely the path the model uses when it has more than one lesson.
-    if kind == "memory" and content and len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
+    # Measured on the SANITIZED text, because that is what reaches the store and
+    # what core._validate_proposal measures at the other enforcement point.
+    # Redaction is not length-preserving in either direction --
+    # "password=hunter2" (16) becomes "password=[REDACTED]" (19), while an
+    # "sk-<40 chars>" token (43) becomes "[REDACTED]" (10) -- so measuring the
+    # raw text here made the two points disagree about one limit. An entry at the
+    # ceiling naming a credential passed this check and was then refused by the
+    # apply, with the retry this block exists to run never getting to fire; and an
+    # over-length entry whose secret shrinks away was sent for a pointless retry.
+    # Same shape as the token/character budget pair that drifted to 2048 vs 15000.
+    def _stored_len(text: str) -> int:
+        return len(scrub_text(text))
+
+    if kind == "memory" and content and _stored_len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
         if allow_content_retry:
             retry_text = (
                 instructions
                 + "\n\nThe memory entry you proposed is "
-                + f"{len(content)} characters; the hard limit is "
+                + f"{_stored_len(content)} characters; the hard limit is "
                 + f"{MEMORY_ENTRY_HARD_LIMIT_CHARS}. Return the SAME lesson, "
                 + "same kind=memory and name, shortened to fit -- one plain "
                 + "sentence, no lost meaning, target about "
@@ -1555,9 +1568,9 @@ def _finalize_edit(
                     )
                 parsed = retry
                 action, kind, name, content, category = retry_fields
-        if len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
+        if _stored_len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
             return _semantic_failure(
-                f"Memory entry is {len(content)} characters; the hard limit is "
+                f"Memory entry is {_stored_len(content)} characters; the hard limit is "
                 f"{MEMORY_ENTRY_HARD_LIMIT_CHARS}"
                 + (" after one shortening retry" if allow_content_retry else ""),
                 failure="memory_entry_too_long",
