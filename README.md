@@ -65,19 +65,14 @@ An agent that fixes the same problem every week is not learning. The hard part i
 not noticing a failure — it is knowing which failures are *chronic*, and knowing
 whether a fix worked.
 
-That needs three things a single-session review cannot give you:
-
-- **Comparable failures.** Raw error strings never repeat exactly. Volatile parts
-  — ids, paths, ports, timestamps — have to collapse before "again" means
-  anything, while genuinely different errors must stay apart. That is what
-  fingerprinting buys.
-- **A window wider than one conversation.** A pattern seen in four separate
-  sessions is stronger evidence than the same thing twice in one. Refine Cycle
-  counts both, and weighs distinct sessions separately.
-- **A verdict afterwards.** An edit is a hypothesis with a falsifiable
-  `expected_outcome`. Refine Cycle records it, then checks whether the fingerprint
-  recurred and whether the skill was used at all — and says `working`,
-  `did not help`, `unused`, or `churning`.
+The table above says what the difference is; the part worth spelling out is why
+fingerprinting carries it. Raw error strings never repeat exactly, so volatile
+parts — ids, paths, ports, timestamps — have to collapse before "again" means
+anything, while genuinely different errors must stay apart. Those two
+requirements pull against each other, and every serious defect in this plugin so
+far has been one of them winning too hard. An edit is then treated as a
+hypothesis with a falsifiable `expected_outcome`, which is what makes a verdict
+afterwards possible at all.
 
 Ambiguous trajectories still get one conservative reviewer pass rather than
 silently ending at the mechanical gate, so a real lesson with no repeat count is
@@ -217,7 +212,7 @@ Verify:
 
 ```
 hermes plugins list
-# refine  0.1.0  Self-improvement loop ...  enabled
+# refine  0.13.0  Measurement layer ...  enabled
 ```
 
 Then check that automatic refinement can actually run:
@@ -248,10 +243,17 @@ toward the budget it reports.
 The plugin asks the LLM through Hermes's *active invocation route*: the same
 model binding that the user's live session uses, so that a proposal costs the
 host's own provider creds and never a hardcoded key. Stock Hermes does not
-expose that binding to plugins. `install.sh` ships one patch that adds it,
-`assets/invocation-route-v2026.8.16.patch`, touching `agent/plugin_llm.py`,
-`agent/auxiliary_client.py`, `gateway/run.py`, and `hermes_cli/plugins.py` in
-the Hermes checkout.
+expose that binding to plugins. The installer ships one patch per Hermes base —
+currently `assets/invocation-route-v2026.8.16.patch` and
+`assets/invocation-route-v2026.8.31.patch` — each touching nine files including
+`agent/plugin_llm.py`, `agent/auxiliary_client.py`, `gateway/run.py`, and
+`hermes_cli/plugins.py` in the Hermes checkout.
+
+Which patch fits a host is decided by **trying** it with `git apply --check`,
+newest base first, not by comparing version strings. Hermes moved 72 commits
+across these files between v2026.8.16 and v2026.8.31, and the 8.16 patch still
+lands 39 of its 40 hunks on 8.31 — so a version test would refuse hosts a patch
+fits and accept hosts it does not.
 
 - **Without the patch:** `/refine status`, `/refine audit`, `/refine rollback`,
   journaling, and the test suite all work. A proposal run stops honestly with
@@ -280,6 +282,51 @@ will often still get a working patch; one that genuinely cannot is told so.
 On hosts that already carry the route (patched earlier, or upstream), the
 script detects it and does nothing. See the script's header for the exact
 behaviour and the one-command undo (`git apply -R`).
+
+### The memory budget the install raises
+
+`install.py` raises Hermes's memory character limit to a floor of **4400**. This
+is deliberate and it is for the plugin's sake, so it is stated here rather than
+left to be discovered in a diff.
+
+Stock Hermes ships `memory_char_limit: 2200` — roughly 800 tokens. That number was
+chosen when the models driving Hermes were smaller and shorter-context; a compact
+store was the right trade then. It is no longer the constraint it was, and current
+models carry 4400 characters of durable memory without difficulty.
+
+For this plugin the stock size is actively too small. Refine's whole output is
+lessons written into that store, and it accumulates: on a real install, six applied
+edits consumed about a third of the stock budget in a single day. A plugin that
+fills the store it depends on is not usable at 2200.
+
+Two files are changed, because neither alone reaches everybody:
+
+- `<HERMES_HOME>/config.yaml` — Hermes writes `memory_char_limit` into the
+  generated config, so for anyone who has already run Hermes this file is what
+  decides, and the code default is never consulted.
+- `hermes_cli/config_defaults.py` in the Hermes checkout — what a user who
+  installs the plugin *before* Hermes has ever generated a config will get.
+  `--plugin-only` skips this one, since that flag promises no writes into the host
+  checkout, and says so at the time.
+
+The rule is a **floor, not an override**:
+
+| Current value | What happens |
+|---|---|
+| below 4400 (including the stock 2200) | raised to 4400 |
+| exactly 4400 | nothing |
+| above 4400 | left alone — your number wins |
+
+So a limit you chose yourself is never overwritten and never *lowered*, and
+running the installer twice changes nothing the second time. `--rollback` reverses
+it by putting each file's own previous number back — not a blanket 2200, so a host
+that installed at 3000 returns to 3000. It reverses one integer rather than
+restoring a file copy, because `config.yaml` is a live file you edit and a restored
+copy would silently discard everything else you changed since.
+
+The plugin itself never hardcodes 4400. It reads whatever limit the host reports
+and shows it to you at every write (for example `memory 1443/4400`), so raising the limit
+further is a host decision the plugin follows rather than fights.
 
 ---
 
@@ -719,7 +766,7 @@ All keys live under `plugins.entries.refine`:
 | `reviewer_cooldown_minutes` | int | `60` | Minimum durable gap between reviewer decisions. |
 | `proposer_subagent_enabled` | bool | `true` | Produce proposals via a read-only subagent that can open skill bodies before deciding. Requires a bound parent turn; without one the structured call is the fallback either way. |
 | `proposer_subagent_strict` | bool | `false` | Make a subagent failure a journaled `subagent_strict_error` instead of silently downgrading to the structured call. |
-| `proposer_subagent_timeout_seconds` | int | `180` | Wall-clock bound on the subagent proposal wait (minimum 5). The structured-call and reviewer timeouts are separate constants in `llm.py` (45 s) and are not configurable. |
+| `proposer_subagent_timeout_seconds` | int | `180` | Wall-clock bound on the subagent proposal wait (minimum 5). The structured-call and reviewer timeouts are constants in `llm.py` (`_PROPOSAL_TIMEOUT_SECONDS`, `_REVIEW_TIMEOUT_SECONDS`, both 180 s) and are not configurable. All three describe the same piece of work and are deliberately the same number. |
 | `prompt_notes_enabled` | bool | `true` | Permit `prompt` proposals and note injection. |
 | `prompt_notes_max_count` | int | `5` | Maximum active notes injected into one turn. |
 | `prompt_notes_max_chars` | int | `600` | Maximum characters in the complete injected note block. |
