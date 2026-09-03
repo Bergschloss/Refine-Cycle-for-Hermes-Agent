@@ -239,7 +239,17 @@ def record_journal_state(entry: Dict[str, Any]) -> None:
         outcome=str(entry.get("outcome", "")),
         pending_id=str(entry.get("pending_id", "")),
         llm_meta=entry.get("llm_meta") if isinstance(entry.get("llm_meta"), dict) else None,
-        entry_ts=entry.get("ts") if isinstance(entry.get("ts"), (int, float)) else None,
+        # Through the shared validator, not a bare isinstance. Ageing an edit
+        # from its journal ts (88a32c8) only helps if the ts is a time, and an
+        # isinstance check passes 0.0, a negative, and a ts from a host whose
+        # clock is set ahead. created_ts becomes age_days in audit(), and
+        # age_days is what separates "too early to tell" from a confident
+        # verdict: a stored 0.0 ages the edit by about 20,700 days, and a future
+        # ts ages it negatively, which reads as "too early" forever.
+        # believable_ts is already applied to every host timestamp read from the
+        # database; a journal line is the same kind of untrusted host input, and
+        # None here lets record_edit's own fallback use now.
+        entry_ts=patterns.believable_ts(entry.get("ts"), now=time.time()),
     )
 
 

@@ -3167,6 +3167,57 @@ class RefineTests(unittest.TestCase):
             "the same edit must keep its first created_ts",
         )
 
+    def test_a_journal_ts_that_cannot_be_believed_ages_from_now(self):
+        """The other half of 88a32c8: ageing from entry_ts only helps if entry_ts
+        is a time.
+
+        record_journal_state forwards the journal entry's ts on an isinstance
+        check alone, while patterns.believable_ts exists for exactly this class
+        of value and is applied to every host timestamp read from the database. A
+        journal line written by a host with an unsynced clock, or a hand-repaired
+        one, carries a ts that passes isinstance and is not a time: 0.0 becomes
+        created_ts=0.0, which audit turns into an age of about 20,700 days, and
+        age_days is what separates "too early to tell" from a confident verdict.
+        None means "no time" and record_edit's own fallback then uses now.
+        """
+        now = time.time()
+        for label, bad_ts in (
+            ("zero", 0.0),
+            ("negative", -1.0),
+            # A host whose clock is set ahead: created_ts in the future makes
+            # age_days negative, which reads as "too early" forever.
+            ("far-future", now + patterns.MAX_CLOCK_SKEW_SECONDS + 86400),
+        ):
+            with self.subTest(label=label):
+                self.assertIsNone(
+                    patterns.believable_ts(bad_ts, now=now),
+                    "the shared validator already rejects this value",
+                )
+                ledger.record_journal_state({
+                    "id": f"unbelievable-{label}",
+                    "ts": bad_ts,
+                    "outcome": "applied",
+                    "proposal": {
+                        "name": f"unbelievable-{label}", "kind": "skill",
+                        "action": "create",
+                    },
+                })
+                created = ledger.load_stats()[f"unbelievable-{label}"]["created_ts"]
+                self.assertNotEqual(
+                    created, bad_ts,
+                    "an unbelievable ts must not be stored as the edit's age",
+                )
+                self.assertGreaterEqual(
+                    created, now, "it must fall back to now instead"
+                )
+        # Both directions: a believable ts is still honoured exactly.
+        good = 1600000000.0
+        ledger.record_journal_state({
+            "id": "believable", "ts": good, "outcome": "applied",
+            "proposal": {"name": "believable", "kind": "skill", "action": "create"},
+        })
+        self.assertEqual(ledger.load_stats()["believable"]["created_ts"], good)
+
     def test_audit_flags_a_skill_modified_by_something_other_than_refine(self):
         """R9 §9: a skill whose current content no longer matches what refine
         last applied must be flagged, and its verdict marked unreliable rather
