@@ -15949,6 +15949,36 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(entry["outcome"], "rejected")
         self.assertEqual(entry["llm_meta"]["result_code"], "ok")
 
+    def test_audit_tells_a_store_unavailable_rejection_from_a_content_one(self):
+        """A rejected row read one word, "rejected", for two causes: refine
+        refusing weak content, and the host store being unavailable. The cause
+        is already in the durable record as llm_meta.result_code, so audit()
+        can carry it into the verdict -- 'store unavailable' vs 'rejected' --
+        letting the operator tell "refine did its job" from "the host was
+        broken". No journal format change: result_code is written today.
+        """
+        now = time.time()
+        rows = ledger.audit([], journal_entries=[
+            {
+                "id": "store-down", "ts": now, "outcome": "rejected",
+                "proposal": {
+                    "action": "create", "kind": "memory", "name": "store-down",
+                },
+                "llm_meta": {"result_code": "memory_store_unavailable"},
+            },
+            {
+                "id": "dup", "ts": now, "outcome": "rejected",
+                "proposal": {
+                    "action": "create", "kind": "memory", "name": "dup",
+                },
+                "llm_meta": {"result_code": "memory_duplicate"},
+            },
+        ])
+        by_name = {row["name"]: row for row in rows}
+        self.assertEqual(by_name["store-down"]["verdict"], "store unavailable")
+        # A content rejection must still read "rejected".
+        self.assertEqual(by_name["dup"]["verdict"], "rejected")
+
     def test_an_unreadable_memory_store_refuses_rather_than_waves_through(self):
         """Fail closed, like the prompt-note duplicate check: the guardrail
         cannot answer its question, and what it would have judged lands in the

@@ -398,6 +398,17 @@ def _merge_journal_stats(
         model_substituted = bool(
             isinstance(llm_meta, dict) and llm_meta.get("model_substituted")
         )
+        # A rejected entry already carries WHY it was rejected in its durable
+        # llm_meta.result_code (written by _journal_nonmutation): a content
+        # refusal reads "memory_duplicate"/"ok"/etc., a host-store failure reads
+        # "memory_store_unavailable". Carry that existing field into meta so
+        # audit() can tell "refine did its job" from "the host was broken"
+        # instead of showing one word for both. No journal format change.
+        result_code = (
+            scrub_text(str(llm_meta["result_code"]))[:60]
+            if isinstance(llm_meta, dict) and llm_meta.get("result_code")
+            else ""
+        )
         fingerprint_grounded = (
             bool(llm_meta["grounded"])
             if isinstance(llm_meta, dict) and "grounded" in llm_meta
@@ -410,6 +421,8 @@ def _merge_journal_stats(
                 existing["reported_model"] = reported_model
             if model_substituted and not existing.get("model_substituted"):
                 existing["model_substituted"] = True
+            if result_code and not existing.get("result_code"):
+                existing["result_code"] = result_code
             if fingerprint_grounded is not None:
                 existing["fingerprint_grounded"] = fingerprint_grounded
             continue
@@ -451,6 +464,10 @@ def _merge_journal_stats(
             meta["model_substituted"] = True
         elif isinstance(existing, dict) and existing.get("model_substituted"):
             meta["model_substituted"] = True
+        if result_code:
+            meta["result_code"] = result_code
+        elif isinstance(existing, dict) and existing.get("result_code"):
+            meta["result_code"] = existing["result_code"]
         if fingerprint_grounded is not None:
             meta["fingerprint_grounded"] = fingerprint_grounded
         elif isinstance(existing, dict) and "fingerprint_grounded" in existing:
@@ -679,7 +696,16 @@ def audit(
             verdict = "rolled back"
         elif outcome == "rejected":
             uses, usage_scope = None, "unavailable"
-            verdict = "rejected"
+            # "rejected" alone conflated two causes the operator must tell
+            # apart: refine refusing weak content (a duplicate, over the size
+            # ceiling) versus the host store being unavailable. The cause is in
+            # the durable record as result_code, so read it rather than sniff
+            # the message: a store-unavailable rejection means "the host was
+            # broken", not "refine did its job".
+            if meta.get("result_code") == "memory_store_unavailable":
+                verdict = "store unavailable"
+            else:
+                verdict = "rejected"
         elif outcome == "error":
             # No artifact exists, so usage and usefulness are not questions that
             # can be asked. Without this branch the row fell through to the
