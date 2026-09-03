@@ -785,11 +785,26 @@ def _lower_limit(path: Path, *, expect: int, restore: int) -> str:
 
 
 def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
-    """Bring the memory budget up to the floor, and record how to undo it."""
+    """Bring the memory budget up to the floor, and record how to undo it.
+
+    Merges into any record carried forward by new_metadata instead of replacing
+    it. A repeat install finds the value already at the floor and would otherwise
+    record "already 4400", erasing the one note that says this install raised the
+    file from 2200 -- after which rollback leaves the raise in place forever.
+    """
+    existing = (meta.get("memory_limit") or {}).get("targets") or {}
     targets: dict[str, dict] = {}
 
     def apply_to(path: Path, label: str) -> str:
         status, previous = _raise_limit(path, floor=MEMORY_LIMIT_FLOOR)
+        prior = existing.get(str(path))
+        if isinstance(prior, dict) and prior.get("status") == "raised":
+            # An earlier run of this installer did the raise. That record is the
+            # only thing that knows the original number, so it wins and this
+            # run's "already 4400" is not allowed to overwrite it.
+            targets[str(path)] = prior
+            say(f"  {label}: {status} (raise recorded by an earlier install)")
+            return status
         targets[str(path)] = {"status": status, "previous": previous}
         say(f"  {label}: {status}")
         return status
@@ -917,6 +932,16 @@ def new_metadata(src: Path, previous: dict, *, mode: str) -> dict:
         # true pre-install state; later runs never mutated the host further.
         "host": previous.get("host", {}),
     }
+    # Same reasoning, and it was missed once. The memory-limit record is the only
+    # thing that says which number each file had BEFORE the raise. A second
+    # install sees the value already at the floor, records "already 4400", and if
+    # that overwrites the first record then rollback has nothing marked "raised"
+    # and silently leaves the raise in place. Measured on a real clean host:
+    # install, re-install, --rollback -> the route patch came out and the limit
+    # stayed at 4400 with config_defaults.py left modified. raise_memory_limit()
+    # merges into this rather than replacing it.
+    if previous.get("memory_limit"):
+        meta["memory_limit"] = previous["memory_limit"]
     # Only while the recorded tree is still there: carrying a stale destination
     # forward (HERMES_HOME changed between runs, or someone removed the tree by
     # hand) makes --rollback announce a removal of something already gone.

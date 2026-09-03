@@ -22917,6 +22917,53 @@ class InstallerMemoryBudgetTests(unittest.TestCase):
         self.assertEqual(meta["memory_limit"]["floor"], self.floor)
         self.assertNotIn(str(defaults), meta["memory_limit"]["targets"])
 
+    def test_a_repeat_install_does_not_erase_how_to_undo_the_raise(self):
+        """install, install again, rollback -- the raise must still come out.
+
+        Found on a real clean host, not here: the second install sees the value
+        already at the floor and records "already 4400". If that overwrites the
+        first record, nothing is marked "raised" and rollback silently leaves the
+        limit up, with the host's config_defaults.py left modified. The host backup
+        was already protected against repeat installs; this record was not.
+        """
+        path = self._yaml(self.stock)
+        home = self.td / "repeat-home"
+        home.mkdir()
+        shutil.copy2(path, home / "config.yaml")
+        src = self.td / "repeat-src"
+        src.mkdir()
+
+        first: dict = {}
+        with patch.object(self.install, "hermes_home_dir", return_value=home):
+            self.install.raise_memory_limit(src, first, include_host=False)
+        self.assertEqual(self._value(home / "config.yaml"), self.floor)
+
+        # A second install, carrying the first run's record forward the way
+        # new_metadata does.
+        second = {"memory_limit": first["memory_limit"]}
+        with patch.object(self.install, "hermes_home_dir", return_value=home):
+            self.install.raise_memory_limit(src, second, include_host=False)
+        entry = second["memory_limit"]["targets"][str(home / "config.yaml")]
+        self.assertEqual(entry["status"], "raised", "the raise record was overwritten")
+        self.assertEqual(entry["previous"], self.stock)
+
+        self.install.restore_memory_limit(second)
+        self.assertEqual(
+            self._value(home / "config.yaml"), self.stock,
+            "rollback after a repeat install left the raise in place",
+        )
+
+    def test_new_metadata_carries_the_memory_limit_record_forward(self):
+        """The other half: the merge only works if the record survives the rebuild."""
+        previous = {"memory_limit": {"floor": self.floor, "targets": {
+            "/some/config.yaml": {"status": "raised", "previous": self.stock},
+        }}}
+        meta = self.install.new_metadata(self.td, previous, mode="full")
+        self.assertEqual(meta.get("memory_limit"), previous["memory_limit"])
+        # And a first-ever install carries nothing, rather than an empty shell that
+        # would read as "a raise was recorded".
+        self.assertNotIn("memory_limit", self.install.new_metadata(self.td, {}, mode="full"))
+
     def test_a_full_install_records_both_targets_with_their_own_previous(self):
         """Two files that started at different numbers must each get theirs back."""
         src = self.td / "hermes2"
