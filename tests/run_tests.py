@@ -3167,6 +3167,51 @@ class RefineTests(unittest.TestCase):
             "the same edit must keep its first created_ts",
         )
 
+    def test_an_unbelievable_ts_cannot_overwrite_a_newer_edits_row(self):
+        """entry_ts answers two questions, and they are not the same question.
+
+        "When did this edit happen" drives ageing. "Is this record newer than the
+        row it would overwrite" drives the staleness branch, which is what stops
+        an older record re-asserting itself over a live edit -- outcome alone
+        cannot tell those apart, because a failed rollback mirrors back as
+        applied. Routing an unbelievable ts to None answered the first question
+        correctly and the second one with silence, which switched the guard OFF
+        for exactly the record it distrusts. A ts that cannot be believed cannot
+        prove it is newer, so it must not overwrite.
+        """
+        proposal = {"name": "contested", "kind": "skill", "action": "create"}
+        # Anchored in the past so "newer" below is still not FUTURE: a ts beyond
+        # now + MAX_CLOCK_SKEW_SECONDS is itself unbelievable, and would be
+        # refused for that reason rather than for its order.
+        base = time.time() - 100000
+        ledger.record_edit(proposal, "journal-new", entry_ts=base)
+        before = dict(ledger.load_stats()["contested"])
+
+        ledger.record_journal_state({
+            "id": "journal-ancient", "ts": 0.0, "outcome": "applied",
+            "proposal": proposal,
+        })
+        after = ledger.load_stats()["contested"]
+        self.assertEqual(
+            after["journal_id"], "journal-new",
+            "a record whose ts cannot be believed overwrote a newer edit's row",
+        )
+        self.assertEqual(after["created_ts"], before["created_ts"])
+        self.assertEqual(after["version"], before["version"])
+
+        # Both directions: a believable OLDER ts is still refused (unchanged), and
+        # a believable NEWER one still lands.
+        ledger.record_journal_state({
+            "id": "journal-older", "ts": before["created_ts"] - 5000,
+            "outcome": "applied", "proposal": proposal,
+        })
+        self.assertEqual(ledger.load_stats()["contested"]["journal_id"], "journal-new")
+        ledger.record_journal_state({
+            "id": "journal-newer", "ts": before["created_ts"] + 5000,
+            "outcome": "applied", "proposal": proposal,
+        })
+        self.assertEqual(ledger.load_stats()["contested"]["journal_id"], "journal-newer")
+
     def test_a_journal_ts_that_cannot_be_believed_ages_from_now(self):
         """The other half of 88a32c8: ageing from entry_ts only helps if entry_ts
         is a time.

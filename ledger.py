@@ -144,6 +144,20 @@ def record_edit(
             # was manually corrupted; this new edit owns the replacement row.
             previous = {}
         now = time.time()
+        # ``entry_ts`` is asked two different questions below, and validating it
+        # at the call site could only answer one of them. "When did this edit
+        # happen" drives ageing; "is this record newer than the row it would
+        # overwrite" drives the staleness branch. Handing None to both for a ts
+        # that cannot be believed aged it from now, correctly, and switched the
+        # staleness guard OFF -- so the one record whose claim is untrustworthy
+        # was the one allowed to replace a live edit's row. Keep the claim and the
+        # believed value apart: no claim means the live path, an unbelievable
+        # claim means "cannot prove this is newer".
+        claimed_ts = entry_ts
+        entry_ts = (
+            patterns.believable_ts(claimed_ts, now=now)
+            if claimed_ts is not None else None
+        )
         same_edit = previous.get("journal_id") == journal_id
         # A record that left no artifact must not overwrite the row of a
         # different edit that did. Rows are keyed by name, so an abandoned or
@@ -157,16 +171,23 @@ def record_edit(
                 outcome in _STAGED_OUTCOMES and previous.get("outcome") == "applied"
             ):
                 stale = True
-            elif entry_ts is not None:
+            elif claimed_ts is not None:
                 # An older edit must not overwrite a newer one's row either. A
                 # failed rollback mirrors its entry back as ``applied``, and a
                 # staged edit mirrors as ``pending_approval``, so outcome alone
                 # cannot tell "a newer edit of this name" from "an older record
                 # re-asserting itself".
-                try:
-                    stale = float(entry_ts) < float(previous.get("created_ts", 0) or 0)
-                except (TypeError, ValueError):
-                    stale = False
+                if entry_ts is None:
+                    # A time was claimed and cannot be believed, so this record
+                    # cannot prove it is newer than the row it would replace.
+                    # Refusing keeps the live edit's attribution; accepting would
+                    # hand the row to whichever record has the worst clock.
+                    stale = True
+                else:
+                    try:
+                        stale = float(entry_ts) < float(previous.get("created_ts", 0) or 0)
+                    except (TypeError, ValueError):
+                        stale = False
         if stale:
             if stats.get(name) is not legacy:
                 # The legacy key migration above already rewrote the mapping;
@@ -239,17 +260,13 @@ def record_journal_state(entry: Dict[str, Any]) -> None:
         outcome=str(entry.get("outcome", "")),
         pending_id=str(entry.get("pending_id", "")),
         llm_meta=entry.get("llm_meta") if isinstance(entry.get("llm_meta"), dict) else None,
-        # Through the shared validator, not a bare isinstance. Ageing an edit
-        # from its journal ts (88a32c8) only helps if the ts is a time, and an
-        # isinstance check passes 0.0, a negative, and a ts from a host whose
-        # clock is set ahead. created_ts becomes age_days in audit(), and
-        # age_days is what separates "too early to tell" from a confident
-        # verdict: a stored 0.0 ages the edit by about 20,700 days, and a future
-        # ts ages it negatively, which reads as "too early" forever.
-        # believable_ts is already applied to every host timestamp read from the
-        # database; a journal line is the same kind of untrusted host input, and
-        # None here lets record_edit's own fallback use now.
-        entry_ts=patterns.believable_ts(entry.get("ts"), now=time.time()),
+        # Forwarded raw, deliberately. record_edit validates it through
+        # patterns.believable_ts, because it is the only place that can tell
+        # "no time was claimed" (the live path, age from now) from "a time was
+        # claimed and cannot be believed" (age from now AND do not overwrite a
+        # newer row). Validating here collapsed those two into one None and
+        # disabled the staleness guard for the record it distrusts.
+        entry_ts=entry.get("ts"),
     )
 
 
