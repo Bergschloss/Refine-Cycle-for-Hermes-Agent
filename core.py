@@ -2984,6 +2984,65 @@ def _memory_numbers_conflict(proposed: frozenset, existing: frozenset) -> bool:
     return bool(proposed - existing) and bool(existing - proposed)
 
 
+# Polarity is compared apart from words for the same reason numbers are, and it
+# is the worse of the two omissions. Negation words are function words, so they
+# are in the stop list above -- correctly, for the word score's purpose -- which
+# means a lesson and its exact contradiction produce the SAME token set and score
+# 1.00. "The add action is gated by write_approval" and "... is not gated by
+# write_approval" were one entry as far as this guardrail could tell, and the
+# refusal fell on whichever arrived second.
+#
+# That is unrecoverable, not merely unhelpful. Refine may never propose a delete,
+# the host's ``replace`` action is unused, and a memory patch reaches the host as
+# an ``add``, so a stored lesson with its polarity backwards cannot be corrected
+# by refine through any path. A wrong number is wrong about a value; a wrong
+# polarity instructs the agent to do the opposite of the right thing, every
+# session, in its own loaded context.
+#
+# The cost of the exemption, named rather than left to be found in a bloated
+# store: two phrasings of one lesson where only one of them happens to use a
+# negation -- "Avoid the shell tool for edits" against "Do not use the shell tool
+# for edits" -- now read as a correction and the store keeps both. That is one
+# visible redundant entry. This project already chose that direction explicitly
+# for the self-correcting release rule in patterns.py, and for the same reason:
+# the redundant entry is in the store where anyone can see it, and the refused
+# correction leaves no trace at all.
+_MEMORY_NEGATION_MARKERS = frozenset({
+    # English. Full words only; the contraction regex below folds ``n't`` into
+    # ``not`` first, so ``isn't``/``won't``/``can't`` arrive here as ``not``.
+    "not", "no", "never", "cannot", "without", "nor", "none", "neither",
+    "nothing", "nobody", "nowhere",
+    # Ukrainian, matching the store's actual second language.
+    "не", "ні", "нема", "немає", "ніколи", "без", "жодного", "жодних", "жоден",
+})
+# ``n't`` is folded to ``not`` before tokenizing, because the word regex splits
+# on the apostrophe: ``isn't`` would otherwise become ``isn`` + ``t`` and carry
+# no negation marker at all. Both the ASCII apostrophe and U+2019 appear in real
+# text, so both are matched.
+_MEMORY_CONTRACTED_NOT_RE = re.compile(r"n['\u2019]t\b", re.IGNORECASE)
+
+
+def _memory_negation_set(content: str) -> frozenset:
+    """The negation markers an entry carries, compared apart from its words."""
+    expanded = _MEMORY_CONTRACTED_NOT_RE.sub(" not", content.casefold())
+    words = _MEMORY_DUPLICATE_WORD_RE.findall(expanded)
+    return frozenset(word for word in words if word in _MEMORY_NEGATION_MARKERS)
+
+
+def _memory_polarity_conflict(proposed: frozenset, existing: frozenset) -> bool:
+    """Whether exactly one of the two entries denies what the other asserts.
+
+    Presence, not set difference -- unlike ``_memory_numbers_conflict``, and the
+    asymmetry is the point. A polarity flip is normally one side carrying a
+    marker and the other carrying none, so requiring each side to hold a marker
+    the other lacks would never fire on the case this exists for. Requiring the
+    two sides to DIFFER in whether they negate keeps the false-negative direction
+    closed: "do not use X" and "never use X" both deny, so they remain one
+    lesson and stay refused.
+    """
+    return bool(proposed) != bool(existing)
+
+
 def _jaccard_similarity(a: frozenset, b: frozenset) -> float:
     union = a | b
     if not union:
@@ -3003,19 +3062,22 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
     the signal this plugin exists to surface. Blocking that would make refine
     permanently blind to it, invisibly.
 
-    A pair whose words match but whose numbers conflict is allowed through as a
-    correction (see ``_MEMORY_DUPLICATE_NUMBER_RE``). Allowed through, not
-    substituted: the host call is an ``add`` and refine may never propose a
-    delete, so the store then holds BOTH the corrected entry and the value it
-    corrects, and only the operator can remove the stale one. That is the
-    lesser of the two harms -- the alternative was a wrong number no proposal
-    could ever correct -- but it is not supersession. Superseding would need
-    the host's ``replace`` action, which refine does not use.
+    A pair whose words match is still let through on either of two axes the
+    word score cannot see: conflicting numbers (see
+    ``_MEMORY_DUPLICATE_NUMBER_RE``) and conflicting polarity (see
+    ``_MEMORY_NEGATION_MARKERS``). Allowed through, not substituted: the host
+    call is an ``add`` and refine may never propose a delete, so the store then
+    holds BOTH the corrected entry and the thing it corrects, and only the
+    operator can remove the stale one. That is the lesser of the two harms --
+    the alternative was a wrong value, or a backwards instruction, that no
+    proposal could ever correct -- but it is not supersession. Superseding would
+    need the host's ``replace`` action, which refine does not use.
     """
     proposed_tokens = _memory_token_set(content)
     if not proposed_tokens:
         return None
     proposed_numbers = _memory_number_set(content)
+    proposed_negations = _memory_negation_set(content)
     try:
         store = _memory_store()
         store.load_from_disk()
@@ -3045,6 +3107,13 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
         # here. Asking about numbers first would let any pair with a differing
         # digit skip the word comparison entirely.
         if _memory_numbers_conflict(proposed_numbers, _memory_number_set(existing)):
+            continue
+        # And the same last word for polarity. Also only here, and for the same
+        # reason: asking first would let any pair containing a "not" skip the
+        # word comparison entirely.
+        if _memory_polarity_conflict(
+            proposed_negations, _memory_negation_set(existing)
+        ):
             continue
         return (
             f"Memory entry is {score:.2f} similar to an entry already in "

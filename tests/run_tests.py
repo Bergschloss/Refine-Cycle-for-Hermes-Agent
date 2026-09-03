@@ -15919,6 +15919,76 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertFalse(result["success"])
         self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
 
+    def test_a_polarity_correction_is_not_a_duplicate(self):
+        """The number exemption's missing twin, and the worse of the two.
+
+        "not" and "не" are stop words, so a lesson and its exact contradiction
+        tokenize identically and score 1.00. The wrong lesson is refused a
+        correction, forever: refine may never propose a delete, the host
+        ``replace`` action is unused, so nothing else can reach it either. A
+        wrong number is at least wrong about a value; a wrong polarity tells the
+        agent to do the opposite of the right thing.
+        """
+        FakeHost.memory_entries[:] = [
+            "The memory tool add action is gated by write_approval",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "gate-corrected",
+            "content": "The memory tool add action is not gated by write_approval",
+            "reason": "the earlier note had it backwards", "evidence": [],
+        })
+        self.assertTrue(result["success"], result.get("message"))
+        self.assertIn(
+            "The memory tool add action is not gated by write_approval",
+            FakeHost.memory_entries,
+        )
+
+    def test_dropping_a_negation_is_a_correction_too(self):
+        """Symmetry: the fix must not only work when the negation is added."""
+        FakeHost.memory_entries[:] = [
+            "Search results are not cached between turns",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "cache-corrected",
+            "content": "Search results are cached between turns",
+            "reason": "measured the opposite", "evidence": [],
+        })
+        self.assertTrue(result["success"], result.get("message"))
+        self.assertIn("Search results are cached between turns", FakeHost.memory_entries)
+
+    def test_a_restatement_that_negates_on_both_sides_is_still_refused(self):
+        """The false-negative direction: the exemption must be a polarity
+        DIFFERENCE, not merely "a negation appears". Two phrasings that both
+        deny the same thing are still one lesson, and letting them through would
+        turn the guardrail into a hole any negated restatement walks past."""
+        FakeHost.memory_entries[:] = [
+            "Do not run the suite with the system Python interpreter",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "suite-python-again",
+            "content": "Never run the suite with the system Python interpreter",
+            "reason": "why", "evidence": [],
+        })
+        self.assertFalse(result["success"])
+        self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
+        self.assertEqual(FakeHost.memory_entries, [
+            "Do not run the suite with the system Python interpreter",
+        ])
+
+    def test_polarity_conflicts_only_when_exactly_one_side_denies(self):
+        """The rule itself, both directions, without a host in the way."""
+        conflict = core._memory_polarity_conflict
+        negations = core._memory_negation_set
+        self.assertTrue(conflict(negations("is gated"), negations("is not gated")))
+        self.assertTrue(conflict(negations("is gated"), negations("isn't gated")))
+        self.assertTrue(conflict(negations("is gated"), negations("is never gated")))
+        self.assertTrue(conflict(negations("канал працює"), negations("канал не працює")))
+        # Both deny, or neither does: one lesson either way.
+        self.assertFalse(conflict(negations("do not use"), negations("never use")))
+        self.assertFalse(conflict(negations("is gated"), negations("is gated")))
+        # A curly apostrophe is the same contraction.
+        self.assertFalse(conflict(negations("isn\u2019t gated"), negations("is not gated")))
+
     def test_the_duplicate_refusal_is_journaled_with_its_own_code(self):
         """The rejection path writes through _journal_nonmutation, which passes
         llm_meta to journal.log untouched, so the classification belongs in the
