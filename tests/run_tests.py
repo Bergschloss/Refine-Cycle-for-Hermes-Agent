@@ -22236,6 +22236,46 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertFalse((self.home / "plugins" / "refine").exists())
         self.assertFalse(any("byte-for-byte" in message for message in messages))
 
+    def test_rollback_removes_only_the_files_the_installer_copied(self):
+        """The plugin destination IS ``config.legacy_journal_dir()``.
+
+        ``plugin_dest_for()`` returns ``<hermes home>/plugins/refine`` and
+        ``config.legacy_journal_dir()`` returns the same path, so on any host that
+        has not migrated its runtime data an rmtree of the destination destroys
+        refine's own ``backups/`` -- the store Invariant 5 depends on -- along with
+        the journal that is the only record of what to roll back, and anything else
+        the operator keeps there. ``meta["plugin_files"]`` already records exactly
+        what was copied, so nothing has to be guessed.
+        """
+        import install
+
+        dest = self.home / "plugins" / "refine"
+        with patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args())
+            # Runtime state the plugin itself writes, plus an operator's own file.
+            (dest / "refine_journal.jsonl").write_text('{"id": 1}\n', encoding="utf-8")
+            (dest / "skill_stats.json").write_text("{}", encoding="utf-8")
+            (dest / "backups").mkdir(exist_ok=True)
+            (dest / "backups" / "skill-before-edit.md").write_text("old", encoding="utf-8")
+            (dest / "OPERATOR_NOTES.txt").write_text("mine", encoding="utf-8")
+            with patch.object(install, "say", lambda *_: None):
+                install.do_rollback(self._args(plugin_only=False))
+
+        survivors = {
+            "refine_journal.jsonl": (dest / "refine_journal.jsonl"),
+            "skill_stats.json": (dest / "skill_stats.json"),
+            "backups/skill-before-edit.md": (dest / "backups" / "skill-before-edit.md"),
+            "OPERATOR_NOTES.txt": (dest / "OPERATOR_NOTES.txt"),
+        }
+        lost = sorted(name for name, path in survivors.items() if not path.is_file())
+        self.assertEqual(
+            lost, [], f"rollback destroyed content the installer never created: {lost}"
+        )
+        # It must still remove what it did copy, or the whole point is lost.
+        self.assertFalse(
+            (dest / "core.py").exists(), "a copied plugin module must still be removed"
+        )
+
     def test_rollback_never_claims_a_host_it_did_not_restore(self):
         """A patched host with no backup of ours: report, warn, change nothing."""
         import install

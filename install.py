@@ -561,6 +561,59 @@ def plugin_dest_for(src: Path | None = None) -> Path:
     return hermes_home_dir(src) / "plugins" / "refine"
 
 
+def remove_recorded_plugin_files(dest: Path, recorded) -> tuple[list[str], list[str]]:
+    """Delete only the files install_plugin recorded copying. Returns (removed, kept).
+
+    An rmtree of ``dest`` is not a rollback of this installer's work, because
+    ``dest`` is not exclusively this installer's. ``plugin_dest_for()`` returns
+    ``<hermes home>/plugins/refine`` and ``config.legacy_journal_dir()`` returns
+    the identical path, so on a host whose runtime data has not migrated, the
+    destination also holds ``refine_journal.jsonl``, ``backups/`` and
+    ``skill_stats.json``. Removing those deletes the pre-edit backups Invariant 5
+    guarantees and the journal that names them -- refine destroying the record of
+    its own edits while printing "Plugin removed" and exiting 0. Whatever else the
+    operator keeps there goes too.
+
+    ``meta["plugin_files"]`` is written by install_plugin for exactly this, so
+    nothing has to be guessed. Only paths inside ``dest`` are touched: a record
+    carried forward from a run under a different HERMES_HOME names files this
+    rollback is not removing, and deleting outside the destination it just
+    reported is not a thing a rollback should do quietly.
+    """
+    removed: list[str] = []
+    kept: list[str] = []
+    dest_key = os.path.normcase(str(dest))
+    parents: set[Path] = set()
+    for entry in recorded or []:
+        target = Path(str(entry))
+        key = os.path.normcase(str(target))
+        if key != dest_key and not key.startswith(dest_key + os.sep):
+            kept.append(str(target))
+            continue
+        try:
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+            removed.append(str(target))
+            parents.add(target.parent)
+        except OSError:
+            # Windows with a running gateway holding the module open is the usual
+            # cause. A file left behind must keep the record that finds it.
+            kept.append(str(target))
+    # Deepest first, so a directory only becomes prunable after its children are.
+    for parent in sorted(parents, key=lambda p: len(p.parts), reverse=True):
+        current = parent
+        while True:
+            ckey = os.path.normcase(str(current))
+            if ckey != dest_key and not ckey.startswith(dest_key + os.sep):
+                break
+            try:
+                current.rmdir()
+            except OSError:
+                break  # not empty, or in use: leave it and everything above it
+            current = current.parent
+    return removed, kept
+
+
 def install_plugin(meta: dict, src: Path | None = None) -> str:
     """Copy plugin files into <hermes home>/plugins/refine (idempotent)."""
     dest = plugin_dest_for(src)
@@ -1088,13 +1141,34 @@ def do_rollback(args) -> None:
         )
         keep_record = True
     elif mode == "remove" and plugin_dest is not None and plugin_dest.is_dir():
-        shutil.rmtree(plugin_dest, ignore_errors=True)
-        if plugin_dest.exists():
-            # Windows with a running gateway holding a file open is the usual
-            # cause. Deleting the record here would leave a tree on disk that no
-            # later --rollback can find.
-            say(f"WARNING: could not fully remove the plugin tree: {plugin_dest}")
+        recorded_files = meta.get("plugin_files")
+        if not recorded_files:
+            # No record: a copy that died before publishing the list, or a record
+            # from before the list existed. Fall back to the manifest of what an
+            # install COPIES -- names the installer owns by construction -- rather
+            # than to the directory, which it does not. A module dropped between
+            # versions is missed by this and reported below; that is the cost of
+            # not guessing, and it is cheaper than deleting the journal.
+            recorded_files = [str(plugin_dest / rel) for rel in plugin_files()]
+            say(
+                f"No plugin_files recorded for {plugin_dest}; removing only the files "
+                "this installer's manifest names, not the directory."
+            )
+        removed, kept = remove_recorded_plugin_files(plugin_dest, recorded_files)
+        if kept:
+            # Deleting the record here would leave files on disk that no later
+            # --rollback can find.
+            say(
+                f"WARNING: {len(kept)} recorded plugin file(s) could not be removed "
+                f"from {plugin_dest}: {kept[:5]}"
+            )
             keep_record = True
+        elif plugin_dest.is_dir():
+            say(
+                f"Plugin files removed ({len(removed)}) from {plugin_dest}; the "
+                "directory holds content this installer did not create and is "
+                "left in place."
+            )
         else:
             say(f"Plugin removed: {plugin_dest}")
     elif plugin_dest is not None:
