@@ -19629,6 +19629,10 @@ class SuiteDiscoveryContractTests(unittest.TestCase):
         # keeping one class. 600 is deliberately well below today's 659+7 so
         # normal test churn does not fail it; a catastrophic loss does.
         self.assertGreaterEqual(len(discovered), 2)
+        # ``discovered`` counts classes, not test cases, so the comment's 600
+        # floor was never enforced: a collapse to 10 tests across two classes
+        # passed the class assertion above. Count the actual test cases.
+        self.assertGreaterEqual(suite.countTestCases(), 600)
 
 
 class TraceFileSinkTests(unittest.TestCase):
