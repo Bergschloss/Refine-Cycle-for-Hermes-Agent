@@ -17603,6 +17603,41 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         ):
             self.assertFalse(patterns.is_self_correcting_error(text), text)
 
+    def test_a_credential_name_classifies_the_same_hyphenated_or_not(self):
+        """The third spelling axis, after casing and plurals, and it splits.
+
+        The regex captures the word immediately before "is required", and a
+        hyphen is a word boundary. So "Re-authentication is required" is judged
+        on ``authentication`` and released, while "Reauthentication is required"
+        is judged on ``reauthentication``, which is in neither the word list nor
+        the ``_word`` suffix list, and is suppressed as a parameter refusal. One
+        failure, two classifications, decided by a hyphen -- exactly what the
+        casing and plural tests exist to prevent.
+
+        The modern spellings of the same family are missing for the same reason:
+        a list holding authentication, authorization, token, key, secret,
+        password, login, session and certificate has no mfa, sso, otp or passkey,
+        and none of those is something a tool can supply by retrying.
+        """
+        for text in (
+            '{"error": "Re-authentication is required for this organization"}',
+            '{"error": "Reauthentication is required for this organization"}',
+            '{"error": "reauth is required"}',
+            '{"error": "MFA is required for this account"}',
+            '{"error": "SSO is required for this organization"}',
+            '{"error": "otp is required"}',
+            '{"error": "passkey is required"}',
+        ):
+            self.assertFalse(patterns.is_self_correcting_error(text), text)
+        # The false-negative direction: widening the credential family must not
+        # start releasing ordinary call parameters.
+        for text in (
+            '{"error": "query is required"}',
+            '{"error": "old_text is required"}',
+            '{"error": "schedule is required"}',
+        ):
+            self.assertTrue(patterns.is_self_correcting_error(text), text)
+
     def test_classification_does_not_depend_on_which_subject_comes_first(self):
         """A message naming both a missing parameter and a missing credential
         classifies the same either way round -- including when one of them

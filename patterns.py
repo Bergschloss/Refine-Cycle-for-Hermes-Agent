@@ -443,7 +443,18 @@ _SELF_CORRECTING_ANCHOR_CHARS = 40
 # word immediately before "is required", so a compound phrase is judged by its
 # last word -- "Authorization header is required" is classified on ``header``,
 # not on ``authorization``. Widening that needs a different rule than a word
-# list, and no live example has needed it yet.
+# list. The live corpus now has 6 rows of that exact shape, so it is no longer
+# hypothetical; it is still a different rule and not a longer list.
+#
+# A hyphen is the third spelling axis, after casing and plurals, and it split
+# the same way they used to. The regex stops at a word boundary, so
+# "Re-authentication is required" is judged on ``authentication`` and released
+# while "Reauthentication is required" is judged on ``reauthentication`` and was
+# suppressed -- one failure, two classifications, decided by a hyphen. Suffix
+# matching cannot close this the way ``_token`` closes ``github_token``: the
+# list holds short words like ``key`` and ``auth``, and a bare-suffix rule would
+# release "monkey is required". So the prefixed and modern spellings are listed
+# explicitly below.
 #
 # Some of these words are also plausible parameter names -- a kv-store tool
 # really does take ``key``, an auth tool ``session``. That direction is chosen
@@ -464,6 +475,13 @@ _SELF_CORRECTING_NON_PARAM_SUBJECTS = frozenset({
     "password", "payment", "permission", "permissions", "scope", "scopes",
     "secret", "session", "signature", "subscription", "token", "tokens",
     "verification",
+    # The same family, in the spellings a modern host actually emits. Each is a
+    # credential or a re-authentication challenge by the definition already used
+    # above -- nothing a tool can supply by retrying -- and each was suppressed
+    # as a parameter refusal because the list stopped at the words that were
+    # current when it was written. ``reauth*`` also closes the hyphen split.
+    "mfa", "otp", "passkey", "reauth", "reauthentication",
+    "reauthorisation", "reauthorization", "sso", "totp",
 })
 _SELF_CORRECTING_NON_PARAM_SUFFIXES = tuple(
     f"_{word}" for word in sorted(_SELF_CORRECTING_NON_PARAM_SUBJECTS)
