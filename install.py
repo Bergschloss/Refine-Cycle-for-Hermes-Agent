@@ -16,6 +16,12 @@ Supported Hermes base: stock v2026.8.16 (commit df4b65147d...). The installer
 classifies the host as stock / patched / partial / dirty / incompatible and
 refuses anything it cannot handle instead of half-applying. Every mutation is
 preceded by a backup recorded in rollback metadata.
+
+The install also raises the Hermes memory budget from the stock 2200 characters to
+4400, in config.yaml and in the host's config_defaults.py, because refine writes
+into that store and the stock size was set for weaker models. Only a value still
+at exactly the stock default is moved -- an operator's own number is never
+overwritten -- and --rollback reverses the same one-number substitution.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -570,6 +577,140 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> str:
     return "unclassified"
 
 
+# ---------------------------------------------------------------------------
+# Memory budget. Refine's whole purpose is writing lessons into the Hermes memory
+# store, and the stock budget was sized for weaker models: 2200 characters, about
+# 800 tokens. Measured on a real install, six applied edits filled a third of it
+# in a day. A plugin that fills the store it depends on is not usable at the stock
+# budget, so the install raises it.
+#
+# TWO files, because neither one alone reaches everybody. Hermes writes the key
+# out into config.yaml from config_defaults, so an existing user's file already
+# contains it and the code default is never consulted -- only the file matters. A
+# user who installs the plugin before Hermes has ever generated a config has no
+# file, so only the default matters. Doing one and not the other leaves half of
+# all users at 2200.
+#
+# Only a value that is still EXACTLY the stock default is moved. Any other number
+# is a deliberate choice and is left alone. That single rule gives three
+# properties at once: the operator's own setting is never overwritten, the
+# operation is idempotent, and it can never lower a limit.
+MEMORY_LIMIT_STOCK_DEFAULT = 2200
+MEMORY_LIMIT_RAISED = 4400
+CONFIG_DEFAULTS_REL = "hermes_cli/config_defaults.py"
+
+# Only the digits are replaced, so indentation, quoting and any trailing comment
+# survive untouched.
+_YAML_LIMIT_RE = re.compile(
+    r"^(?P<lead>[ \t]*memory_char_limit[ \t]*:[ \t]*)(?P<value>\d+)",
+    re.MULTILINE,
+)
+_DEFAULTS_LIMIT_RE = re.compile(
+    r"(?P<lead>[\"']memory_char_limit[\"'][ \t]*:[ \t]*)(?P<value>\d+)"
+)
+
+
+def _limit_regex_for(path: Path) -> "re.Pattern[str]":
+    return _YAML_LIMIT_RE if path.suffix in (".yaml", ".yml") else _DEFAULTS_LIMIT_RE
+
+
+def _retune_limit(path: Path, *, frm: int, to: int) -> str:
+    """Move one integer from ``frm`` to ``to`` in ``path``; report what happened.
+
+    Never raises for a file that is absent or configured differently -- every
+    outcome is a status string the caller prints, because a silent skip here is
+    indistinguishable from success and this runs on the user's live config.
+
+    Newlines are read and written verbatim (``newline=""``). Without that, editing
+    an LF config on Windows rewrites every line in the file to CRLF and the diff
+    the user sees is their whole config rather than one number.
+    """
+    if not path.is_file():
+        return "absent"
+    regex = _limit_regex_for(path)
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+        original = handle.read()
+    matches = list(regex.finditer(original))
+    if not matches:
+        return "key-absent"
+    if len(matches) > 1:
+        # Two declarations mean the effective value is not knowable from a regex,
+        # and guessing which one wins is how a config gets silently broken.
+        return f"ambiguous ({len(matches)} occurrences)"
+    match = matches[0]
+    value = int(match.group("value"))
+    if value == to:
+        return "already"
+    if value != frm:
+        return f"left alone (operator set {value})"
+    updated = original[: match.start("value")] + str(to) + original[match.end("value") :]
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(updated)
+    return "raised"
+
+
+def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
+    """Raise the memory budget for this install, and record how to undo it."""
+    targets: dict[str, str] = {}
+    config_yaml = hermes_home_dir(src) / "config.yaml"
+    status = _retune_limit(
+        config_yaml, frm=MEMORY_LIMIT_STOCK_DEFAULT, to=MEMORY_LIMIT_RAISED
+    )
+    targets[str(config_yaml)] = status
+    say(f"  {config_yaml}: {status}")
+    if include_host:
+        defaults = src / CONFIG_DEFAULTS_REL
+        status = _retune_limit(
+            defaults, frm=MEMORY_LIMIT_STOCK_DEFAULT, to=MEMORY_LIMIT_RAISED
+        )
+        targets[str(defaults)] = status
+        say(f"  {CONFIG_DEFAULTS_REL}: {status}")
+    else:
+        # Saying it out loud: --plugin-only promises no writes into the host
+        # checkout, and a silently skipped half leaves a future reader guessing
+        # why a fresh config still says 2200.
+        say(
+            f"  {CONFIG_DEFAULTS_REL}: skipped (--plugin-only writes nothing into "
+            "the host checkout; a config generated later will still say "
+            f"{MEMORY_LIMIT_STOCK_DEFAULT})"
+        )
+    meta["memory_limit"] = {
+        "from": MEMORY_LIMIT_STOCK_DEFAULT,
+        "to": MEMORY_LIMIT_RAISED,
+        "targets": targets,
+    }
+    if "raised" in targets.values():
+        say(
+            f"Memory budget raised to {MEMORY_LIMIT_RAISED} chars. Takes effect on "
+            "the next gateway restart."
+        )
+
+
+def restore_memory_limit(meta: dict) -> None:
+    """Undo the raise by reversing the same one-number substitution.
+
+    Deliberately NOT a file restore. config.yaml is a live file the user edits;
+    putting a pre-install copy back would silently destroy every unrelated change
+    made since. Reversing one integer cannot.
+
+    A value that is no longer the one this installer wrote is left alone and
+    reported: the user changed it afterwards, and their number outranks our undo.
+    """
+    record = meta.get("memory_limit") or {}
+    targets = record.get("targets") or {}
+    frm = record.get("from")
+    to = record.get("to")
+    if not targets or not isinstance(frm, int) or not isinstance(to, int):
+        return
+    for path_str, previous_status in sorted(targets.items()):
+        if previous_status != "raised":
+            # We did not change this file, so rollback does not touch it.
+            continue
+        # Reversed: what we wrote is now the value to find.
+        status = _retune_limit(Path(path_str), frm=to, to=frm)
+        say(f"  memory limit {path_str}: {'restored' if status == 'raised' else status}")
+
+
 def write_metadata(meta_dir: Path, meta: dict) -> Path:
     meta_dir.mkdir(parents=True, exist_ok=True)
     path = meta_dir / METADATA_NAME
@@ -804,6 +945,11 @@ def do_rollback(args) -> None:
         keep_record = plugin_dest.is_dir()
     else:
         say("No plugin destination in metadata; no plugin files were removed.")
+
+    # Before the metadata is unlinked: this is the only record of which files the
+    # install raised, and once it is gone the raise is no longer undoable.
+    restore_memory_limit(meta)
+
     if keep_record:
         say(
             f"Keeping {mdir / METADATA_NAME}: plugin files are still on disk, and the "
@@ -857,6 +1003,9 @@ def do_install(args) -> None:
                 "targets carry the marker): refine_run will return "
                 "llm_invocation_unavailable until --patch-only is run."
             )
+        say("Memory budget:")
+        raise_memory_limit(src, meta, include_host=False)
+        write_metadata(mdir, meta)
         if verified == "unclassified":
             say("Done (--plugin-only), but the plugin import was NOT verified (see the NOTE above).")
         else:
@@ -971,6 +1120,10 @@ print("CAPABILITY_OK")
     # the host markers are importable and that entering the scope works. The
     # fail-closed binding itself is exercised by the host route tests.
     say("Capability verified: host markers importable and the invocation scope entered.")
+
+    say("Memory budget:")
+    raise_memory_limit(src, meta, include_host=True)
+    write_metadata(mdir, meta)
 
     if verified != "verified":
         # The banner is the only line most people read, so it must not read the

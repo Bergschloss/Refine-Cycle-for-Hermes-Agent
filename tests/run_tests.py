@@ -22340,5 +22340,193 @@ class InstallerPluginContentTests(unittest.TestCase):
             )
 
 
+class InstallerMemoryBudgetTests(unittest.TestCase):
+    """The install raises the Hermes memory budget, and can put it back.
+
+    Refine writes lessons into the memory store, and the stock 2200 characters was
+    sized for weaker models: six applied edits filled a third of it in a day on a
+    real install. So the installer raises it for every user.
+
+    The one rule that makes this safe is that only a value still EXACTLY at the
+    stock default is moved. That gives three properties at once: an operator's own
+    setting is never overwritten, the operation is idempotent, and it can never
+    lower a limit. Every test here is a consequence of that rule.
+    """
+
+    def setUp(self):
+        import install
+
+        self.install = install
+        self.td = Path(tempfile.mkdtemp(prefix="refine-limit-"))
+        self.addCleanup(shutil.rmtree, self.td, ignore_errors=True)
+        self.stock = install.MEMORY_LIMIT_STOCK_DEFAULT
+        self.raised = install.MEMORY_LIMIT_RAISED
+
+    def _yaml(self, body: str, name: str = "config.yaml") -> Path:
+        path = self.td / name
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_the_stock_default_is_raised(self):
+        path = self._yaml(f"memory:\n  memory_char_limit: {self.stock}\n")
+        self.assertEqual(self.install._retune_limit(path, frm=self.stock, to=self.raised), "raised")
+        self.assertIn(f"memory_char_limit: {self.raised}", path.read_text(encoding="utf-8"))
+
+    def test_an_operator_chosen_value_is_left_alone(self):
+        """Not ours to overwrite, and not ours to lower either."""
+        for value in (1000, 3000, 20000):
+            path = self._yaml(f"  memory_char_limit: {value}\n", name=f"c{value}.yaml")
+            status = self.install._retune_limit(path, frm=self.stock, to=self.raised)
+            self.assertIn("left alone", status)
+            self.assertIn(f"memory_char_limit: {value}", path.read_text(encoding="utf-8"))
+
+    def test_raising_twice_changes_nothing_the_second_time(self):
+        path = self._yaml(f"  memory_char_limit: {self.stock}\n")
+        self.install._retune_limit(path, frm=self.stock, to=self.raised)
+        after_first = path.read_bytes()
+        self.assertEqual(
+            self.install._retune_limit(path, frm=self.stock, to=self.raised), "already"
+        )
+        self.assertEqual(path.read_bytes(), after_first)
+
+    def test_the_reversal_is_byte_identical_to_the_original(self):
+        """Rollback reverses one number; it must not rewrite anything else.
+
+        A file restore was rejected for this: config.yaml is a live file the user
+        edits, and putting a pre-install copy back would destroy every unrelated
+        change made since. Reversing one integer cannot.
+        """
+        path = self._yaml(
+            "memory:\n  memory_enabled: true\n"
+            f"  memory_char_limit: {self.stock}  # a comment to preserve\n"
+            "  user_char_limit: 1375\n"
+        )
+        original = path.read_bytes()
+        self.install._retune_limit(path, frm=self.stock, to=self.raised)
+        self.assertNotEqual(path.read_bytes(), original)
+        self.install._retune_limit(path, frm=self.raised, to=self.stock)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_rollback_leaves_a_value_the_user_changed_afterwards(self):
+        """Their number outranks our undo."""
+        path = self._yaml(f"  memory_char_limit: {self.stock}\n")
+        self.install._retune_limit(path, frm=self.stock, to=self.raised)
+        path.write_text("  memory_char_limit: 9000\n", encoding="utf-8")
+        meta = {
+            "memory_limit": {
+                "from": self.stock, "to": self.raised,
+                "targets": {str(path): "raised"},
+            }
+        }
+        self.install.restore_memory_limit(meta)
+        self.assertIn("memory_char_limit: 9000", path.read_text(encoding="utf-8"))
+
+    def test_rollback_does_not_touch_a_file_the_install_did_not_change(self):
+        """Only a target recorded as `raised` is reversed."""
+        path = self._yaml(f"  memory_char_limit: {self.raised}\n")
+        original = path.read_bytes()
+        meta = {
+            "memory_limit": {
+                "from": self.stock, "to": self.raised,
+                "targets": {str(path): "left alone (operator set 4400)"},
+            }
+        }
+        self.install.restore_memory_limit(meta)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_line_endings_and_trailing_comments_survive(self):
+        """An LF-to-CRLF rewrite would show up as a whole-file diff in a config."""
+        path = self.td / "crlf.yaml"
+        path.write_bytes(
+            b"memory:\r\n  memory_char_limit: %d  # keep me\r\n" % self.stock
+        )
+        self.install._retune_limit(path, frm=self.stock, to=self.raised)
+        self.assertEqual(
+            path.read_bytes(),
+            b"memory:\r\n  memory_char_limit: %d  # keep me\r\n" % self.raised,
+        )
+
+    def test_an_absent_file_or_key_is_reported_not_raised(self):
+        """This runs against a live config; every skip has to be distinguishable."""
+        self.assertEqual(
+            self.install._retune_limit(self.td / "nope.yaml", frm=self.stock, to=self.raised),
+            "absent",
+        )
+        no_key = self._yaml("memory:\n  memory_enabled: true\n", name="nokey.yaml")
+        self.assertEqual(
+            self.install._retune_limit(no_key, frm=self.stock, to=self.raised), "key-absent"
+        )
+
+    def test_two_declarations_are_refused_rather_than_guessed(self):
+        path = self._yaml(
+            f"memory_char_limit: {self.stock}\nmemory_char_limit: {self.stock}\n",
+            name="twice.yaml",
+        )
+        status = self.install._retune_limit(path, frm=self.stock, to=self.raised)
+        self.assertIn("ambiguous", status)
+        self.assertNotIn(str(self.raised), path.read_text(encoding="utf-8"))
+
+    def test_the_python_default_is_raised_with_its_comment_intact(self):
+        """config_defaults.py is what a user who has no config.yaml yet will get."""
+        path = self.td / "config_defaults.py"
+        path.write_text(
+            f'    "memory_char_limit": {self.stock},   # ~800 tokens\n', encoding="utf-8"
+        )
+        self.assertEqual(
+            self.install._retune_limit(path, frm=self.stock, to=self.raised), "raised"
+        )
+        self.assertEqual(
+            path.read_text(encoding="utf-8"),
+            f'    "memory_char_limit": {self.raised},   # ~800 tokens\n',
+        )
+
+    def test_plugin_only_does_not_write_into_the_host_checkout(self):
+        """--plugin-only promises no host writes, and the skip is stated out loud."""
+        src = self.td / "hermes"
+        (src / "hermes_cli").mkdir(parents=True)
+        defaults = src / self.install.CONFIG_DEFAULTS_REL
+        defaults.write_text(f'"memory_char_limit": {self.stock},\n', encoding="utf-8")
+        home = self.td / "home"
+        home.mkdir()
+        (home / "config.yaml").write_text(
+            f"  memory_char_limit: {self.stock}\n", encoding="utf-8"
+        )
+        meta: dict = {}
+        with patch.object(self.install, "hermes_home_dir", return_value=home):
+            self.install.raise_memory_limit(src, meta, include_host=False)
+        self.assertIn(
+            f"memory_char_limit: {self.raised}",
+            (home / "config.yaml").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            f'"memory_char_limit": {self.stock}',
+            defaults.read_text(encoding="utf-8"),
+            "--plugin-only wrote into the host checkout",
+        )
+        self.assertEqual(meta["memory_limit"]["to"], self.raised)
+        self.assertNotIn(str(defaults), meta["memory_limit"]["targets"])
+
+    def test_a_full_install_records_both_targets_for_rollback(self):
+        src = self.td / "hermes2"
+        (src / "hermes_cli").mkdir(parents=True)
+        defaults = src / self.install.CONFIG_DEFAULTS_REL
+        defaults.write_text(f'"memory_char_limit": {self.stock},\n', encoding="utf-8")
+        home = self.td / "home2"
+        home.mkdir()
+        config = home / "config.yaml"
+        config.write_text(f"  memory_char_limit: {self.stock}\n", encoding="utf-8")
+        meta: dict = {}
+        with patch.object(self.install, "hermes_home_dir", return_value=home):
+            self.install.raise_memory_limit(src, meta, include_host=True)
+        targets = meta["memory_limit"]["targets"]
+        self.assertEqual(
+            sorted(targets.values()), ["raised", "raised"], f"targets: {targets}"
+        )
+        # And the recorded pair is enough to undo both.
+        self.install.restore_memory_limit(meta)
+        self.assertIn(f"memory_char_limit: {self.stock}", config.read_text(encoding="utf-8"))
+        self.assertIn(f'"memory_char_limit": {self.stock}', defaults.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
