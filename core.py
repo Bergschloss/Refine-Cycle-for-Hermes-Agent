@@ -3272,6 +3272,20 @@ def _memory_store(fallback_out: Optional[Dict[str, bool]] = None) -> "Any":
     arriving through this function's own except branch. The same out-parameter
     idiom as ``truncation_out`` and ``suppressed_out``, and for the same reason
     -- a degraded result must not read like a healthy one.
+
+    What that flag does NOT cover, named here rather than left to be inferred
+    from its name: it fires only when ``load_on_disk_store`` cannot be imported
+    or itself raises. The host helper wraps its own config read in
+    ``except Exception: pass`` and documents that it "can never raise on a
+    missing/unreadable config" -- it returns a store carrying 2200 instead. So an
+    unreadable host config produces no exception here, this flag stays False, and
+    the 2200 is reported as the host's configured limit.
+    Refine cannot close that gap: the only way to tell 2200-because-configured
+    from 2200-because-fallback is to re-derive and read the host's config path,
+    which is precisely the duplication this function exists to avoid, and the
+    reference desktop really is configured at 2200 -- so treating that value as
+    unknown would suppress a legitimate limit for the common case. The host would
+    have to report its own fallback for this to be knowable.
     """
     if fallback_out is not None:
         fallback_out["built_in_defaults"] = False

@@ -16284,7 +16284,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "test proves nothing about the fallback",
         )
 
-    def test_an_unreadable_memory_config_reports_no_limit_rather_than_the_default(self):
+    def test_a_host_without_the_helper_reports_no_limit_rather_than_the_default(self):
         """_memory_usage promises silence and delivered a guess.
 
         Its docstring, _lesson_body's, and the B4 block's all say the same thing:
@@ -16296,6 +16296,13 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         "memory 2903/2200 (131%)" and tells the operator it is "getting tight",
         and _apply_memory enforces 2200 against a host that accepts 4400: the
         exact harm _memory_store's own docstring describes.
+
+        Named for what it exercises: the host NOT EXPORTING the helper. The
+        sibling case -- helper present, host config unreadable -- cannot be
+        detected from here at all, because the host swallows that failure and
+        returns 2200 without raising. See _memory_store's docstring; it is a
+        missing host capability, not an untested branch, and there is deliberately
+        no test pretending to cover it.
         """
         memory_module = sys.modules["tools.memory_tool"]
         FakeHost.memory_char_limit = 4400
@@ -16311,7 +16318,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             limit, "a limit that was fallen back to is not the host's limit"
         )
 
-    def test_an_unreadable_memory_config_renders_no_clause_and_no_warning(self):
+    def test_a_host_without_the_helper_renders_no_clause_and_no_warning(self):
         """The consequence, at both surfaces the number reaches."""
         memory_module = sys.modules["tools.memory_tool"]
         FakeHost.memory_char_limit = 4400
