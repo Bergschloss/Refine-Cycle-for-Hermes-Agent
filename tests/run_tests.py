@@ -16116,20 +16116,64 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(result["success"], result.get("message"))
         self.assertEqual(len(FakeHost.memory_entries), 2)
 
-    def test_a_reorder_or_a_superset_restatement_is_still_refused(self):
+    def test_an_inflected_restatement_is_still_a_duplicate(self):
+        """A plural or a gerund is not a different subject.
+
+        The subject axis compares exclusive token sets, and by that test ``flag``
+        against ``flags`` looks as exclusive as ``deploy`` against ``rollback``.
+        Measured on the live store: for 13 of 14 entries an inflected sibling had
+        been refused before the axis and was released after it, which is a much
+        wider band than the synonym swap the axis's cost was described as. The
+        proposer is shown the existing entries, so a near-verbatim re-emission is
+        the likely duplicate shape, not the unlikely one.
+
+        A prefix stem closes it: two tokens are one subject when the shorter is a
+        prefix of the longer and is itself at least four characters. That covers
+        plural, gerund and participle without touching two genuinely different
+        words, which do not share a prefix.
+        """
+        original = "The deploy tool needs an explicit profile flag for each account"
+        for name, inflected in (
+            ("plural", "The deploy tool needs an explicit profile flags for each account"),
+            ("gerund", "The deploy tool needing an explicit profile flag for each account"),
+        ):
+            with self.subTest(shape=name):
+                FakeHost.memory_entries[:] = [original]
+                result = self.run_proposal({
+                    "action": "create", "kind": "memory", "name": f"inflected-{name}",
+                    "content": inflected, "reason": "why", "evidence": [],
+                })
+                self.assertFalse(result["success"], result.get("message"))
+                self.assertEqual(
+                    result["llm_meta"]["result_code"], "memory_duplicate"
+                )
+        # Both directions: a genuinely different subject still gets through, and
+        # two different words do not share a four-character prefix.
+        FakeHost.memory_entries[:] = [original]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "different-tool",
+            "content": "The rollback tool needs an explicit profile flag for each account",
+            "reason": "a different tool", "evidence": [],
+        })
+        self.assertTrue(result["success"], result.get("message"))
+
+    def test_a_reorder_or_a_neutral_superset_is_still_refused(self):
         """The false-negative direction, and the substance of the guard.
 
-        These are the two shapes the gate can prove are restatements, and both
-        must keep being refused: a reorder introduces no token at all, and a
-        restatement that only ADDS words asserts nothing the store contradicts.
-        A paraphrase with two substitutions already scored 0.429 and was released
-        before this change, so the released band is narrow and bounded, not the
-        guard's substance.
+        These are the two shapes the gate can prove are restatements: a reorder
+        introduces no token at all, and a restatement that only ADDS words asserts
+        nothing the store contradicts.
+
+        "Neutral" is in the name because it is a real limit, not an accident. A
+        superset whose extra word is a NEGATION MARKER ("...and nothing else") is
+        released by the polarity axis, which is consulted first and cannot tell
+        that shape from a polarity correction. Naming the fixture "superset" would
+        have claimed the whole class.
         """
         original = "The API rate limit is 100 requests per minute per key"
         for name, restatement in (
             ("reordered", "Per key, the API rate limit is 100 requests per minute"),
-            ("superset", "The documented API rate limit is 100 requests per minute per key"),
+            ("neutral superset", "The documented API rate limit is 100 requests per minute per key"),
         ):
             with self.subTest(shape=name):
                 FakeHost.memory_entries[:] = [original]

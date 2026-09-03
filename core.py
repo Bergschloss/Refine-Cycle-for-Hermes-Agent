@@ -3029,6 +3029,55 @@ def _memory_negation_set(content: str) -> frozenset:
     return frozenset(word for word in words if word in _MEMORY_NEGATION_MARKERS)
 
 
+# A plural or a gerund is not a different subject. Comparing exclusive token sets
+# alone made ``flag`` against ``flags`` look exactly as exclusive as ``deploy``
+# against ``rollback``, so an inflected restatement was released as a correction:
+# measured on the live store, 13 of 14 entries had an inflected sibling that was
+# refused before the subject axis and released after it -- much wider than the
+# synonym swap the axis's cost was described as, and the wrong direction, because
+# the proposer is shown the existing entries and a near-verbatim re-emission is
+# the LIKELY duplicate shape.
+#
+# Closed by stripping one inflectional suffix, not by a shared prefix. A prefix
+# rule handles ``flag``/``flags`` and misses ``needs``/``needing``, whose common
+# prefix is only ``need`` and where neither token is a prefix of the other. A
+# shared-prefix-length rule reaches that pair but also merges ``config`` with
+# ``confirm`` and ``commit`` with ``common``, which are different subjects. Suffix
+# stripping separates those cleanly: it only ever fires on a real inflection.
+#
+# Each token contributes itself plus its single-suffix strips, and two tokens are
+# one subject when those candidate sets meet. Four characters minimum for a stem,
+# because three lets ``key`` reach ``keys`` from ``keyring`` and turns two
+# subjects into one. No word list, no table, no dependency.
+#
+# The limit, named rather than chased: a doubled consonant defeats a single-suffix
+# strip, so ``commit`` and ``committing`` are still two subjects (``committing``
+# minus ``ing`` is ``committ``). Closing that needs consonant-doubling rules, i.e.
+# a stemmer, and a stemmer is a dependency. Verified working on flag/flags,
+# needs/needing, process/processing, test/testing and limit/limits, and correctly
+# NOT firing on deploy/rollback, config/confirm, commit/common, key/keyring,
+# run/runner and read/real.
+_MEMORY_SUBJECT_STEM_MIN_CHARS = 4
+_MEMORY_SUBJECT_SUFFIXES = ("ing", "ion", "es", "ed", "s")
+
+
+def _memory_subject_stems(word: str) -> set:
+    """A token and the stems it reduces to by dropping one inflection."""
+    stems = {word}
+    for suffix in _MEMORY_SUBJECT_SUFFIXES:
+        if word.endswith(suffix):
+            stem = word[: -len(suffix)]
+            if len(stem) >= _MEMORY_SUBJECT_STEM_MIN_CHARS:
+                stems.add(stem)
+    return stems
+
+
+def _memory_same_subject(a: str, b: str) -> bool:
+    """Whether two tokens are one subject in different inflections."""
+    shared = _memory_subject_stems(a) & _memory_subject_stems(b)
+    return any(len(stem) >= _MEMORY_SUBJECT_STEM_MIN_CHARS for stem in shared)
+
+
 def _memory_subjects_conflict(proposed: frozenset, existing: frozenset) -> bool:
     """Whether each entry asserts a word the other does not.
 
@@ -3055,20 +3104,32 @@ def _memory_subjects_conflict(proposed: frozenset, existing: frozenset) -> bool:
     removed, one side has nothing exclusive left and the pair stays refused,
     while ``deploy`` against ``rollback`` is untouched.
 
-    The cost, named rather than left to be found in a bloated store: a genuine
-    reword that substitutes exactly one non-negation word for a synonym ("needs"
-    -> "requires") is now released and the store keeps both. That band is narrow
-    and was already inconsistent -- a paraphrase with TWO substitutions scores
-    0.429 and was released before this change, so single-swap was the only
-    substitution depth the gate caught, while refusing a different subject at
-    every depth. Releasing it makes the rule coherent: prove a restatement or
-    let it through. And the harm is the visible one, in the store, where the
-    operator can see it -- against a lesson that is refused every pass and
-    leaves only a journal line.
+    Inflections are folded out through ``_memory_same_subject`` for the same
+    reason: a plural or a gerund is not a different subject, and without that fold
+    this axis released an inflected sibling for 13 of 14 live entries.
+
+    The cost, stated as measured rather than as hoped: a reword that substitutes
+    exactly one non-negation, non-inflectional word for a synonym ("needs" ->
+    "requires") is released, and the store keeps both. That is EVERY
+    single-substitution pair whose two words do not share a four-character prefix
+    -- broader than one example makes it sound, and worth knowing before reading a
+    bloated store rather than after. It was also already inconsistent: a paraphrase
+    with TWO substitutions scores 0.429 and was released before this axis existed,
+    so single-swap was the only substitution depth the gate caught while it refused
+    a different subject at every depth. The remaining harm is the visible one, in a
+    store whose pressure is reported at every write, against a lesson that was
+    refused every pass and left only a journal line.
     """
-    only_proposed = (proposed - existing) - _MEMORY_NEGATION_MARKERS
-    only_existing = (existing - proposed) - _MEMORY_NEGATION_MARKERS
-    return bool(only_proposed) and bool(only_existing)
+    def _unmatched(side: frozenset, other: frozenset) -> set:
+        return {
+            word
+            for word in (side - other) - _MEMORY_NEGATION_MARKERS
+            if not any(_memory_same_subject(word, candidate) for candidate in other)
+        }
+
+    return bool(_unmatched(proposed, existing)) and bool(
+        _unmatched(existing, proposed)
+    )
 
 
 def _memory_polarity_conflict(proposed: frozenset, existing: frozenset) -> bool:
