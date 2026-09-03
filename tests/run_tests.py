@@ -21502,9 +21502,10 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         import install
 
         head = self._git("rev-parse", "--short=10", "HEAD").stdout.decode().strip()
-        return patch.multiple(
-            install, EXPECTED_BASE_PREFIX=head[:8], PATCH_FILE=self.patch_file
-        )
+        # The base commit is no longer a gate; applicability is. Point the
+        # candidate list at the generated patch that fits this fixture so the real
+        # select_patch/classify_host see a stock host they can install onto.
+        return patch.object(install, "patch_candidates", lambda: [self.patch_file])
 
     def _args(self, *, patch_only: bool = False, plugin_only: bool = True):
         return types.SimpleNamespace(
@@ -21763,7 +21764,7 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         before = self._target_snapshot()
         mdir = install.metadata_dir(self.src)
 
-        with self._as_stock_host(), patch.object(install, "PATCH_FILE", partial_patch):
+        with patch.object(install, "patch_candidates", lambda: [partial_patch]):
             state, _ = install.classify_host(self.src)
             self.assertEqual(state, "partial", "fixture is not the state under test")
             # Fail the run after the reverse has already mutated the host.
@@ -21791,7 +21792,7 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         before = self._target_snapshot()
         mdir = install.metadata_dir(self.src)
 
-        def half_apply(src, meta_dir):
+        def half_apply(src, meta_dir, patch):
             # What a partially-applied patch looks like from the caller's side.
             (self.src / install.PATCH_FILES[0]).write_text("HALF = True\n", encoding="utf-8")
             install.fail("simulated: patch application failed mid-way")
@@ -21844,7 +21845,7 @@ class InstallerPluginOnlyTests(unittest.TestCase):
             "@@ -1 +1,2 @@\n-DOES_NOT_EXIST = True\n+MARKER = True\n",
             encoding="utf-8",
         )
-        with self._as_stock_host(), patch.object(install, "PATCH_FILE", unappliable), \
+        with patch.object(install, "patch_candidates", lambda: [unappliable]), \
              patch.object(install, "fail", side_effect=SystemExit(1)):
             with self.assertRaises(SystemExit):
                 install.do_install(self._args(patch_only=True, plugin_only=False))
@@ -21945,7 +21946,7 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         three = list(install.PATCH_FILES[:3])
         partial_patch = self._generate_patch("generated-partial.patch", rels=three)
         self._write_markers(rels=three)
-        with self._as_stock_host(), patch.object(install, "PATCH_FILE", partial_patch), \
+        with patch.object(install, "patch_candidates", lambda: [partial_patch]), \
              patch.object(install, "fail", side_effect=SystemExit(1)):
             with self.assertRaises(SystemExit):
                 install.do_install(self._args(patch_only=True, plugin_only=False))
@@ -22067,6 +22068,115 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertIn("does not parse as JSON", fail.call_args.args[0])
         self.assertEqual(corrupt.read_text(encoding="utf-8"), '{"host": {"backup": "/tmp/x.zip"')
 
+
+class InstallerPatchSelectionTests(InstallerPluginOnlyTests):
+    """I1: which bundled patch fits a host is decided by trying it, not by pinning
+    a commit. A version test refuses hosts a patch fits (fresh v2026.8.31 was
+    impossible) and accepts hosts it does not.
+
+    Inherits the git-checkout fixture from InstallerPluginOnlyTests: a real
+    ``stock`` host plus a generated route patch that genuinely applies to it.
+    """
+
+    def _real_bundled_names(self) -> list[str]:
+        import install
+
+        return [p.name for p in sorted(install.PATCH_DIR.glob(install.PATCH_GLOB))]
+
+    def test_the_version_prefix_is_not_a_gate(self):
+        """A host no bundled patch fits is still refused, but NOT on its commit id.
+
+        The fail-first: against the parent this reads
+        ``unsupported base <head>; this patch targets stock v2026.8.16`` -- the
+        host refused on its commit rather than on whether any patch applies. The
+        fix must refuse (no patch fits the synthetic host) while naming what it
+        tried instead of the base commit.
+        """
+        import install
+
+        # The inherited fixture is a clean git checkout of stub files at a random
+        # commit; the REAL bundled patches do not apply to it, so it is refused
+        # either way. No mock of the new API here on purpose -- this test must pin
+        # the defect against the parent, where the only symbol it could mock does
+        # not exist. It asserts on the REASON, which the parent computes from the
+        # commit id and the fix computes from what applied.
+        state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "incompatible", detail)
+        self.assertNotIn(
+            "unsupported base", detail,
+            "host refused on its commit id rather than on whether a patch applies",
+        )
+        self.assertIn("tried:", detail)
+
+    def test_a_base_the_patch_fits_is_installable(self):
+        """A clean host on any base a patch fits classifies stock, naming the patch."""
+        import install
+
+        with patch.object(install, "patch_candidates", lambda: [self.patch_file]):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "stock", detail)
+        self.assertIn(self.patch_file.name, detail)
+
+    def test_the_more_specific_patch_wins_when_both_apply(self):
+        """When two patches both apply, select_patch returns the newer base."""
+        import install
+
+        older = self._generate_patch("invocation-route-v2026.8.16.patch")
+        newer = self._generate_patch("invocation-route-v2026.8.31.patch")
+        # patch_candidates() is contractually newest-first; select_patch walks it
+        # in order and takes the first that applies. Both apply here, so the newer
+        # one must be returned. Feed them through the real sort key rather than
+        # hand-ordering, so the test also exercises _patch_sort_key.
+        ordered = sorted([older, newer], key=install._patch_sort_key, reverse=True)
+        with patch.object(install, "patch_candidates", lambda: ordered):
+            chosen = install.select_patch(self.src)
+        self.assertEqual(chosen, newer, "the newer base did not win")
+
+    def test_bundled_patches_are_ordered_newest_first(self):
+        """The real bundled patches order 8.31 before 8.16, AND the sort is numeric.
+
+        Two assertions on purpose: a lexical sort passes the first (8.31 > 8.16 as
+        strings too) and fails the second, because '10' < '9' lexically. The
+        second is what proves the ordering survives a version bump past .9.
+        """
+        import install
+
+        names = [p.name for p in install.patch_candidates()]
+        self.assertTrue(names, "no bundled patches found")
+        self.assertLess(
+            names.index("invocation-route-v2026.8.31.patch"),
+            names.index("invocation-route-v2026.8.16.patch"),
+            "8.31 must sort before 8.16 (newest first)",
+        )
+        ninth = install._patch_sort_key(Path("invocation-route-v2026.9.2.patch"))
+        tenth = install._patch_sort_key(Path("invocation-route-v2026.10.1.patch"))
+        self.assertLess(ninth, tenth, "v2026.9.2 must sort before v2026.10.1")
+
+    def test_user_modified_targets_are_dirty_not_incompatible(self):
+        """A user's uncommitted edit to a target is dirty, not "no patch fits".
+
+        The edit itself can make git apply --check fail; reporting that as a
+        version problem sends the user chasing the wrong thing. The dirty check
+        must run before applicability.
+        """
+        import install
+
+        (self.src / "hermes_cli" / "plugins.py").write_text(
+            "BASE = True\nUSER_EDIT = True\n", encoding="utf-8"
+        )
+        with self._as_stock_host():
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "dirty", detail)
+        self.assertIn("hermes_cli/plugins.py", detail)
+
+    def test_an_empty_bundle_refuses_with_none_bundled(self):
+        """No bundled patches at all refuses cleanly rather than raising."""
+        import install
+
+        with patch.object(install, "patch_candidates", lambda: []):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "incompatible", detail)
+        self.assertIn("none bundled", detail)
 
 
 class InstallerImportVerificationTests(unittest.TestCase):

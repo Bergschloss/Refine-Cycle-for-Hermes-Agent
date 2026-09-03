@@ -12,10 +12,13 @@ Usage:
   python install.py --status        # report detected state, change nothing
   python install.py --hermes-src PATH  # point at a specific Hermes checkout
 
-Supported Hermes base: stock v2026.8.16 (commit df4b65147d...). The installer
-classifies the host as stock / patched / partial / dirty / incompatible and
-refuses anything it cannot handle instead of half-applying. Every mutation is
-preceded by a backup recorded in rollback metadata.
+Supported Hermes base: any clean checkout that one of the bundled route patches
+(assets/invocation-route-*.patch) applies to, decided by trying each with
+`git apply --check` rather than by pinning a commit -- a version test refuses
+hosts a patch fits and accepts hosts it does not. The installer classifies the
+host as stock / patched / partial / dirty / incompatible and refuses anything it
+cannot handle instead of half-applying. Every mutation is preceded by a backup
+recorded in rollback metadata.
 
 The install also raises the Hermes memory budget from the stock 2200 characters to
 4400, in config.yaml and in the host's config_defaults.py, because refine writes
@@ -39,10 +42,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent
-PATCH_FILE = PLUGIN_DIR / "assets" / "invocation-route-v2026.8.16.patch"
 METADATA_NAME = "refine-install-metadata.json"
+# Informational only. This is the base the first bundled patch was cut against;
+# it is NOT a gate. Which bundled patch fits a given host is decided by trying
+# each one with `git apply --check`, not by comparing this string to HEAD --
+# Hermes moved 72 commits across the patch targets between v2026.8.16 and
+# v2026.8.31, yet the 8.16 patch still lands 39 of its 40 hunks on 8.31, so a
+# version test refuses hosts a patch fits and accepts hosts it does not. The
+# gate this constant used to drive made a fresh install on 8.31 impossible.
 EXPECTED_BASE_PREFIX = "df4b6514"
 PATCHED_MARKER = "plugin_invocation_scope"
+
+# Bundled route patches live here; each is cut against one Hermes base but may
+# apply to others. Selection is by applicability (git apply --check), newest
+# base first, so the most specific patch that fits wins.
+PATCH_DIR = PLUGIN_DIR / "assets"
+PATCH_GLOB = "invocation-route-*.patch"
 
 # The nine files the patch touches (relative to the Hermes checkout root).
 PATCH_FILES = [
@@ -57,6 +72,58 @@ PATCH_FILES = [
 ]
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 ALL_PATCH_CONTENT = PATCH_FILES + [PATCH_TEST_FILE]
+
+
+def _patch_sort_key(path: Path) -> tuple[int, ...]:
+    """Numeric ordering of a patch's version. A lexical sort is wrong here.
+
+    The names carry a dotted version (``invocation-route-v2026.8.31.patch``), and
+    string order puts ``v2026.10.1`` before ``v2026.9.2`` because '1' < '9'.
+    Sorting on the extracted integers keeps 10 after 9.
+    """
+    return tuple(int(n) for n in re.findall(r"\d+", path.name))
+
+
+def patch_candidates() -> list[Path]:
+    """Bundled route patches, newest base first.
+
+    Newest first so the most specific patch that fits a host wins over an older
+    one that also happens to apply -- e.g. on real v2026.8.31 both the 8.16 and
+    the 8.31 patch check clean, and the 8.31 one is the right choice.
+    """
+    return sorted(PATCH_DIR.glob(PATCH_GLOB), key=_patch_sort_key, reverse=True)
+
+
+def _git_apply_checks(src: Path, patch: Path, *reverse: str) -> bool:
+    """True when `git apply --check [reverse] <patch>` succeeds (mutates nothing)."""
+    r = run_git(src, "apply", "--check", *reverse, str(patch))
+    return r.returncode == 0
+
+
+def select_patch(src: Path) -> Path | None:
+    """The newest bundled patch that applies cleanly to ``src``, or None.
+
+    Decided by trying, not by pinning a commit: this is what makes a clean host
+    on any base the patch fits installable, and a host the patch does not fit
+    honestly refused.
+    """
+    for patch in patch_candidates():
+        if _git_apply_checks(src, patch):
+            return patch
+    return None
+
+
+def select_reverse_patch(src: Path) -> Path | None:
+    """The newest bundled patch that reverses cleanly out of ``src``, or None.
+
+    The reverse of a partially/fully applied host: the caller does not know which
+    bundled patch was applied, so the one that reverse-checks clean is it. Newest
+    first for the same reason as select_patch -- prefer the more specific base.
+    """
+    for patch in patch_candidates():
+        if _git_apply_checks(src, patch, "-R"):
+            return patch
+    return None
 
 # Top-level packages that belong to the Hermes host, not to the plugin. An
 # unresolved one of these during import verification means this environment
@@ -297,7 +364,20 @@ def applied_patch_files(src: Path) -> list[str]:
 
 
 def classify_host(src: Path) -> tuple[str, str]:
-    """Return (state_class, detail). States: stock, patched, partial, dirty, incompatible."""
+    """Return (state_class, detail). States: stock, patched, partial, dirty, incompatible.
+
+    "stock" no longer means "the base commit we pinned"; it means "a clean tree
+    that some bundled patch applies to". The commit id is not a gate -- a version
+    test refuses hosts the patch fits (fresh v2026.8.31 was impossible) and
+    accepts hosts it does not. Applicability is decided by trying each bundled
+    patch with `git apply --check`.
+
+    Order matters. The dirty check runs BEFORE applicability: a user's
+    uncommitted edit to a patch target can itself make `git apply --check` fail,
+    and reporting that as "no patch fits this host" sends them chasing a version
+    problem they do not have. So: not-a-checkout -> patched -> partial ->
+    marker-outside-expected-files -> dirty -> select_patch -> refuse.
+    """
     head = git_head_short(src)
     plugins_py = src / "hermes_cli" / "plugins.py"
     text = plugins_py.read_text(encoding="utf-8", errors="replace")
@@ -305,22 +385,28 @@ def classify_host(src: Path) -> tuple[str, str]:
     applied_count = len(applied_patch_files(src))
     if head is None:
         return ("incompatible", "not a git checkout; refusing to patch blind")
-    if not head.startswith(EXPECTED_BASE_PREFIX) and not has_marker:
-        return ("incompatible", f"unsupported base {head}; this patch targets stock v2026.8.16")
     if has_marker and applied_count == len(PATCH_FILES):
         return ("patched", f"all {len(PATCH_FILES)} files carry the marker at {head}")
     if 0 < applied_count < len(PATCH_FILES):
         return ("partial", f"{applied_count}/{len(PATCH_FILES)} files patched at {head}")
     if has_marker and applied_count == 0:
         return ("incompatible", f"marker found only outside expected files at {head}")
-    # stock base — but is the tree clean enough to patch?
-    if head and head.startswith(EXPECTED_BASE_PREFIX):
-        st = run_git(src, "status", "--short", "--", *PATCH_FILES)
-        if st.returncode == 0 and st.stdout.strip():
-            touched = [l.split()[-1] for l in st.stdout.splitlines()]
-            return ("dirty", f"user-modified patch targets before install: {touched}")
-        return ("stock", f"clean stock base {head}")
-    return ("incompatible", f"unclassified state at {head}")
+    # Unpatched base. Is the tree clean enough to patch? This runs
+    # unconditionally now -- there is no base to gate it on.
+    st = run_git(src, "status", "--short", "--", *PATCH_FILES)
+    if st.returncode == 0 and st.stdout.strip():
+        touched = [l.split()[-1] for l in st.stdout.splitlines()]
+        return ("dirty", f"user-modified patch targets before install: {touched}")
+    # Clean and unpatched: installable only if some bundled patch actually fits.
+    chosen = select_patch(src)
+    if chosen is not None:
+        return ("stock", f"clean base {head}; {chosen.name} applies")
+    tried = [p.name for p in patch_candidates()] or ["none bundled"]
+    return (
+        "incompatible",
+        f"no bundled route patch applies to base {head}; tried: {tried}. "
+        "The patch needs rebasing onto this host's version.",
+    )
 
 
 def backup_host(src: Path, meta_dir: Path) -> Path:
@@ -383,7 +469,7 @@ def record_host_backup(src: Path, meta_dir: Path, meta: dict) -> None:
     write_metadata(meta_dir, meta)
 
 
-def check_patch_applies(src: Path) -> None:
+def check_patch_applies(src: Path, patch: Path) -> None:
     """Refuse a patch that cannot apply, before anything is written anywhere.
 
     `git apply --check` mutates nothing, so it belongs ahead of the backup: a run
@@ -391,22 +477,27 @@ def check_patch_applies(src: Path) -> None:
     for a host it never touched. Measured on a real 8.31 tree, where an untracked
     leftover made the patch unappliable and the run still wrote both.
     """
-    r = run_git(src, "apply", "--check", str(PATCH_FILE))
+    r = run_git(src, "apply", "--check", str(patch))
     if r.returncode != 0:
         fail(f"patch does not apply cleanly; aborting without changes.\n{r.stderr}")
 
 
-def apply_patch(src: Path, meta_dir: Path) -> None:
-    """Apply the route patch, having already recorded a way back.
+def apply_patch(src: Path, meta_dir: Path, patch: Path) -> None:
+    """Apply the chosen route patch, having already recorded a way back.
 
     git is already required (we classified via HEAD); `git apply` is used on
     every platform the host itself supports. Files are written through temp +
     rename by git, keeping the mutation atomic per file. The caller must have
     called record_host_backup first -- every fail() below leaves host files
     changed, and the recorded backup is what makes them recoverable.
+
+    ``patch`` is threaded in rather than read from a module global: the
+    applicable patch is chosen per host (select_patch), and --check, the apply,
+    and this function's own failure-reversal must all use the SAME one. A stale
+    global here reversed a different patch than it applied.
     """
-    check_patch_applies(src)
-    r = run_git(src, "apply", str(PATCH_FILE))
+    check_patch_applies(src, patch)
+    r = run_git(src, "apply", str(patch))
     if r.returncode != 0:
         fail(
             "patch application failed mid-way; the host may be half-patched. "
@@ -415,7 +506,7 @@ def apply_patch(src: Path, meta_dir: Path) -> None:
         )
     missing = [rel for rel in PATCH_FILES if rel not in applied_patch_files(src)]
     if missing:
-        rb = run_git(src, "apply", "-R", str(PATCH_FILE))
+        rb = run_git(src, "apply", "-R", str(patch))
         left = applied_patch_files(src)
         # Read the markers back rather than reporting git's exit code as if it
         # were the outcome: "patch reversed rc=0" was a claim about the host that
@@ -1037,8 +1128,21 @@ def do_install(args) -> None:
         record_host_backup(src, mdir, meta)
         host_backup_recorded = True
         say(f"Pre-reverse backup recorded: {meta['host']['backup']}")
-        rb = run_git(src, "apply", "-R", str(PATCH_FILE))
-        say(f"Partial patch state detected; attempted reverse to reach stock (rc={rb.returncode}).")
+        # Which bundled patch was half-applied is not known here, so reverse the
+        # one that reverse-checks clean. A stale global would reverse a patch the
+        # host does not carry.
+        reverse = select_reverse_patch(src)
+        if reverse is None:
+            fail(
+                "partial host state, but no bundled patch reverses cleanly out of it; "
+                "cannot safely reach stock. `python install.py --rollback` if this "
+                "installer applied it, otherwise `git checkout` the patch targets."
+            )
+        rb = run_git(src, "apply", "-R", str(reverse))
+        say(
+            f"Partial patch state detected; attempted reverse of {reverse.name} to "
+            f"reach stock (rc={rb.returncode})."
+        )
         state, detail = classify_host(src)
         if state not in ("stock", "patched"):
             fail(f"After reverse the host is still not installable: {state} — {detail}")
@@ -1052,15 +1156,25 @@ def do_install(args) -> None:
         )
 
     if state == "stock":
-        say("Applying host patch (with pre-mutation backup)…")
+        # classify_host already proved a patch applies; pick it again here so the
+        # backup, --check, apply and metadata all name the same one.
+        chosen = select_patch(src)
+        if chosen is None:
+            fail(f"no bundled route patch applies to this host: {detail}")
+        say(f"Applying host patch {chosen.name} (with pre-mutation backup)…")
         # Ahead of the backup: a refusal should leave nothing behind at all.
-        check_patch_applies(src)
+        check_patch_applies(src, chosen)
         if not host_backup_recorded:
             # The partial branch already recorded the true pre-run state; keep
             # that one. A second backup here would capture the reversed tree and
             # rollback would restore the installer's own intermediate state.
             record_host_backup(src, mdir, meta)
-        apply_patch(src, mdir)
+        # Record which patch was chosen: the rollback path restores from the
+        # backup zip and does not need it, but a metadata file that cannot say
+        # which patch was applied makes the next diagnosis guesswork.
+        meta.setdefault("host", {})["patch"] = chosen.name
+        write_metadata(mdir, meta)
+        apply_patch(src, mdir, chosen)
         compile_all(src)
         say("Host patch applied and compiled.")
     elif state == "patched":
