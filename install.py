@@ -778,10 +778,23 @@ def _find_limit(path: Path) -> tuple[str, int, str, tuple[int, int]]:
     Read with ``newline=""`` so the caller can write the file back verbatim.
     Without it, editing an LF config on Windows rewrites every line to CRLF and
     the diff the user sees is their whole config instead of one number.
+
+    ``errors="surrogateescape"`` and not ``"replace"``, because the text read here
+    is written back: config.yaml is the user's live file, holds their provider,
+    model and keys, and by design has no backup. ``"replace"`` turns every byte
+    that is not valid UTF-8 into U+FFFD, and _write_limit then persists those
+    replacement characters over the user's actual bytes -- a permanent,
+    unrecoverable edit to content this installer was never asked to touch, for a
+    run whose only job is one number. Windows Notepad before 2019 saved ANSI by
+    default, so a cp1251 comment in a config is not hypothetical.
+    surrogateescape round-trips those bytes instead, and _write_limit restores
+    them verbatim.
     """
     if not path.is_file():
         return "absent", 0, "", (0, 0)
-    with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+    with open(
+        path, "r", encoding="utf-8", errors="surrogateescape", newline=""
+    ) as handle:
         text = handle.read()
     matches = list(_limit_regex_for(path).finditer(text))
     if not matches:
@@ -795,9 +808,17 @@ def _find_limit(path: Path) -> tuple[str, int, str, tuple[int, int]]:
 
 
 def _write_limit(path: Path, text: str, span: tuple[int, int], value: int) -> None:
-    """Replace just the digits, so indentation, quoting and comments survive."""
+    """Replace just the digits, so indentation, quoting and comments survive.
+
+    Paired with _find_limit's surrogateescape: any byte that was not valid UTF-8
+    is carried in ``text`` as a lone surrogate and goes back out as the original
+    byte. Both halves need the handler -- writing with the default strict codec
+    would raise on the surrogate and abort the raise instead.
+    """
     updated = text[: span[0]] + str(value) + text[span[1] :]
-    with open(path, "w", encoding="utf-8", newline="") as handle:
+    with open(
+        path, "w", encoding="utf-8", errors="surrogateescape", newline=""
+    ) as handle:
         handle.write(updated)
 
 

@@ -23256,6 +23256,40 @@ class InstallerMemoryBudgetTests(unittest.TestCase):
         }}})
         self.assertEqual(path.read_bytes(), original)
 
+    def test_a_byte_that_is_not_utf8_survives_the_raise_and_the_reversal(self):
+        """config.yaml is the user's live file and has no backup by design.
+
+        ``restore_memory_limit`` deliberately reverses one integer instead of
+        restoring a copy, so the reversal is the ONLY way back -- which means a
+        write that loses bytes is unrecoverable. Reading with ``errors="replace"``
+        and then writing the whole buffer back turns every undecodable byte into
+        U+FFFD permanently. A cp1251 comment or a Cyrillic value saved by a legacy
+        Windows editor is exactly that, on the platform AGENTS.md says the console
+        is cp1251.
+        """
+        path = self.td / "latin1.yaml"
+        original = (
+            "memory:\n".encode("utf-8")
+            + "  # \u043b\u0456\u043c\u0456\u0442".encode("cp1251")
+            + b"\n  memory_char_limit: %d\n" % self.stock
+        )
+        path.write_bytes(original)
+        status, previous = self.install._raise_limit(path, floor=self.floor)
+        self.assertEqual(status, "raised")
+        self.assertEqual(previous, self.stock)
+        raised = path.read_bytes()
+        self.assertEqual(
+            raised,
+            original.replace(b"%d" % self.stock, b"%d" % self.floor),
+            "the raise rewrote bytes other than the number",
+        )
+        self.install.restore_memory_limit({"memory_limit": {"floor": self.floor, "targets": {
+            str(path): {"status": "raised", "previous": previous},
+        }}})
+        self.assertEqual(
+            path.read_bytes(), original, "the reversal was not byte-identical"
+        )
+
     def test_rollback_leaves_a_value_the_user_changed_afterwards(self):
         """Their number outranks our undo."""
         path = self._yaml(self.stock)
