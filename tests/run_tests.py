@@ -22764,6 +22764,74 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertFalse((self.home / "plugins" / "refine").exists())
         self.assertFalse(any("byte-for-byte" in message for message in messages))
 
+    def test_recorded_removal_refuses_a_path_that_escapes_the_destination(self):
+        """The containment guard compared raw strings, so ``..`` walked past it.
+
+        This function exists because the previous code deleted things it did not
+        own, and its docstring promises "only paths inside dest are touched". A
+        prefix test on an un-normalized path does not deliver that: an entry like
+        <dest>/../../MEMORY.md starts with dest, so it passed the guard and was
+        unlinked outside the destination -- and reported as removed, which leaves
+        kept empty, which is what do_rollback reads as "everything is gone" before
+        deleting the metadata. The record is a plain JSON file in the Hermes home,
+        so a hand-edited or half-written one is the reachable case.
+        """
+        import install
+
+        root = Path(tempfile.mkdtemp(prefix="refine-escape-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        dest = root / "home" / "plugins" / "refine"
+        dest.mkdir(parents=True)
+        (dest / "core.py").write_text("x", encoding="utf-8")
+        victim = root / "MEMORY.md"
+        victim.write_text("the user's memory store", encoding="utf-8")
+
+        escaping = dest / ".." / ".." / ".." / "MEMORY.md"
+        self.assertTrue(
+            escaping.is_file(),
+            "the fixture must actually resolve onto the victim, or it proves nothing",
+        )
+        removed, kept = install.remove_recorded_plugin_files(
+            dest, [str(dest / "core.py"), str(escaping)]
+        )
+        self.assertTrue(victim.is_file(), "a path outside dest was deleted")
+        self.assertIn(str(dest / "core.py"), removed)
+        self.assertEqual(len(kept), 1, "the escaping entry must be reported as kept")
+
+    def test_recorded_removal_reports_a_leftover_as_kept_not_as_removed(self):
+        """"No OSError" is not "the file is gone".
+
+        A recorded entry that is a directory, or that no longer exists, took the
+        success path: nothing was unlinked and it was appended to ``removed``
+        anyway. do_rollback reads ``kept == []`` as "everything the installer
+        created is gone", prints "Plugin removed" and then deletes the metadata
+        that names the leftover -- the outcome this function's own comment says it
+        avoids. A directory under dest is exactly what a stale record from an
+        older layout produces.
+        """
+        import install
+
+        root = Path(tempfile.mkdtemp(prefix="refine-leftover-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        dest = root / "refine"
+        (dest / "sub").mkdir(parents=True)
+        (dest / "sub" / "notify.py").write_text("x", encoding="utf-8")
+
+        removed, kept = install.remove_recorded_plugin_files(
+            dest, [str(dest / "sub"), str(dest / "gone.py")]
+        )
+        self.assertTrue(
+            (dest / "sub").is_dir(), "the fixture no longer exercises a leftover"
+        )
+        self.assertIn(
+            str(dest / "sub"), kept,
+            "a directory that is still on disk was reported as removed",
+        )
+        self.assertNotIn(str(dest / "sub"), removed)
+        # A path that was already absent is neither removed by us nor a leftover.
+        self.assertNotIn(str(dest / "gone.py"), kept)
+        self.assertNotIn(str(dest / "gone.py"), removed)
+
     def test_rollback_removes_only_the_files_the_installer_copied(self):
         """The plugin destination IS ``config.legacy_journal_dir()``.
 

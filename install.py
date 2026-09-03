@@ -583,19 +583,41 @@ def remove_recorded_plugin_files(dest: Path, recorded) -> tuple[list[str], list[
     """
     removed: list[str] = []
     kept: list[str] = []
-    dest_key = os.path.normcase(str(dest))
+
+    def _key(path: Path) -> str:
+        # normpath BEFORE normcase: normcase only folds case and separators, so a
+        # raw prefix test let ``<dest>/../../..`` through -- it starts with dest
+        # as a string while resolving somewhere else entirely. Measured: an entry
+        # of that shape deleted a MEMORY.md three levels above the destination.
+        # normpath, not resolve(), because resolve() follows symlinks and a
+        # symlinked plugin directory would then fail its own containment test.
+        return os.path.normcase(os.path.normpath(str(path)))
+
+    dest_key = _key(dest)
     parents: set[Path] = set()
     for entry in recorded or []:
         target = Path(str(entry))
-        key = os.path.normcase(str(target))
+        key = _key(target)
         if key != dest_key and not key.startswith(dest_key + os.sep):
             kept.append(str(target))
             continue
         try:
             if target.is_file() or target.is_symlink():
                 target.unlink()
-            removed.append(str(target))
-            parents.add(target.parent)
+                removed.append(str(target))
+                parents.add(target.parent)
+            elif not target.exists():
+                # Already gone: not ours to remove and not a leftover either, so
+                # it belongs in neither list. Counting it as removed was harmless;
+                # counting a leftover as removed is not, see below.
+                parents.add(target.parent)
+            else:
+                # A directory, or something that is neither a file nor a symlink.
+                # It is still on disk, and "no OSError was raised" is not "the
+                # path is gone": reporting it as removed leaves ``kept`` empty,
+                # which do_rollback reads as "everything the installer created is
+                # gone" before deleting the metadata that names this leftover.
+                kept.append(str(target))
         except OSError:
             # Windows with a running gateway holding the module open is the usual
             # cause. A file left behind must keep the record that finds it.
@@ -604,7 +626,7 @@ def remove_recorded_plugin_files(dest: Path, recorded) -> tuple[list[str], list[
     for parent in sorted(parents, key=lambda p: len(p.parts), reverse=True):
         current = parent
         while True:
-            ckey = os.path.normcase(str(current))
+            ckey = _key(current)
             if ckey != dest_key and not ckey.startswith(dest_key + os.sep):
                 break
             try:
