@@ -5721,6 +5721,26 @@ def _apply_edit(
             llm_meta = dict(llm_meta or {})
             llm_meta["memory_used"] = used
             llm_meta["memory_limit"] = limit
+        elif used is not None:
+            # ``_memory_usage`` read the entries but could not learn the host's
+            # limit, so it withheld the number rather than reporting a fallen-back
+            # default as configured. Withholding the number is right; withholding
+            # the FACT is not -- without this marker the degraded pass is
+            # byte-identical to a healthy one, and the only other trace is a
+            # logger.warning that goes with the process. "Silent no_op is the
+            # default failure mode": a failure that cannot be told from "nothing
+            # to report" afterwards is invisible.
+            #
+            # On the response only, and that is a real limit rather than a
+            # shortcut: journal.finalize copies the entry prepared BEFORE the
+            # apply and takes no llm_meta, while the usage has to be read AFTER
+            # the write to describe the store that write produced. So this reaches
+            # the same surface ``result_code`` does -- the agent, in the same turn
+            # -- and not the durable record. Making it durable is the journal
+            # format change the known-limits list already names.
+            llm_meta = dict(llm_meta or {})
+            llm_meta["memory_used"] = used
+            llm_meta["memory_limit_unknown"] = True
     try:
         finalized = journal.finalize(
             entry_id,

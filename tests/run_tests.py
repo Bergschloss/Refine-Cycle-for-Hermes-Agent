@@ -16461,6 +16461,55 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             limit, "a limit that was fallen back to is not the host's limit"
         )
 
+    def test_a_degraded_memory_read_is_distinguishable_on_the_response(self):
+        """Withholding the number is right; withholding the fact is not.
+
+        86bdf67 stopped a fallen-back limit being reported as the host's, and left
+        the degraded pass byte-identical to a healthy one: no memory fields, a
+        logger.warning, nothing else. AGENTS.md names that shape -- a failure that
+        cannot be told from "nothing to report" afterwards is invisible.
+
+        On the RESPONSE, which is where this can go. journal.finalize copies the
+        entry prepared before the apply and accepts no llm_meta, and the usage has
+        to be read AFTER the write to describe the store the write produced -- so
+        this marker reaches the same surface result_code does and no further.
+        Making it durable is the journal format change the known-limits list
+        already covers, not something this block can do; asserting it on
+        journal.get_entry would be asserting a fix that is not here.
+        """
+        memory_module = sys.modules["tools.memory_tool"]
+        FakeHost.memory_char_limit = 4400
+        FakeHost.memory_entries[:] = ["x" * 300]
+        helper = memory_module.load_on_disk_store
+        del memory_module.load_on_disk_store
+        try:
+            degraded = self.run_proposal({
+                "action": "create", "kind": "memory", "name": "degraded-read",
+                "content": "a fact stored while the host limit was unknowable",
+                "reason": "why", "evidence": [],
+            })
+        finally:
+            memory_module.load_on_disk_store = helper
+        self.assertTrue(degraded["success"], degraded.get("message"))
+        meta = degraded["llm_meta"]
+        self.assertTrue(
+            meta.get("memory_limit_unknown"),
+            "a degraded memory read is not distinguishable from a healthy one",
+        )
+        self.assertNotIn("memory_limit", meta)
+        # Usage really was read, so it is still reported.
+        self.assertIsInstance(meta.get("memory_used"), int)
+
+        # Both directions: a healthy pass carries the limit and NOT the marker.
+        healthy = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "healthy-read",
+            "content": "a fact stored with the host limit readable",
+            "reason": "why", "evidence": [],
+        })
+        self.assertTrue(healthy["success"])
+        self.assertEqual(healthy["llm_meta"]["memory_limit"], 4400)
+        self.assertNotIn("memory_limit_unknown", healthy["llm_meta"])
+
     def test_a_host_without_the_helper_renders_no_clause_and_no_warning(self):
         """The consequence, at both surfaces the number reaches."""
         memory_module = sys.modules["tools.memory_tool"]
