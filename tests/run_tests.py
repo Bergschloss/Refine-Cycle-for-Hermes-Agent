@@ -19095,6 +19095,62 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "a multiline exception from two call sites must aggregate",
         )
 
+    def test_multiline_exception_with_several_continuation_lines_aggregates(self):
+        """The shape Python actually prints, and the half the first fix missed.
+
+        ``raise ValueError("bad value\\nline two\\nline three")`` prints every
+        line of the message at column 0, so a message with more than one
+        continuation line stacks several column-0 lines above the terminal. The
+        backward scan stopped at the first of them, found a line that is not an
+        exception line, and gave up -- so only the single-continuation shape
+        aggregated and every longer real message still carried its frames, which
+        is exactly the non-aggregation the fix was for.
+        """
+        def traceback_from(callsite, message_lines):
+            return (
+                "Traceback (most recent call last):\n"
+                f'  File "/app/{callsite}.py", line 12, in {callsite}\n'
+                "    do_work()\n"
+                + "\n".join(message_lines)
+            )
+
+        message = ["ValueError: bad value", "line two of context", "line three"]
+        call_a = traceback_from("handler_a", message)
+        call_b = traceback_from("handler_b", message)
+        self.assertEqual(
+            patterns.normalize_error(call_a),
+            "valueerror: bad value line two of context line three",
+        )
+        self.assertEqual(
+            patterns.fingerprint("bash", call_a),
+            patterns.fingerprint("bash", call_b),
+            "a message with two continuation lines must aggregate across call sites",
+        )
+        # Opposing direction: two genuinely different three-line exceptions
+        # must stay apart, or the longer walk has traded one aggregation
+        # failure for an over-collapse.
+        other = traceback_from(
+            "handler_a", ["KeyError: missing thing", "line two of context", "line three"]
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("bash", call_a),
+            patterns.fingerprint("bash", other),
+        )
+        # And the walk still stops at a frame: a terminal line separated from
+        # the exception by a stack frame is unrelated output, not a
+        # continuation, so it must not be folded into the message.
+        interleaved = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/a.py", line 1, in a\n'
+            "    a()\n"
+            "ValueError: boom\n"
+            '  File "/app/b.py", line 2, in b\n'
+            "trailing prose"
+        )
+        self.assertNotEqual(
+            patterns.normalize_error(interleaved), "valueerror: boom trailing prose"
+        )
+
     def test_single_line_exception_from_two_call_sites_still_aggregates(self):
         """Regression guard on the behaviour that already worked: a single-line
         exception from two call sites must keep aggregating."""

@@ -281,13 +281,27 @@ def normalize_error(content: str) -> str:
                     stripped = line.strip()
                     if not stripped:
                         continue
-                    if stripped.startswith('File "'):
+                    if (
+                        stripped.startswith('File "')
+                        or _TRACEBACK_WRAPPER_LINE.match(stripped)
+                        or _TRACEBACK_CHAIN_LINE.match(stripped)
+                        or _TRACEBACK_RUNNER_FOOTER_LINE.match(stripped)
+                    ):
                         break
                     if line[:1].isspace():
                         continue
                     if _is_python_exception_line(line):
                         exception_start = offset
-                    break
+                        break
+                    # A column-0 line that is not an exception line is another
+                    # continuation: Python prints every line of a multi-line
+                    # message at column 0, so a message with two or more
+                    # continuation lines has several of them stacked above the
+                    # terminal. Stopping at the first one found only the
+                    # single-continuation shape and left every longer real
+                    # message with its frames -- the same non-aggregation this
+                    # branch exists to fix. Keep walking; the frame and wrapper
+                    # boundaries above are what stop the walk.
                 if exception_start is not None:
                     # Join the column-0 exception line with the continuation
                     # lines down to the terminal, dropping the frames above it
