@@ -22708,6 +22708,76 @@ class InstallerPluginContentTests(unittest.TestCase):
             f"installed files import plugin modules the installer did not copy: {missing}",
         )
 
+    # Invariant 7 (AGENTS.md): Python 3 standard library only, no new
+    # dependencies. The host allowlist is deliberately explicit and small; a
+    # module outside stdlib, the repo, or this set is a new dependency and must
+    # be justified in the commit that adds it here.
+    _HERMES_HOST_MODULES = frozenset(
+        {"agent", "gateway", "hermes_cli", "hermes_constants", "tools"}
+    )
+
+    def _forbidden_imports_in(self, py_files, repo_owned):
+        """Return (file, lineno, module) for every top-level import that is not
+        stdlib, repo-owned, a Hermes host package, or a relative import."""
+        stdlib = set(sys.stdlib_module_names)
+        # A guard that silently allows everything is worse than no guard.
+        self.assertTrue(stdlib, "sys.stdlib_module_names is empty; cannot guard")
+        allowed = stdlib | repo_owned | self._HERMES_HOST_MODULES
+        offenders = []
+        for py in py_files:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        top = alias.name.split(".")[0]
+                        if top not in allowed:
+                            offenders.append((py.name, node.lineno, top))
+                elif isinstance(node, ast.ImportFrom):
+                    # Relative imports (level > 0) are repo-internal by definition.
+                    if node.level and node.level > 0:
+                        continue
+                    if node.module:
+                        top = node.module.split(".")[0]
+                        if top not in allowed:
+                            offenders.append((py.name, node.lineno, top))
+        return offenders
+
+    def test_no_module_imports_a_third_party_dependency(self):
+        """Invariant 7: stdlib only. The existing installer-parity test computes
+        ``referenced & repo_owned``, which by construction can only contain the
+        plugin's own modules, so ``import requests`` slips past it. This walks the
+        AST of every shipped ``*.py`` -- repo root and ``tests/`` both, since the
+        suite is code that ships -- and rejects any top-level import that is not
+        stdlib, repo-owned, or one of the small, explicit Hermes host packages.
+        """
+        # ``tests`` is the suite's own package (``from tests.run_tests import``);
+        # it is repo-internal even though its stem is not a root-level *.py.
+        repo_owned = {p.stem for p in ROOT.glob("*.py")} | {"tests"}
+        py_files = sorted(ROOT.glob("*.py")) + sorted((ROOT / "tests").glob("*.py"))
+        offenders = self._forbidden_imports_in(py_files, repo_owned)
+        self.assertEqual(
+            offenders, [],
+            "third-party imports found (Invariant 7 is stdlib-only): "
+            + "; ".join(f"{name}:{line} imports '{mod}'" for name, line, mod in offenders),
+        )
+
+    def test_the_stdlib_guard_actually_rejects_a_third_party_import(self):
+        """Both directions: the guard above must bite. A scratch file that
+        ``import requests`` is written to a temp dir and fed to the same walker;
+        it must be reported. Without this, a guard that never fires would pass
+        for the wrong reason."""
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp) / "scratch_module.py"
+            scratch.write_text(
+                "import os\nimport requests\nfrom numpy import array\n",
+                encoding="utf-8",
+            )
+            offenders = self._forbidden_imports_in([scratch], {"scratch_module"})
+        modules = {mod for _, _, mod in offenders}
+        self.assertIn("requests", modules)
+        self.assertIn("numpy", modules)
+        self.assertNotIn("os", modules, "a stdlib import must not be flagged")
+
     def test_installed_tree_imports_where_hermes_is_available(self):
         """The outcome check, where the environment can actually exercise it.
 
