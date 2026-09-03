@@ -23444,6 +23444,58 @@ class InstallerMemoryBudgetTests(unittest.TestCase):
         self.assertEqual(self._value(config_yaml), 3000, "config.yaml lost its own value")
         self.assertEqual(self._value(defaults), self.stock)
 
+    def test_a_raise_that_dies_on_the_second_file_can_still_be_rolled_back(self):
+        """Invariant 5 has no exception for the second of two targets.
+
+        raise_memory_limit mutates config.yaml, then mutates the host's
+        config_defaults.py, and only then does do_install persist the record. An
+        OSError on the second write -- a read-only release directory, a checkout
+        owned by root, a full disk -- propagates out of do_install uncaught, so
+        write_metadata never runs. The first raise is on disk and nothing anywhere
+        says it happened: --rollback answers "nothing to roll back" for a config
+        the installer changed. That is the same defect 629a177 fixed for the host
+        patch, in the code this release added afterwards.
+        """
+        src = self.td / "midway-src"
+        (src / "hermes_cli").mkdir(parents=True)
+        defaults = src / self.install.CONFIG_DEFAULTS_REL
+        defaults.write_text(f'"memory_char_limit": {self.stock},\n', encoding="utf-8")
+        home = self.td / "midway-home"
+        home.mkdir()
+        config_yaml = home / "config.yaml"
+        config_yaml.write_text(
+            f"  memory_char_limit: {self.stock}\n", encoding="utf-8"
+        )
+
+        real_write = self.install._write_limit
+
+        def write_but_die_on_the_host_file(path, text, span, value):
+            if path == defaults:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_write(path, text, span, value)
+
+        meta: dict = {}
+        with patch.object(self.install, "hermes_home_dir", return_value=home), \
+                patch.object(self.install, "_write_limit", write_but_die_on_the_host_file):
+            with self.assertRaises(PermissionError):
+                self.install.raise_memory_limit(src, meta, include_host=True)
+
+        # The mutation happened.
+        self.assertEqual(self._value(config_yaml), self.floor)
+        # So the way back must be on disk, written by the run that made it -- not
+        # only in the meta dict the aborted caller never got to persist.
+        on_disk = self.install.load_metadata(self.install.metadata_dir(src))
+        self.assertIsNotNone(on_disk, "the aborted raise left no metadata at all")
+        entry = ((on_disk.get("memory_limit") or {}).get("targets") or {}).get(
+            str(config_yaml)
+        )
+        self.assertEqual(
+            entry, {"status": "raised", "previous": self.stock},
+            "the raise that landed is not recorded on disk, so it cannot be undone",
+        )
+        self.install.restore_memory_limit(on_disk)
+        self.assertEqual(self._value(config_yaml), self.stock)
+
     def test_a_plugin_only_rerun_keeps_the_host_targets_record(self):
         """208ab6c's sibling: the value was protected, the TARGET was not.
 

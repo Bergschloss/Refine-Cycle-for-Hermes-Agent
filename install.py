@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -822,7 +823,12 @@ def _write_limit(path: Path, text: str, span: tuple[int, int], value: int) -> No
         handle.write(updated)
 
 
-def _raise_limit(path: Path, *, floor: int) -> tuple[str, int]:
+def _raise_limit(
+    path: Path,
+    *,
+    floor: int,
+    before_write: Callable[[int], None] | None = None,
+) -> tuple[str, int]:
     """Bring one integer up to ``floor`` when it is below it.
 
     The rule is a FLOOR, not an exact match: anything under ``floor`` comes up to
@@ -833,6 +839,13 @@ def _raise_limit(path: Path, *, floor: int) -> tuple[str, int]:
     Returns ``(status, previous_value)``. The previous value is what rollback
     restores -- assuming everyone started at the stock default would hand a user
     who had 3000 a 2200 they never chose.
+
+    ``before_write`` is called with the previous value at the one moment that
+    matters: after this function has decided it is going to write, and before it
+    writes. That is where the way back has to be recorded -- see
+    raise_memory_limit. It exists as a hook rather than as a second read at the
+    call site because a read-then-decide-then-record-then-write split there would
+    re-read the file and could disagree with what actually gets written.
     """
     status, value, text, span = _find_limit(path)
     if status:
@@ -841,6 +854,8 @@ def _raise_limit(path: Path, *, floor: int) -> tuple[str, int]:
         return f"already {floor}", value
     if value > floor:
         return f"left alone (operator set {value}, above {floor})", value
+    if before_write is not None:
+        before_write(value)
     _write_limit(path, text, span, floor)
     return "raised", value
 
@@ -865,7 +880,17 @@ def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
     it. A repeat install finds the value already at the floor and would otherwise
     record "already 4400", erasing the one note that says this install raised the
     file from 2200 -- after which rollback leaves the raise in place forever.
+
+    Each raise is recorded AND persisted before the file is written, not after the
+    whole function returns. Two targets are written in sequence and the caller
+    persists once at the end, so an OSError on the second used to leave the first
+    raise on disk with nothing referencing it -- exactly the window 629a177 closed
+    for the host patch. Recording early over-records rather than under-records,
+    which is the safe direction: _lower_limit refuses to touch a value that is not
+    the one we wrote, so a record for a write that never landed declines instead of
+    clobbering.
     """
+    meta_dir = metadata_dir(src)
     existing = (meta.get("memory_limit") or {}).get("targets") or {}
     # Seeded from the carried-forward record, not empty. A --plugin-only rerun
     # visits only config.yaml, and rebuilding the map from just the targets THIS
@@ -874,11 +899,32 @@ def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
     # value. A target this run does not visit keeps whatever an earlier run
     # recorded; a target it does visit is overwritten below as before.
     targets: dict[str, dict] = dict(existing)
+    # Published into meta before the first write, and mutated in place afterwards,
+    # so what the pre-write persist below puts on disk is this same record.
+    meta["memory_limit"] = {"floor": MEMORY_LIMIT_FLOOR, "targets": targets}
+    raised_here: list[str] = []
 
     def apply_to(path: Path, label: str) -> str:
-        status, previous = _raise_limit(path, floor=MEMORY_LIMIT_FLOOR)
         prior = existing.get(str(path))
-        if isinstance(prior, dict) and prior.get("status") == "raised":
+        keep_prior = isinstance(prior, dict) and prior.get("status") == "raised"
+
+        def record_before_writing(previous: int) -> None:
+            # The only moment this can be done safely: the decision to write is
+            # made, the write has not happened. If the write then fails, we have
+            # over-recorded, and _lower_limit declines a value it did not write.
+            targets[str(path)] = {"status": "raised", "previous": previous}
+            write_metadata(meta_dir, meta)
+
+        status, previous = _raise_limit(
+            path,
+            floor=MEMORY_LIMIT_FLOOR,
+            # An earlier install's record already names the original number and is
+            # already on disk, so there is nothing to record before this write.
+            before_write=None if keep_prior else record_before_writing,
+        )
+        if status == "raised":
+            raised_here.append(str(path))
+        if keep_prior:
             # An earlier run of this installer did the raise. That record is the
             # only thing that knows the original number, so it wins and this
             # run's "already 4400" is not allowed to overwrite it.
@@ -901,8 +947,10 @@ def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
             "the host checkout; a config generated later will still say "
             f"{MEMORY_LIMIT_STOCK_DEFAULT})"
         )
-    meta["memory_limit"] = {"floor": MEMORY_LIMIT_FLOOR, "targets": targets}
-    if any(t["status"] == "raised" for t in targets.values()):
+    # What THIS run raised, not what the record contains: the record is seeded from
+    # earlier runs, so reading the message off it would announce a raise on a rerun
+    # that changed nothing.
+    if raised_here:
         say(
             f"Memory budget raised to {MEMORY_LIMIT_FLOOR} chars. Takes effect on "
             "the next gateway restart."
