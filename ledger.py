@@ -173,7 +173,14 @@ def record_edit(
                 # persist that rather than discarding it on the way out.
                 _save_stats(stats)
             return
-        created_ts = previous.get("created_ts", now) if same_edit else now
+        # entry_ts is when the edit actually happened (the journal entry's ts).
+        # A backfilled or replayed record must be aged from that moment, not
+        # from now -- audit() turns created_ts into age_days, and age_days is
+        # what decides "too early" from a trustworthy verdict. updated_ts below
+        # stays now on purpose: it records when this row was last touched, which
+        # is a different question from when the edit was made.
+        fallback_ts = entry_ts if entry_ts is not None else now
+        created_ts = previous.get("created_ts", fallback_ts) if same_edit else fallback_ts
         default_version = 1 if previous else 0
         raw_version = previous.get("version", default_version)
         try:

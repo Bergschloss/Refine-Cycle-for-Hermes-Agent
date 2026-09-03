@@ -3047,6 +3047,52 @@ class RefineTests(unittest.TestCase):
             reconciled_stats["updated_ts"], patched_stats["updated_ts"]
         )
 
+    def test_record_edit_ages_a_backfilled_entry_from_its_own_timestamp(self):
+        """entry_ts is when the edit actually happened; created_ts must honour it.
+
+        audit() turns created_ts into age_days, and age_days decides "too early"
+        from a trustworthy verdict. A backfilled or replayed entry recorded as if
+        it happened now has the wrong age and can flip its verdict. Before the
+        fix, record_edit accepted entry_ts (for the stale check) but discarded it
+        when writing created_ts, so a year-2020 entry_ts saved as time.time().
+        """
+        old_ts = 1600000000.0  # 2020-09-13, far in the past
+        ledger.record_edit(
+            {"name": "backfilled", "kind": "skill", "action": "create"},
+            "backfilled-edit",
+            entry_ts=old_ts,
+        )
+        self.assertEqual(
+            ledger.load_stats()["backfilled"]["created_ts"], old_ts,
+            "created_ts must equal the supplied entry_ts, not now",
+        )
+        # updated_ts records when the row was last touched -- deliberately now,
+        # not the edit's own time -- so it must be at or after the edit time.
+        self.assertGreaterEqual(
+            ledger.load_stats()["backfilled"]["updated_ts"], old_ts
+        )
+
+        # entry_ts=None still records now (the live, non-backfilled path).
+        before = time.time()
+        ledger.record_edit(
+            {"name": "live", "kind": "skill", "action": "create"}, "live-edit",
+        )
+        live_created = ledger.load_stats()["live"]["created_ts"]
+        self.assertGreaterEqual(live_created, before)
+
+        # A second record_edit for the SAME edit preserves the original
+        # created_ts rather than resetting it to a new fallback.
+        ledger.record_edit(
+            {"name": "backfilled", "kind": "skill", "action": "create"},
+            "backfilled-edit",
+            entry_ts=old_ts + 5000,
+            outcome="applied",
+        )
+        self.assertEqual(
+            ledger.load_stats()["backfilled"]["created_ts"], old_ts,
+            "the same edit must keep its first created_ts",
+        )
+
     def test_audit_flags_a_skill_modified_by_something_other_than_refine(self):
         """R9 §9: a skill whose current content no longer matches what refine
         last applied must be flagged, and its verdict marked unreliable rather
