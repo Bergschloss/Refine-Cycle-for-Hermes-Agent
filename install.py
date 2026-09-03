@@ -867,7 +867,13 @@ def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
     file from 2200 -- after which rollback leaves the raise in place forever.
     """
     existing = (meta.get("memory_limit") or {}).get("targets") or {}
-    targets: dict[str, dict] = {}
+    # Seeded from the carried-forward record, not empty. A --plugin-only rerun
+    # visits only config.yaml, and rebuilding the map from just the targets THIS
+    # run touched deleted the host file's entry -- the same un-rollback-able host
+    # 208ab6c fixed, reached by dropping the target instead of overwriting its
+    # value. A target this run does not visit keeps whatever an earlier run
+    # recorded; a target it does visit is overwritten below as before.
+    targets: dict[str, dict] = dict(existing)
 
     def apply_to(path: Path, label: str) -> str:
         status, previous = _raise_limit(path, floor=MEMORY_LIMIT_FLOOR)

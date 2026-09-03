@@ -23444,6 +23444,47 @@ class InstallerMemoryBudgetTests(unittest.TestCase):
         self.assertEqual(self._value(config_yaml), 3000, "config.yaml lost its own value")
         self.assertEqual(self._value(defaults), self.stock)
 
+    def test_a_plugin_only_rerun_keeps_the_host_targets_record(self):
+        """208ab6c's sibling: the value was protected, the TARGET was not.
+
+        Full install raises both files and records both. A later --plugin-only run
+        touches only config.yaml -- and rebuilt the targets map from just the
+        target it visited, dropping config_defaults.py from the record entirely.
+        Rollback then had nothing to say about the host file and left it at the
+        floor forever, which is precisely the un-rollback-able host 208ab6c was
+        written to prevent. That commit stopped a repeat run overwriting the
+        recorded VALUE; this is a repeat run deleting the recorded FILE.
+        """
+        src = self.td / "sibling-src"
+        (src / "hermes_cli").mkdir(parents=True)
+        defaults = src / self.install.CONFIG_DEFAULTS_REL
+        defaults.write_text(f'"memory_char_limit": {self.stock},\n', encoding="utf-8")
+        home = self.td / "sibling-home"
+        home.mkdir()
+        (home / "config.yaml").write_text(
+            f"  memory_char_limit: {self.stock}\n", encoding="utf-8"
+        )
+
+        full: dict = {}
+        with patch.object(self.install, "hermes_home_dir", return_value=home):
+            self.install.raise_memory_limit(src, full, include_host=True)
+        self.assertEqual(self._value(defaults), self.floor)
+
+        # A --plugin-only re-install, carrying the record forward as new_metadata does.
+        rerun = {"memory_limit": full["memory_limit"]}
+        with patch.object(self.install, "hermes_home_dir", return_value=home):
+            self.install.raise_memory_limit(src, rerun, include_host=False)
+
+        self.assertIn(
+            str(defaults), rerun["memory_limit"]["targets"],
+            "the --plugin-only rerun dropped the host target from the record",
+        )
+        self.install.restore_memory_limit(rerun)
+        self.assertEqual(
+            self._value(defaults), self.stock,
+            "rollback after a --plugin-only rerun left the host file raised",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
