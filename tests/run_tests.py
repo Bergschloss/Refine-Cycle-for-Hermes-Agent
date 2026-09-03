@@ -12903,6 +12903,52 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         )
         self.assertEqual(row["reported_model"], "actual-host-model")
 
+    def test_model_substitution_warning_reaches_the_audit_row_and_report(self):
+        """model_substituted is computed and stored in meta (by the journal-merge
+        path) but audit() never copied it into the row, so format_audit's
+        ``row.get("model_substituted")`` was always None and the warning had
+        never printed. A verdict produced by a model other than the configured
+        target is not trustworthy; suppressing the notice makes the audit
+        confidently wrong. The flag reaches meta through _merge_journal_stats,
+        which is the path that runs when a reconciled journal entry carries
+        llm_meta.model_substituted -- so seed it exactly that way.
+        """
+        now = time.time()
+        merged = ledger._merge_journal_stats({}, [{
+            "id": "swapped-edit", "ts": now, "finalized_ts": now,
+            "outcome": "applied",
+            "proposal": {"name": "swapped-model", "kind": "skill", "action": "create"},
+            "llm_meta": {"reported_model": "fallback-model", "model_substituted": True},
+        }])
+        self.assertTrue(
+            merged["swapped-model"].get("model_substituted"),
+            "precondition: the flag must reach meta via the merge path",
+        )
+        ledger.stats_path().write_text(json.dumps(merged), encoding="utf-8")
+
+        row = next(
+            item for item in ledger.audit([]) if item["name"] == "swapped-model"
+        )
+        self.assertTrue(
+            row.get("model_substituted"),
+            "the substitution flag must reach the audit row",
+        )
+        self.assertIn("model substituted", ledger.format_audit([row]))
+
+        # Both directions: an entry without substitution must not warn.
+        clean = ledger._merge_journal_stats({}, [{
+            "id": "same-edit", "ts": now, "finalized_ts": now,
+            "outcome": "applied",
+            "proposal": {"name": "same-model", "kind": "skill", "action": "create"},
+            "llm_meta": {"reported_model": "configured-model"},
+        }])
+        ledger.stats_path().write_text(json.dumps(clean), encoding="utf-8")
+        clean_row = next(
+            item for item in ledger.audit([]) if item["name"] == "same-model"
+        )
+        self.assertFalse(clean_row.get("model_substituted"))
+        self.assertNotIn("model substituted", ledger.format_audit([clean_row]))
+
     def test_journal_entry_omits_output_tokens_when_unavailable(self):
         model = MockLlm(MockResult(
             {"action": "no_op", "reason": "nothing", "evidence": [],

@@ -946,6 +946,12 @@ def audit(
                 if meta.get("reported_model")
                 else ""
             ),
+            # Carry the substitution flag into the row: it is computed and
+            # stored in meta but was never copied here, so format_audit's
+            # ``row.get("model_substituted")`` was always None and the warning
+            # -- that a verdict came from a model other than the configured
+            # target and is not trustworthy -- had never printed.
+            "model_substituted": bool(meta.get("model_substituted")),
             "expected_outcome": (
                 scrub_text(meta["expected_outcome"]).strip()
                 if isinstance(meta.get("expected_outcome"), str)
