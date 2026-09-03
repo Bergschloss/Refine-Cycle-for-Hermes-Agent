@@ -3029,6 +3029,48 @@ def _memory_negation_set(content: str) -> frozenset:
     return frozenset(word for word in words if word in _MEMORY_NEGATION_MARKERS)
 
 
+def _memory_subjects_conflict(proposed: frozenset, existing: frozenset) -> bool:
+    """Whether each entry asserts a word the other does not.
+
+    The third thing a word bag cannot see, after numbers and polarity: WHICH
+    token is the subject. Two entries of n content tokens differing in one token
+    each score (n-1)/(n+1), which clears the 0.55 threshold at n>=4 -- and the
+    live store's shortest entry has 7. So "the deploy tool needs --profile" and
+    "the rollback tool needs --profile" scored 0.80 and the second was refused as
+    a restatement of the first, permanently, since refine cannot delete and does
+    not use the host's replace.
+
+    Same test as ``_memory_numbers_conflict``, applied to words: each side must
+    carry something the other lacks. What remains refused is what the gate can
+    actually PROVE is a restatement -- one token set contained in the other,
+    which covers a reorder, a paraphrase that introduces no new word, and a
+    superset that merely adds a qualifier.
+
+    Negation markers are excluded from the comparison, because polarity is the
+    axis above and the three must not decide each other. "Do not run the suite
+    with the system Python" and "Never run the suite with the system Python"
+    differ in exactly ``do`` against ``never``; counting ``never`` as a subject
+    made this function release a pair the polarity axis deliberately refuses --
+    two phrasings that both deny the same thing are one lesson. With markers
+    removed, one side has nothing exclusive left and the pair stays refused,
+    while ``deploy`` against ``rollback`` is untouched.
+
+    The cost, named rather than left to be found in a bloated store: a genuine
+    reword that substitutes exactly one non-negation word for a synonym ("needs"
+    -> "requires") is now released and the store keeps both. That band is narrow
+    and was already inconsistent -- a paraphrase with TWO substitutions scores
+    0.429 and was released before this change, so single-swap was the only
+    substitution depth the gate caught, while refusing a different subject at
+    every depth. Releasing it makes the rule coherent: prove a restatement or
+    let it through. And the harm is the visible one, in the store, where the
+    operator can see it -- against a lesson that is refused every pass and
+    leaves only a journal line.
+    """
+    only_proposed = (proposed - existing) - _MEMORY_NEGATION_MARKERS
+    only_existing = (existing - proposed) - _MEMORY_NEGATION_MARKERS
+    return bool(only_proposed) and bool(only_existing)
+
+
 def _memory_polarity_conflict(proposed: frozenset, existing: frozenset) -> bool:
     """Whether exactly one of the two entries denies what the other asserts.
 
@@ -3062,10 +3104,12 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
     the signal this plugin exists to surface. Blocking that would make refine
     permanently blind to it, invisibly.
 
-    A pair whose words match is still let through on either of two axes the
-    word score cannot see: conflicting numbers (see
-    ``_MEMORY_DUPLICATE_NUMBER_RE``) and conflicting polarity (see
-    ``_MEMORY_NEGATION_MARKERS``). Allowed through, not substituted: the host
+    A pair whose words match is still let through on any of three axes the word
+    score cannot see: conflicting numbers (see ``_MEMORY_DUPLICATE_NUMBER_RE``),
+    conflicting polarity (see ``_MEMORY_NEGATION_MARKERS``) and a conflicting
+    subject (see ``_memory_subjects_conflict``). What is left refused is what the
+    score can prove is a restatement: one token set contained in the other.
+    Allowed through, not substituted: the host
     call is an ``add`` and refine may never propose a delete, so the store then
     holds BOTH the corrected entry and the thing it corrects, and only the
     operator can remove the stale one. That is the lesser of the two harms --
@@ -3100,7 +3144,8 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
         logger.warning("Cannot read memory store for duplicate check: %s", scrub_text(str(exc)))
         return f"{_MEMORY_STORE_UNAVAILABLE_MARKER} for the duplicate check"
     for existing in entries:
-        score = _jaccard_similarity(proposed_tokens, _memory_token_set(existing))
+        existing_tokens = _memory_token_set(existing)
+        score = _jaccard_similarity(proposed_tokens, existing_tokens)
         if score < _MEMORY_DUPLICATE_JACCARD_THRESHOLD:
             continue
         # Words already say "duplicate"; numbers get the last word, and only
@@ -3114,6 +3159,11 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
         if _memory_polarity_conflict(
             proposed_negations, _memory_negation_set(existing)
         ):
+            continue
+        # And the subject, last of the three. Same position and same reason: the
+        # word score has to have said "duplicate" before any of these axes is
+        # consulted, or a single differing token would skip the comparison.
+        if _memory_subjects_conflict(proposed_tokens, existing_tokens):
             continue
         return (
             f"Memory entry is {score:.2f} similar to an entry already in "

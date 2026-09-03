@@ -16044,6 +16044,60 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertFalse(result["success"])
         self.assertEqual(result["llm_meta"]["result_code"], "memory_duplicate")
 
+    def test_a_lesson_about_a_different_subject_is_not_a_duplicate(self):
+        """The third axis a bag of words cannot see: which token is the subject.
+
+        Two entries of n content tokens differing in one token each score
+        (n-1)/(n+1), which clears 0.55 at n>=4 -- and every live entry has n>=7.
+        So a lesson about the rollback tool was refused as a restatement of one
+        about the deploy tool. Measured on the live store: for 13 of 13 entries,
+        substituting a single content word produced a sibling the gate refuses.
+        Permanently, since refine cannot delete and does not use replace.
+
+        The gate keeps refusing what it can PROVE is a restatement -- one token
+        set contained in the other, which is a reorder, a paraphrase that
+        introduces no word, or a superset. It stops refusing what it cannot
+        prove: when each side asserts a token the other lacks, a word bag cannot
+        tell a different subject from a synonym swap.
+        """
+        FakeHost.memory_entries[:] = [
+            "The deploy tool needs an explicit profile flag or it picks the wrong account",
+        ]
+        result = self.run_proposal({
+            "action": "create", "kind": "memory", "name": "rollback-profile",
+            "content": "The rollback tool needs an explicit profile flag or it picks the wrong account",
+            "reason": "a different tool, same trap", "evidence": [],
+        })
+        self.assertTrue(result["success"], result.get("message"))
+        self.assertEqual(len(FakeHost.memory_entries), 2)
+
+    def test_a_reorder_or_a_superset_restatement_is_still_refused(self):
+        """The false-negative direction, and the substance of the guard.
+
+        These are the two shapes the gate can prove are restatements, and both
+        must keep being refused: a reorder introduces no token at all, and a
+        restatement that only ADDS words asserts nothing the store contradicts.
+        A paraphrase with two substitutions already scored 0.429 and was released
+        before this change, so the released band is narrow and bounded, not the
+        guard's substance.
+        """
+        original = "The API rate limit is 100 requests per minute per key"
+        for name, restatement in (
+            ("reordered", "Per key, the API rate limit is 100 requests per minute"),
+            ("superset", "The documented API rate limit is 100 requests per minute per key"),
+        ):
+            with self.subTest(shape=name):
+                FakeHost.memory_entries[:] = [original]
+                result = self.run_proposal({
+                    "action": "create", "kind": "memory", "name": f"restated-{name}",
+                    "content": restatement, "reason": "why", "evidence": [],
+                })
+                self.assertFalse(result["success"])
+                self.assertEqual(
+                    result["llm_meta"]["result_code"], "memory_duplicate"
+                )
+                self.assertEqual(FakeHost.memory_entries, [original])
+
     def test_a_polarity_correction_is_not_a_duplicate(self):
         """The number exemption's missing twin, and the worse of the two.
 
