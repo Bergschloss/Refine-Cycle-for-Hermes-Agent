@@ -19458,6 +19458,73 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             patterns.fingerprint("bash", path_b),
         )
 
+    def test_a_one_word_continuation_line_does_not_become_the_exception(self):
+        """The over-collapse the sibling test above cannot see.
+
+        _is_python_exception_line uses ``partition(":")[0]``, so a line with NO
+        colon is judged on its whole text -- and a single bare word like
+        ``retrying`` is a valid identifier. The multiline walk-back scans upward
+        for a column-0 exception line and stops at the first one it believes, so
+        it stops on that continuation line and joins from THERE, discarding the
+        real ``RateLimitError:`` above it.
+
+        The consequence is the worst shape this project has: the two failures
+        below both normalize to ``retrying gave up``, aggregate into ONE pattern
+        at count=2 across two sessions, and so pass the recurrence gate as a
+        fabricated failure while both real ones vanish. Measured against
+        v0.12.0, which kept them apart, this is a regression introduced with the
+        walk-back and not a pre-existing limit.
+
+        Every continuation line in the fixtures above contains a space, so
+        isidentifier() is False for all of them and none of them reaches this
+        path.
+        """
+        rate_limited = (
+            "Traceback (most recent call last):\n"
+            '  File "a.py", line 11, in <module>\n'
+            "RateLimitError: rate limited\n"
+            "retrying\n"
+            "gave up"
+        )
+        permission_denied = (
+            "Traceback (most recent call last):\n"
+            '  File "a.py", line 11, in <module>\n'
+            "PermissionError: permission denied\n"
+            "retrying\n"
+            "gave up"
+        )
+        self.assertIn("rate limited", patterns.normalize_error(rate_limited))
+        self.assertIn(
+            "permission denied", patterns.normalize_error(permission_denied)
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("http", rate_limited),
+            patterns.fingerprint("http", permission_denied),
+            "two unrelated failures collapsed into one fingerprint",
+        )
+        # And the aggregate, because that is what reaches the proposer.
+        groups = patterns.extract_patterns([
+            {"tool": "http", "content": rate_limited, "session_id": "s1"},
+            {"tool": "http", "content": permission_denied, "session_id": "s2"},
+        ], limit=None)
+        self.assertEqual(
+            len(groups), 2,
+            "a fabricated pattern reached the recurrence threshold",
+        )
+
+    def test_a_colonless_terminal_exception_is_still_the_exception(self):
+        """The other direction: requiring a colon in the WALK-BACK must not stop
+        a bare terminal exception from being recognized. ``KeyboardInterrupt``
+        prints with no message and no colon, and it can only ever be the
+        terminal line -- a message-less exception has no continuation."""
+        interrupted = (
+            "Traceback (most recent call last):\n"
+            '  File "a.py", line 11, in <module>\n'
+            "    main()\n"
+            "KeyboardInterrupt"
+        )
+        self.assertEqual(patterns.normalize_error(interrupted), "keyboardinterrupt")
+
     def test_chained_multiline_traceback_uses_the_terminal_exception(self):
         """A chained traceback whose terminal exception is multiline. Decision:
         the terminal (last) exception wins -- it is the failure that actually

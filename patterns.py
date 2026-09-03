@@ -290,7 +290,26 @@ def normalize_error(content: str) -> str:
                         break
                     if line[:1].isspace():
                         continue
-                    if _is_python_exception_line(line):
+                    # A colon is required HERE and only here.
+                    # _is_python_exception_line judges ``partition(":")[0]``, so
+                    # a line with no colon at all is judged on its whole text --
+                    # and one bare word like ``retrying`` is a valid identifier.
+                    # Without this, the walk-back believed that continuation
+                    # line, stopped on it, and joined from there, discarding the
+                    # real ``RateLimitError:`` above it. Both of
+                    #   RateLimitError: rate limited / retrying / gave up
+                    #   PermissionError: permission denied / retrying / gave up
+                    # then normalized to "retrying gave up" and aggregated into
+                    # ONE pattern at count=2 over two sessions -- a fabricated
+                    # failure that passes the recurrence gate while both real
+                    # ones disappear. v0.12.0 kept them apart, so this was a
+                    # regression the walk-back introduced.
+                    #
+                    # Not added to the terminal-line branch above: a
+                    # message-less exception (``KeyboardInterrupt``) prints with
+                    # no colon and has no continuation, so it can only ever BE
+                    # the terminal line, where the colonless check is correct.
+                    if ":" in stripped and _is_python_exception_line(line):
                         exception_start = offset
                         break
                     # A column-0 line that is not an exception line is another
