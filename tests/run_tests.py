@@ -19625,10 +19625,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         )
 
     def test_a_colonless_terminal_exception_is_still_the_exception(self):
-        """The other direction: requiring a colon in the WALK-BACK must not stop
-        a bare terminal exception from being recognized. ``KeyboardInterrupt``
-        prints with no message and no colon, and it can only ever be the
-        terminal line -- a message-less exception has no continuation."""
+        """A bare terminal exception must still be recognized. ``KeyboardInterrupt``
+        prints with no message and so no colon."""
         interrupted = (
             "Traceback (most recent call last):\n"
             '  File "a.py", line 11, in <module>\n'
@@ -19636,6 +19634,71 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "KeyboardInterrupt"
         )
         self.assertEqual(patterns.normalize_error(interrupted), "keyboardinterrupt")
+
+    def test_a_message_less_terminal_followed_by_tool_output_keeps_its_own_block(self):
+        """The shape a colon requirement in the walk-back silently broke.
+
+        A message-less exception prints without a colon, so requiring one made
+        the walk-back find nothing in the terminal block -- and the enclosing
+        loop then falls back to an EARLIER traceback block. For a chained
+        traceback that reports the ROOT exception instead of the terminal one,
+        collapsing two different terminal failures into whichever root they
+        share, which is the same fabricated-pattern shape the walk-back fix was
+        for. It also contradicts the terminal-wins rule the chained tests pin.
+
+        Both fixtures below end in a message-less exception with one line of
+        ordinary tool output after it -- which is exactly why "a message-less
+        exception has no continuation" was the wrong premise.
+        """
+        chained = (
+            "Traceback (most recent call last):\n"
+            '  File "a.py", line 3, in run\n'
+            "ConnectionResetError: peer reset\n"
+            "\n"
+            "During handling of the above exception, another exception occurred:\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            '  File "b.py", line 9, in cleanup\n'
+            "{terminal}\n"
+            "cleanup failed"
+        )
+        interrupted = chained.format(terminal="KeyboardInterrupt")
+        exhausted = chained.format(terminal="MemoryError")
+        self.assertEqual(
+            patterns.normalize_error(interrupted), "keyboardinterrupt cleanup failed"
+        )
+        self.assertEqual(
+            patterns.normalize_error(exhausted), "memoryerror cleanup failed"
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("t", interrupted),
+            patterns.fingerprint("t", exhausted),
+            "two different terminal failures collapsed into their shared root",
+        )
+
+    def test_a_message_less_failure_from_two_frames_still_collapses(self):
+        """The under-collapse direction of the same break.
+
+        With the terminal block yielding nothing, the fallback kept the whole
+        traceback including its frames -- so one failure raised from two call
+        sites stopped aggregating, which is the opposite defect and just as
+        invisible.
+        """
+        template = (
+            "Traceback (most recent call last):\n"
+            '  File "{path}", line {line}, in {func}\n'
+            "KeyboardInterrupt\n"
+            "shutting down"
+        )
+        first = template.format(path="/app/x.py", line=3, func="run")
+        second = template.format(path="/svc/y.py", line=9, func="go")
+        self.assertEqual(
+            patterns.normalize_error(first), "keyboardinterrupt shutting down"
+        )
+        self.assertEqual(
+            patterns.fingerprint("t", first), patterns.fingerprint("t", second),
+            "one failure from two frames stopped collapsing",
+        )
 
     def test_chained_multiline_traceback_uses_the_terminal_exception(self):
         """A chained traceback whose terminal exception is multiline. Decision:

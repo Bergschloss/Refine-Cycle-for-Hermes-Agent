@@ -290,28 +290,39 @@ def normalize_error(content: str) -> str:
                         break
                     if line[:1].isspace():
                         continue
-                    # A colon is required HERE and only here.
+                    # Keep the HIGHEST believed line in this block, and do not
+                    # stop at the first one found from the bottom.
+                    #
                     # _is_python_exception_line judges ``partition(":")[0]``, so
-                    # a line with no colon at all is judged on its whole text --
-                    # and one bare word like ``retrying`` is a valid identifier.
-                    # Without this, the walk-back believed that continuation
-                    # line, stopped on it, and joined from there, discarding the
-                    # real ``RateLimitError:`` above it. Both of
+                    # a line with no colon is judged on its whole text and one
+                    # bare word like ``retrying`` is a valid identifier. Stopping
+                    # at the first believed line therefore stopped on that
+                    # continuation and joined from there, discarding the real
+                    # ``RateLimitError:`` above it -- so
                     #   RateLimitError: rate limited / retrying / gave up
                     #   PermissionError: permission denied / retrying / gave up
-                    # then normalized to "retrying gave up" and aggregated into
-                    # ONE pattern at count=2 over two sessions -- a fabricated
+                    # both normalized to "retrying gave up" and aggregated into
+                    # ONE pattern at count=2 over two sessions, a fabricated
                     # failure that passes the recurrence gate while both real
-                    # ones disappear. v0.12.0 kept them apart, so this was a
-                    # regression the walk-back introduced.
+                    # ones disappear.
                     #
-                    # Not added to the terminal-line branch above: a
-                    # message-less exception (``KeyboardInterrupt``) prints with
-                    # no colon and has no continuation, so it can only ever BE
-                    # the terminal line, where the colonless check is correct.
-                    if ":" in stripped and _is_python_exception_line(line):
+                    # Requiring a colon here instead was WRONG, and measurably:
+                    # a message-less exception prints without one, so a chained
+                    # traceback ending in ``KeyboardInterrupt`` plus a line of
+                    # tool output found nothing in its own block and fell back to
+                    # an EARLIER block -- reporting the root exception and
+                    # collapsing two different terminal failures into it -- while
+                    # the same message-less failure raised from two frames
+                    # stopped collapsing at all. Both were correct before.
+                    #
+                    # Continuing the walk needs no colon and fixes all three: the
+                    # frame, wrapper, chain and footer boundaries above already
+                    # end it, and in a real traceback the exception line is
+                    # preceded by a ``File "`` frame, so the highest believed line
+                    # in the block IS the exception and everything below it is its
+                    # message.
+                    if _is_python_exception_line(line):
                         exception_start = offset
-                        break
                     # A column-0 line that is not an exception line is another
                     # continuation: Python prints every line of a multi-line
                     # message at column 0, so a message with two or more
