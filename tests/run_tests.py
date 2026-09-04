@@ -25853,5 +25853,200 @@ class Release0144ContractTests(unittest.TestCase):
         self.assertEqual(FakeHost.actions, [])
 
 
+class SyntheticLongitudinalUsefulnessTests(unittest.TestCase):
+    """Closed-loop synthetic proof from recurring failure through audit verdict.
+
+    This deliberately does not claim that a synthetic model caused a real-world
+    behavioral improvement. It proves the product contract that CAN be tested
+    deterministically: a cross-session-grounded lesson lands through the real
+    apply path, remains attributable, and is graded from a later non-empty
+    observation window as either working (target absent) or did not help
+    (target recurred).
+    """
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory(prefix="refine-longitudinal-")
+        self.root = Path(self._temp.name).resolve()
+        FakeHost.reset(self.root)
+        install_fake_host()
+        sys.modules["hermes_constants"].get_hermes_home = lambda: str(self.root)
+        config._set_runtime_journal_dir(None)
+        core._LAST_SESSION_ID = "pre-edit-b"
+        plugin_init._AUTO_TURN_MARKS.clear()
+        plugin_init._AUTO_PENDING_SESSION_ENDS.clear()
+        core._AUTO_EVENTS.clear()
+        plugin_init._BLOCK_RULES = []
+        llm._call_transport.preferred_output_mode = ""
+        llm._call_meta.value = {}
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "apply_min_sessions": 2,
+            "apply_min_occurrences": 5,
+            "audit_recurrence_horizon_days": 3,
+            "max_edits_per_run": 1,
+            "max_edits_per_day": 3,
+        })
+
+    def tearDown(self):
+        config._set_runtime_journal_dir(None)
+        self._temp.cleanup()
+
+    def _seed_sessions(self, rows, sessions):
+        """Replace the throwaway state DB with explicit synthetic sessions."""
+        FakeHost.make_db(rows)
+        connection = sqlite3.connect(self.root / "state.db")
+        try:
+            connection.execute("DELETE FROM sessions")
+            connection.executemany(
+                "INSERT INTO sessions VALUES (?, ?, ?)", sessions,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _audit_row(result, name):
+        return next(row for row in result["rows"] if row["name"] == name)
+
+    def test_grounded_edit_then_quiet_window_is_working_and_recurrence_is_not(self):
+        """Synthetic longitudinal contract: pre-failure -> apply -> holdout audit.
+
+        Two independent pre-edit sessions establish the same normalized failure.
+        The deterministic proposal is applied by core.refine_run without patching
+        the application-evidence gate. Thirty synthetic days later, two post-edit
+        sessions establish a non-empty observation window containing another
+        failure but not the edited fingerprint. Exact post-edit skill usage plus
+        measured target silence must yield `working`. Adding one post-edit target
+        recurrence must flip the same artifact to `did not help`.
+        """
+        now = time.time()
+        applied_at = now - 30 * 86400
+        target_error = "ERROR: synthetic deploy helper command not found"
+        other_error = "ERROR: synthetic cache refresh failed"
+        target_fingerprint = patterns.fingerprint("terminal", target_error)
+        name = "synthetic-missing-command-stop-rule"
+
+        self._seed_sessions(
+            [
+                ("pre-edit-a", "user", "Run the synthetic deploy helper.", "", applied_at - 7202, 1),
+                ("pre-edit-a", "tool", target_error, "terminal", applied_at - 7200, 1),
+                ("pre-edit-b", "user", "Run the synthetic deploy helper again.", "", applied_at - 3602, 1),
+                ("pre-edit-b", "assistant", "I will run the synthetic deploy helper.", "", applied_at - 3601, 1),
+                ("pre-edit-b", "tool", target_error, "terminal", applied_at - 3600, 1),
+            ],
+            [
+                ("pre-edit-a", applied_at - 7300, "cli"),
+                ("pre-edit-b", applied_at - 3700, "cli"),
+            ],
+        )
+        pre_patterns = core.collect_cross_session_patterns(
+            since_ts=applied_at - 86400, max_rows=None, max_sessions=None,
+            strict=True,
+        )
+        target_before = next(
+            item for item in pre_patterns
+            if item["fingerprint"] == target_fingerprint
+        )
+        self.assertEqual(target_before["sessions_seen"], 2)
+
+        proposal = dict(
+            skill_proposal(
+                name,
+                "# Guidance\n\nWhen the synthetic deploy helper command is missing, "
+                "stop retrying and ask for clarification.",
+            ),
+            pattern_fingerprint=target_fingerprint,
+            expected_outcome=(
+                "Later sessions stop repeating the missing-command failure."
+            ),
+        )
+        # Patching the shared clock makes the edit old enough for a meaningful
+        # holdout without sleeping. Storage, evidence, guardrails, apply,
+        # journal, backup and ledger paths remain real inside the temp home.
+        with patch.object(time, "time", return_value=applied_at):
+            applied = core.refine_run(
+                MockLlm(proposal), session_id="pre-edit-b",
+            )
+
+        self.assertTrue(applied["success"])
+        self.assertEqual(applied["edits_applied"], 1)
+        artifact = self.root / "skills" / name / "SKILL.md"
+        self.assertTrue(artifact.is_file())
+        self.assertIn(name, artifact.read_text(encoding="utf-8"))
+        self.assertTrue(applied["reversible"])
+        self.assertTrue(applied.get("journal_id"))
+        applied_entry = journal.get_entry(applied["journal_id"])
+        self.assertIsNotNone(applied_entry)
+        self.assertEqual(applied_entry["outcome"], "applied")
+        self.assertEqual(applied_entry["proposal"]["name"], name)
+        self.assertTrue(ledger.load_stats()[name]["fingerprint_grounded"])
+
+        # A non-empty post-edit window is essential: an empty pattern list is
+        # "no recurrence window", not evidence of success. These two unrelated
+        # failures prove the later window was observed while the target stayed
+        # absent.
+        self._seed_sessions(
+            [
+                ("post-edit-a", "user", "Refresh the synthetic cache.", "", now - 7202, 1),
+                ("post-edit-a", "tool", other_error, "terminal", now - 7200, 1),
+                ("post-edit-b", "user", "Refresh it once more.", "", now - 3602, 1),
+                ("post-edit-b", "tool", other_error, "terminal", now - 3600, 1),
+            ],
+            [
+                ("post-edit-a", now - 7300, "cli"),
+                ("post-edit-b", now - 3700, "cli"),
+            ],
+        )
+        usage = sys.modules["tools.skill_usage"]
+        original_usage = usage.get_usage_count
+        usage.get_usage_count = (
+            lambda skill_name, since_ts=None:
+            2 if skill_name == name and since_ts is not None else 0
+        )
+        try:
+            quiet_audit = core.refine_audit()
+            quiet_row = self._audit_row(quiet_audit, name)
+            self.assertTrue(quiet_audit["success"])
+            self.assertTrue(quiet_audit["complete"])
+            self.assertEqual(quiet_row["usage_scope"], "since_exact")
+            self.assertEqual(quiet_row["uses"], 2)
+            self.assertIs(quiet_row["pattern_recurred"], False)
+            self.assertEqual(quiet_row["verdict"], "working")
+            self.assertFalse(quiet_row["externally_modified"])
+            self.assertFalse(quiet_row["attribution_unknown"])
+
+            # Negative sibling: one believable target recurrence after the edit
+            # must invalidate the success verdict for the same applied artifact.
+            connection = sqlite3.connect(self.root / "state.db")
+            try:
+                connection.execute(
+                    "INSERT INTO sessions VALUES (?, ?, ?)",
+                    ("post-edit-regression", now - 120, "cli"),
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "post-edit-regression", "tool", target_error,
+                        "terminal", now - 60, 1,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            recurrence_audit = core.refine_audit()
+            recurrence_row = self._audit_row(recurrence_audit, name)
+        finally:
+            usage.get_usage_count = original_usage
+
+        self.assertTrue(recurrence_audit["success"])
+        self.assertTrue(recurrence_audit["complete"])
+        self.assertIs(recurrence_row["pattern_recurred"], True)
+        self.assertEqual(recurrence_row["verdict"], "did not help")
+        self.assertEqual(
+            recurrence_row["journal_id"], quiet_row["journal_id"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
