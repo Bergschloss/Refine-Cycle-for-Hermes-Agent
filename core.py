@@ -73,6 +73,90 @@ def _strip_untrusted_tags(text: str) -> str:
     return text
 
 
+# An untrusted region is the boundary tag AND everything it encloses. Stripping
+# only the tags -- which is all ``_strip_untrusted_tags`` does, deliberately --
+# leaves the enclosed foreign text in the content that decides both whether a row
+# is a failure and which pattern it belongs to. Measured on a real trajectory
+# (server-A.db, 391 sessions): a ``browser_navigate`` result was the second
+# strongest cross-session pattern, 14 sessions, purely because a fetched page
+# contained error-shaped words. That makes an external page an author of the
+# agent's own durable memory, which is the one thing the boundary exists to
+# prevent. An unterminated opening tag consumes to end of text: a truncated
+# result must not become trusted by losing its closing tag.
+_UNTRUSTED_TOOL_REGION = re.compile(
+    r"<\s*untrusted_tool_result[^>]*>"
+    r".*?"
+    r"(?:<\s*/\s*untrusted_tool_result\s*>|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Refine's own tool result. Its failures land in the trajectory like any other
+# tool's, so without this the plugin mines its own broken model calls as evidence
+# and proposes lessons about itself -- measured as two of the five strongest
+# cross-session patterns (spans of 10 and 9 sessions), one of them under an empty
+# tool_name, which is why the payload shape is checked too and not just the name.
+_REFINE_OWN_TOOL_NAMES = frozenset({"refine_run"})
+
+
+def _strip_untrusted_regions(text: str) -> str:
+    """Remove untrusted regions entirely, tags and enclosed content alike.
+
+    Applied before classification and before fingerprinting, so foreign text can
+    neither admit a row as a failure nor decide which pattern it joins. Rows whose
+    error shape lived only inside the region stop being evidence; a row with a
+    genuine failure of its own outside the region keeps it. This does change the
+    fingerprint of any mixed row, which re-partitions that row's pattern history
+    once -- accepted deliberately, because the alternative is letting a fetched
+    page keep voting on the agent's memory.
+    """
+    previous = None
+    while previous != text:
+        previous = text
+        text = _UNTRUSTED_TOOL_REGION.sub(" ", text)
+    return text
+
+
+def _is_refine_own_result(content: str, tool_name: str) -> bool:
+    """True when the row is refine's own tool result.
+
+    Name first, payload shape second: the same result appears in real
+    trajectories with ``tool_name`` empty, and a name-only check misses it.
+    """
+    if tool_name.strip().lower() in _REFINE_OWN_TOOL_NAMES:
+        return True
+    stripped = content.lstrip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        payload = json.loads(stripped)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    # ``llm_called`` is refine's own field and does not appear in other tools'
+    # results; requiring it alongside ``outcome`` keeps this from matching any
+    # JSON payload that happens to carry an outcome.
+    return "outcome" in payload and "llm_called" in payload
+
+
+def _evidence_text_or_none(raw_content: str, tool_name: str) -> Optional[str]:
+    """The trusted text a failure pattern may be built from, or None to skip.
+
+    The single admission decision for error evidence, shared by the current-session
+    and cross-session collectors so the two cannot drift. Returns text that has
+    already had untrusted regions removed -- callers must fingerprint what this
+    returns, not the raw row, or the removal is cosmetic.
+    """
+    if _is_refine_own_result(raw_content, tool_name):
+        return None
+    trusted = _strip_untrusted_regions(raw_content)
+    if not trusted.strip():
+        return None
+    if not _is_error_content(trusted, tool_name=tool_name):
+        return None
+    return trusted
+
+
 def _escape_foreign_tags(text: str) -> str:
     """Neutralize every tag-like construct before text reaches the model.
 
@@ -1613,10 +1697,14 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             # sent. Verified on the same corpus: classifying raw instead of
             # scrubbed flipped 0 of 2694 rows in either direction.
             raw_content = str(row["content"] or "")
-            content = scrub_text(raw_content)
             tool_name = _one_line(scrub_text(str(row["tool_name"] or "")))[:120]
-            if not _is_error_content(raw_content, tool_name=tool_name):
+            # One admission decision, shared with the cross-session collector:
+            # refine's own results are excluded and untrusted regions removed
+            # BEFORE classification, so neither can make a row into evidence.
+            trusted_raw = _evidence_text_or_none(raw_content, tool_name)
+            if trusted_raw is None:
                 continue
+            content = scrub_text(trusted_raw)
             bounded = (
                 content
                 if len(content) <= 4000
@@ -1787,7 +1875,6 @@ def collect_cross_session_patterns(
                 # ``collect_evidence`` for why the scrubber cannot be trusted to
                 # leave a JSON payload parseable. Only the bool leaves here.
                 raw_content = str(row["content"] or "")
-                content = scrub_text(raw_content)
                 # The session budget is spent on sessions that carry a failure, not
                 # on the newest sessions. Rows arrive newest-first, so admitting a
                 # session on its first row of ANY kind gave all 25 slots to recent
@@ -1800,10 +1887,14 @@ def collect_cross_session_patterns(
                 # from `collect_evidence`. Classifying before admitting costs one
                 # `_is_error_content` per scanned row once the cap is full; the
                 # audit path (max_sessions=None) already pays that on every row.
-                if not _is_error_content(
-                    raw_content, tool_name=str(row["tool_name"] or "")
-                ):
+                # Same shared admission decision as ``collect_evidence`` -- and it
+                # still runs before the session cap, for the reason above.
+                trusted_raw = _evidence_text_or_none(
+                    raw_content, str(row["tool_name"] or "")
+                )
+                if trusted_raw is None:
                     continue
+                content = scrub_text(trusted_raw)
                 # SQL's ``timestamp >= since`` cannot express an upper
                 # bound or reject non-finite/non-positive values, so a
                 # row's membership in THIS horizon still has to be

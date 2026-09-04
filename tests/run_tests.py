@@ -20826,6 +20826,71 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIs(stats["memory:run-meta-a"]["fingerprint_grounded"], True)
         self.assertIs(stats["memory:run-meta-b"]["fingerprint_grounded"], False)
 
+    def test_evidence_admission_excludes_refine_and_untrusted_regions(self):
+        """Only trusted tool failures may influence current or cross-session evidence."""
+        now = time.time()
+        own_result = json.dumps({
+            "success": False, "outcome": "llm_error", "llm_called": True,
+        })
+        ordinary_result = json.dumps({"success": False, "outcome": "failed"})
+        foreign = "ERROR: fetched page says credentials failed"
+        wrapped_only = (
+            '<untrusted_tool_result source="browser">'
+            + foreign
+            + "</untrusted_tool_result>"
+        )
+        mixed = (
+            "ERROR: trusted local process failed "
+            '<untrusted_tool_result source="browser">'
+            + foreign
+            + "</untrusted_tool_result>"
+        )
+        unterminated = (
+            "ordinary prefix <untrusted_tool_result source=\"browser\">"
+            + foreign
+        )
+        # The wrapper appears inside a valid JSON string. Region removal must keep
+        # the JSON parseable, so structured success wins over the foreign error.
+        structured_success = json.dumps({
+            "success": True,
+            "output": wrapped_only,
+        })
+        FakeHost.make_db([
+            ("session", "tool", own_result, "refine_run", now - 7, 1),
+            ("session", "tool", own_result, "", now - 6, 1),
+            ("session", "tool", ordinary_result, "other_tool", now - 5, 1),
+            ("session", "tool", wrapped_only, "browser_navigate", now - 4, 1),
+            ("session", "tool", mixed, "browser_navigate", now - 3, 1),
+            ("session", "tool", unterminated, "browser_navigate", now - 2, 1),
+            ("session", "tool", structured_success, "browser_navigate", now - 1, 1),
+            ("other", "tool", mixed, "browser_navigate", now - 1, 1),
+        ])
+
+        current = core.collect_evidence("session")
+        self.assertEqual(current["error_count"], 2)
+        evidence_only = json.dumps({
+            "tool_errors": current["tool_errors"],
+            "error_patterns": current["error_patterns"],
+        })
+        self.assertIn("trusted local process failed", evidence_only)
+        self.assertIn("outcome", evidence_only)
+        self.assertNotIn(foreign, evidence_only)
+        self.assertNotIn("llm_error", evidence_only)
+
+        cross_session = core.collect_cross_session_patterns(
+            days=7, max_rows=None, max_sessions=None
+        )
+        rendered_cross_session = json.dumps(cross_session)
+        self.assertIn("trusted local process failed", rendered_cross_session)
+        self.assertNotIn(foreign, rendered_cross_session)
+        self.assertNotIn("llm_error", rendered_cross_session)
+        trusted_pattern = next(
+            item for item in cross_session
+            if "trusted local process failed" in item["sample"]
+        )
+        self.assertEqual(trusted_pattern["count"], 2)
+        self.assertEqual(trusted_pattern["sessions_seen"], 2)
+
 
 class SuiteDiscoveryContractTests(unittest.TestCase):
     """Guard against the 08-24 class of failure: a suite that runs ZERO tests.
