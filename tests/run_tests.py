@@ -2685,7 +2685,7 @@ class RefineTests(unittest.TestCase):
         bring an over-length entry under the ceiling, and the stored form is what
         the limit is about."""
         secret = "sk-" + "a" * 40
-        filler = "b" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - 10)
+        filler = "b" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - 11) + " "
         content = filler + secret
         stored = sanitization.scrub_text(content)
         self.assertGreater(len(content), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS)
