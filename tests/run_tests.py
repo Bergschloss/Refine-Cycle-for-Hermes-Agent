@@ -25404,6 +25404,64 @@ class Release0144ContractTests(unittest.TestCase):
             plugin_init._handle_refine_command("rollback malformed")
         invalid.assert_not_called()
 
+    def test_multi_retry_child_is_refused_before_transaction_mutation(self):
+        fingerprint = "abc123abc123"
+        pattern = {
+            "fingerprint": fingerprint, "count": 2, "sessions_seen": 2,
+            "resolution_status": "abandoned", "abandoned_occurrences": 2,
+        }
+        proposal = multi_proposal(
+            {
+                **skill_proposal(
+                    "retry-child",
+                    "# Guidance\n\nRetry the failed command once more.",
+                ),
+                "pattern_fingerprint": fingerprint,
+            },
+            summary="Synthetic retry child",
+        )
+        proposal["pattern_fingerprint"] = fingerprint
+        evidence = {
+            "messages": [
+                {"role": "user", "content": "synthetic request", "tool_name": ""},
+                {"role": "assistant", "content": "synthetic plan", "tool_name": ""},
+                {"role": "tool", "content": "synthetic failure", "tool_name": "terminal"},
+            ],
+            "error_count": 2,
+            "tool_errors": [],
+            "error_patterns": [pattern],
+            "self_correcting_suppressed": 0,
+            "resolved_failure_suppressed": 0,
+            "user_corrections": [],
+            "session_id": "session",
+            "session_id_source": "explicit",
+            "collection_status": "ok",
+            "collection_error": "",
+        }
+        with patch.object(core, "collect_evidence", return_value=evidence), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]), \
+             patch.object(core._llm, "propose", return_value=proposal):
+            result = core.refine_run(MockLlm(), session_id="session")
+        self.assertEqual(result["outcome"], "contradicted_by_trajectory")
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(FakeHost.actions, [])
+        self.assertFalse(list((Path(self._temp.name) / "journal" / "backups").glob("*.bak")))
+
+    def test_operational_contradictions_do_not_promise_unreachable_correction_override(self):
+        existing = "When a command times out, retry the failed command once more."
+        proposed = "When a command timed out, stop retrying and ask for clarification."
+        with patch.object(config, "prompt_notes_enabled", return_value=True), \
+             patch.object(journal, "prompt_note_content_exists", return_value=False), \
+             patch.object(journal, "load_prompt_notes", return_value=[{"content": existing}]), \
+             patch.object(journal, "prompt_note_fingerprint_active", return_value=False):
+            prompt_error = core._validate_proposal(prompt_proposal(proposed))
+        FakeHost.memory_entries = [existing]
+        memory_error = core._memory_duplicate_error(proposed)
+        for error in (prompt_error, memory_error):
+            self.assertIsNotNone(error)
+            self.assertIn("contradicts", error)
+            self.assertNotIn("explicit user correction", error)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

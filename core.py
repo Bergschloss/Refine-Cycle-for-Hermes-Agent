@@ -1784,21 +1784,58 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 previous_was_assistant_response = bool(content.strip())
             elif role == "user":
                 previous_was_assistant_response = False
+        # Resolution must inspect every candidate failure's immediate successors,
+        # not merely the prompt excerpt.  The prompt remains bounded to ``limit``
+        # rows below; for each bounded candidate we read at most six later rows,
+        # so this analysis is complete for the outcome classifier without turning
+        # a long session into unbounded context or persistence.
+        failure_rows_by_order = {
+            row["message_order"]: row for row in failure_rows
+        }
+
+        def resolution_sequence(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+            failure_row = failure_rows_by_order.get(item.get("message_order"))
+            if failure_row is None:
+                return []
+            successors = connection.execute(
+                "SELECT m.rowid AS message_order, m.role, m.content, m.tool_name, m.timestamp "
+                "FROM messages m WHERE m.session_id = ? AND m.active = 1 "
+                "AND m.timestamp > ? AND m.timestamp <= ? "
+                "AND (m.timestamp > ? OR (m.timestamp = ? AND m.rowid > ?)) "
+                "ORDER BY m.timestamp ASC, m.rowid ASC LIMIT ?",
+                (
+                    resolved, _ts_low, _ts_high, failure_row["timestamp"],
+                    failure_row["timestamp"], failure_row["message_order"], 6,
+                ),
+            ).fetchall()
+            sequence = [failure_row, *successors]
+            sanitized: List[Dict[str, Any]] = []
+            for position, row in enumerate(sequence):
+                role = "tool" if position == 0 else _one_line(
+                    scrub_text(str(row["role"] or ""))
+                )[:32].lower()
+                if role not in {"user", "assistant", "tool", "system"}:
+                    role = "unknown"
+                sanitized.append({
+                    "role": role,
+                    "content": scrub_text(str(row["content"] or "")),
+                    "tool_name": _one_line(
+                        scrub_text(str(row["tool_name"] or ""))
+                    )[:120],
+                })
+            return sanitized
+
         _suppressed: Dict[str, int] = {}
         _current_patterns = patterns.extract_patterns(
             error_items, suppressed_out=_suppressed
         )
-        message_indices = {
-            item.get("_message_order"): index for index, item in enumerate(messages)
-        }
         resolution_by_fingerprint: Dict[str, List[str]] = {}
         for item in error_items:
-            index = message_indices.get(item.get("message_order"))
-            if index is None:
-                continue
             fingerprint = patterns.fingerprint(item.get("tool", ""), item.get("content", ""))
+            sequence = resolution_sequence(item)
             resolution_by_fingerprint.setdefault(fingerprint, []).append(
-                _resolution_for_occurrence(messages, index, fingerprint)
+                _resolution_for_occurrence(sequence, 0, fingerprint)
+                if sequence else "unknown"
             )
         resolved_suppressed = 0
         kept_patterns = []
@@ -3025,25 +3062,9 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
             return "Prompt-note store is unavailable"
         if duplicate:
             return "Identical active prompt note already exists"
-        # A narrow bilingual signature catches the measured cross-language
-        # restatement without pretending to translate arbitrary policy prose.
-        for active_note in journal.load_prompt_notes() or []:
-            if not isinstance(active_note, dict):
-                continue
-            relation = _operational_rule_relation(
-                str(active_note.get("content", "")), content
-            )
-            if relation == "duplicate":
-                return "An active prompt note already covers the same operational rule"
-            if relation == "contradiction":
-                return "An active prompt note contradicts this operational rule; an explicit user correction is required"
-        # Item 3: dedup by PATTERN, not only by wording. A note carrying a
-        # fingerprint that an active note already holds addresses a problem
-        # already solved, even when the sentence is reworded. The exact-content
-        # check above stays as the fallback for legacy notes that carry no
-        # fingerprint -- this is an added precise check, not a replacement.
-        # Keyed on the live store, so a note the user deleted no longer blocks
-        # re-learning (its fingerprint is not active).
+        # Item 3: the exact live fingerprint is stronger evidence than a
+        # wording-based operational signature, so retain its established
+        # diagnostic when both guards would refuse the note.
         note_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
         if note_fingerprint:
             fingerprint_active = journal.prompt_note_fingerprint_active(
@@ -3056,6 +3077,18 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
                     "An active prompt note already addresses this pattern "
                     f"fingerprint ({note_fingerprint})"
                 )
+        # A narrow bilingual signature catches the measured cross-language
+        # restatement without pretending to translate arbitrary policy prose.
+        for active_note in journal.load_prompt_notes() or []:
+            if not isinstance(active_note, dict):
+                continue
+            relation = _operational_rule_relation(
+                str(active_note.get("content", "")), content
+            )
+            if relation == "duplicate":
+                return "An active prompt note already covers the same operational rule"
+            if relation == "contradiction":
+                return "An active prompt note contradicts this operational rule"
     else:
         if not name:
             return "Proposal missing name"
@@ -3480,7 +3513,7 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
                 f"({_MEMORY_DUPLICATE_MARKER})"
             )
         if relation == "contradiction":
-            return "An active memory entry contradicts this operational rule; an explicit user correction is required"
+            return "An active memory entry contradicts this operational rule"
         existing_tokens = _memory_token_set(existing)
         score = _jaccard_similarity(proposed_tokens, existing_tokens)
         if score < _MEMORY_DUPLICATE_JACCARD_THRESHOLD:
@@ -4016,24 +4049,35 @@ def _application_evidence_refusal(
         )
 
     shared_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
-    application_fingerprints: List[Tuple[int, str]] = []
+    application_edits: List[Tuple[int, str, Dict[str, Any]]] = []
     if proposal.get("action") == "multi":
         for index, edit in enumerate(proposal.get("edits", [])):
-            if isinstance(edit, dict):
-                application_fingerprints.append((
-                    index,
-                    str(edit.get("pattern_fingerprint", "") or "")
-                    or shared_fingerprint,
-                ))
+            if not isinstance(edit, dict):
+                continue
+            child = dict(edit)
+            fingerprint = str(child.get("pattern_fingerprint", "") or "") or shared_fingerprint
+            if not str(child.get("pattern_fingerprint", "") or ""):
+                child["pattern_fingerprint"] = fingerprint
+            if not str(child.get("reason", "")).strip():
+                child["reason"] = proposal.get("reason", "")
+            if not str(child.get("expected_outcome", "") or "").strip():
+                child["expected_outcome"] = proposal.get("expected_outcome", "")
+            application_edits.append((
+                index,
+                fingerprint,
+                _normalize_edit(
+                    sanitize(child), str(proposal.get("session_id", "") or ""),
+                ),
+            ))
     else:
-        application_fingerprints.append((0, shared_fingerprint))
+        application_edits.append((0, shared_fingerprint, proposal))
 
     patterns_by_fingerprint = {
         str(pattern.get("fingerprint", "") or ""): pattern
         for pattern in all_error_patterns
         if isinstance(pattern, dict) and pattern.get("fingerprint")
     }
-    for index, fingerprint in application_fingerprints:
+    for index, fingerprint, application_edit in application_edits:
         backing_pattern = patterns_by_fingerprint.get(fingerprint)
         if not fingerprint or backing_pattern is None:
             message = (
@@ -4047,7 +4091,8 @@ def _application_evidence_refusal(
             backing_pattern
         )
         contradiction = _proposal_contradicts_resolution(
-            proposal, backing_pattern, explicit_user_correction=explicit_user_correction
+            application_edit, backing_pattern,
+            explicit_user_correction=explicit_user_correction,
         )
         if contradiction:
             return contradiction, (
@@ -4179,14 +4224,21 @@ def _operational_rule_signature(content: str) -> Tuple[frozenset, frozenset, str
     actions = set()
     for tag, words in {
         "command": ("command", "команд"),
-        "timeout": ("timeout", "таймаут"),
+        "timeout": ("timeout", "times out", "timed out", "таймаут"),
         "permission": ("permission", "access", "доступ", "дозвіл"),
         "token": ("token", "токен"),
+        # Permission and token failures are two ways an operator describes the
+        # same access-recovery rule. Keep their individual tags for diagnostics
+        # while adding the shared, deliberately narrow subject for comparison.
+        "authorization": ("permission", "access", "доступ", "дозвіл", "token", "токен"),
         "gateway": ("gateway", "шлюз"),
+        "jules_internal_error": ("jules", "internal error", "internal-error"),
     }.items():
         if any(word in text for word in words):
             subjects.add(tag)
-    if _RESOLUTION_RETRY_RE.search(text):
+    if _RESOLUTION_RETRY_RE.search(text) or re.search(
+        r"\b(?:rerun(?:ning|ned)?)\b", text
+    ):
         actions.add("retry")
     if _RESOLUTION_STOP_RE.search(text):
         actions.add("stop")
@@ -4204,6 +4256,13 @@ def _operational_rule_relation(existing: str, proposed: str) -> Optional[str]:
     proposed_subjects, proposed_actions, proposed_polarity = _operational_rule_signature(proposed)
     if not (existing_subjects & proposed_subjects):
         return None
+    # "Do not rerun without checking first" and "check before rerunning" are
+    # the same guarded retry policy. Their surface polarity differs only because
+    # one phrases the prerequisite as a prohibition; treating it as a conflict
+    # would block the rule already present in durable context.
+    guarded_retry = {"verify", "retry"}
+    if guarded_retry <= existing_actions and guarded_retry <= proposed_actions:
+        return "duplicate"
     if existing_actions & proposed_actions and existing_polarity == proposed_polarity:
         return "duplicate"
     if ({"retry", "stop"} <= (existing_actions | proposed_actions)

@@ -375,6 +375,77 @@ class TestResolutionAndBilingualOperationalRules(UsefulnessBase):
             )
         )
 
+    def test_resolution_survives_a_prompt_window_that_excludes_the_failure(self):
+        rows = [
+            ("user", "Deploy the synthetic service.", None),
+            ("assistant", "I will run deploy-missing.", None),
+            ("tool", '{"output":"deploy-missing: command not found", "exit_code":127}', "terminal"),
+            ("assistant", "I will use deploy-known --staging instead.", None),
+            ("tool", '{"output":"deployment completed", "exit_code":0}', "terminal"),
+        ]
+        rows.extend(("assistant", f"synthetic filler {index}", None) for index in range(61))
+        _seed_session(
+            config.state_db_path(), "resolution-long-corrected", rows,
+            started_at=time.time() - 10_000,
+        )
+        evidence = core.collect_evidence(session_id="resolution-long-corrected")
+        self.assertEqual(len(evidence["messages"]), 60)
+        self.assertEqual(evidence["error_patterns"], [])
+        self.assertEqual(evidence["resolved_failure_suppressed"], 1)
+
+    def test_repeated_then_corrected_failure_stays_eligible_outside_prompt_window(self):
+        rows = [
+            ("user", "Deploy the synthetic service.", None),
+            ("assistant", "I will run deploy-missing.", None),
+            ("tool", '{"output":"deploy-missing: command not found", "exit_code":127}', "terminal"),
+            ("assistant", "Trying the same command again.", None),
+            ("tool", '{"output":"deploy-missing: command not found", "exit_code":127}', "terminal"),
+            ("assistant", "I will use deploy-known --staging instead.", None),
+            ("tool", '{"output":"deployment completed", "exit_code":0}', "terminal"),
+        ]
+        rows.extend(("assistant", f"synthetic filler {index}", None) for index in range(61))
+        _seed_session(
+            config.state_db_path(), "resolution-long-repeated", rows,
+            started_at=time.time() - 10_000,
+        )
+        evidence = core.collect_evidence(session_id="resolution-long-repeated")
+        [pattern] = evidence["error_patterns"]
+        self.assertEqual(pattern["count"], 2)
+        self.assertEqual(pattern["resolution_status"], "repeated")
+        self.assertEqual(pattern["repeated_occurrences"], 1)
+        self.assertEqual(pattern["resolved_occurrences"], 1)
+
+    def test_timeout_inflections_and_check_before_rerun_are_one_rule(self):
+        for text in (
+            "When a command timeout occurs, check timing assumptions before rerunning.",
+            "When a command times out, check timing assumptions before rerunning.",
+            "When a command timed out, check timing assumptions before rerunning.",
+        ):
+            self.assertIn("timeout", core._operational_rule_signature(text)[0])
+        self.assertEqual(
+            core._operational_rule_relation(
+                "When a command times out, do not rerun it without checking timing assumptions first.",
+                "For a command timeout, check timing assumptions before rerunning.",
+            ),
+            "duplicate",
+        )
+
+    def test_permission_token_and_jules_internal_error_stop_rules_match(self):
+        self.assertEqual(
+            core._operational_rule_relation(
+                "After repeated permission failures, stop and ask for access.",
+                "After repeated token failures, stop and ask for a fresh token.",
+            ),
+            "duplicate",
+        )
+        self.assertEqual(
+            core._operational_rule_relation(
+                "When Jules reports an internal error, stop and ask before retrying.",
+                "For an internal error from Jules, stop and ask before retrying.",
+            ),
+            "duplicate",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
