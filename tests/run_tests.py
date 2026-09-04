@@ -2264,6 +2264,17 @@ class RefineTests(unittest.TestCase):
             with self.subTest(safe=safe):
                 self.assertEqual(sanitization.scrub_text(safe), safe)
 
+    def test_fixed_pattern_prefixes_do_not_match_word_suffixes(self):
+        """Tokens like sk- and (sk|rk)_ must not match inside ordinary words like task- or risk-."""
+        for benign in (
+            "jules-create-task-internal-error-stop-retrying",
+            "task-creation-pipeline-retry",
+            "risk-management-assessment-plan",
+            "mask-detection-algorithm-test",
+        ):
+            with self.subTest(benign=benign):
+                self.assertEqual(sanitization.scrub_text(benign), benign)
+
     def test_numeric_metric_values_preserve_only_exact_allowlisted_keys(self):
         raw = (
             "max_tokens=131072 total_tokens: 150000 "

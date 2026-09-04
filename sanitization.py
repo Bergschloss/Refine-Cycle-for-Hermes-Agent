@@ -36,11 +36,11 @@ LINE_BREAK_RE = re.compile(
 
 _FIXED_PATTERNS = [
     re.compile(r"github_pat_[A-Za-z0-9_]+"),
-    re.compile(r"gh[pours]_[A-Za-z0-9]{20,}"),
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"(?<!\w)gh[pours]_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?<!\w)sk-[A-Za-z0-9_-]{20,}"),
     # Stripe issues secret AND restricted keys; only sk_ was covered, so a
     # live restricted key (rk_live_...) went out in the clear (audit 08-02).
-    re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"),
+    re.compile(r"(?<!\w)(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"),
     # Stripe webhook signing secret -- a credential in its own right.
     re.compile(r"whsec_[A-Za-z0-9]{24,}"),
     re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
