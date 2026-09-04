@@ -607,6 +607,10 @@ def _configure_crash_fixture(root, scenario, marker):
     """Install a file-backed synthetic host for true process-death tests."""
     marker = Path(marker)
     FakeHost.reset(root)
+    # Crash recovery tests exercise process durability, not the separate
+    # recurrence policy. Their synthetic DB has one observed session, so set
+    # the fixture's session bar explicitly to one and retain a real fingerprint.
+    FakeHost.entry_config()["apply_min_sessions"] = 1
     config._set_runtime_journal_dir(None)
     core._LAST_SESSION_ID = "session"
     skills_root = root / "crash-skills"
@@ -713,7 +717,9 @@ def _configure_crash_fixture(root, scenario, marker):
 
 
 def _crash_proposal(name="crash-skill"):
-    return skill_proposal(name, "# Guidance\n\nCrash-safe replacement.")
+    proposal = skill_proposal(name, "# Guidance\n\nCrash-safe replacement.")
+    proposal["pattern_fingerprint"] = "31a5b9d36e40"
+    return proposal
 
 
 def _run_crash_child(root, scenario, marker):
@@ -732,6 +738,7 @@ def _run_crash_child(root, scenario, marker):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(old, encoding="utf-8")
         proposal = patch_proposal("crash-skill", new, current_content=old)
+        proposal["pattern_fingerprint"] = "31a5b9d36e40"
         original = journal.prepare_skill_recovery
 
         def stop_after_backup(name):
@@ -870,6 +877,15 @@ class RefineTests(unittest.TestCase):
         # Set to the default test session so existing tests that call refine_run
         # without an explicit session_id find the FakeHost's "session" messages.
         core._LAST_SESSION_ID = "session"
+        # Most legacy RefineTests isolate storage, rollback, and approval
+        # mechanics with deliberately ungrounded proposal fixtures. Keep those
+        # tests focused on their stated mechanism; the apply-evidence policy is
+        # exercised unpatched in its dedicated regression tests below.
+        self._application_gate_patch = patch.object(
+            core, "_application_evidence_refusal", return_value=None
+        )
+        self._application_gate_patch.start()
+        self.addCleanup(self._application_gate_patch.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -7956,7 +7972,8 @@ class RefineTests(unittest.TestCase):
             if plugin_init._AUTO_THREAD_GUARD.locked():
                 plugin_init._AUTO_THREAD_GUARD.release()
 
-    def test_reviewer_approval_reaches_proposal_with_instructions(self):
+    def test_reviewer_approval_reaches_proposal_but_never_applies(self):
+        self._application_gate_patch.stop()
         now = time.time()
         FakeHost.make_db([
             ("session", "user", f"Routine context {index}", "", now - index, 1)
@@ -7976,10 +7993,14 @@ class RefineTests(unittest.TestCase):
             },
             skill_proposal("reviewer-approved"),
         )
+        before = journal.count_today_applied()
         result = core.refine_run(model)
         self.assertTrue(result["success"])
+        self.assertEqual(result["outcome"], "reviewer_only")
+        self.assertEqual(result["edits_applied"], 0)
         self.assertEqual(len(model.calls), 2)
-        self.assertEqual(len(FakeHost.actions), 1)
+        self.assertFalse(FakeHost.actions)
+        self.assertEqual(journal.count_today_applied(), before)
         self.assertIn(reviewer_instructions, model.calls[1]["input"][0].text)
         self.assertIn(
             "=== REVIEWER OUTPUT (UNTRUSTED JSON) ===",
@@ -7988,6 +8009,123 @@ class RefineTests(unittest.TestCase):
         reviewer_records = [entry for entry in journal.entries() if entry["trigger"] == "reviewer"]
         self.assertEqual(len(reviewer_records), 1)
         self.assertIn("Reviewer approved", reviewer_records[0]["reason"])
+        applied_policy_record = journal.get_entry(result["journal_id"])
+        self.assertEqual(applied_policy_record["outcome"], "reviewer_only")
+        self.assertNotIn(applied_policy_record["outcome"], {
+            "no_op", "rejected", "daily_limit_reached",
+        })
+
+    def test_gate_opened_proposal_with_recurrent_evidence_can_apply(self):
+        self._application_gate_patch.stop()
+        fingerprint = "abcdef123456"
+        proposal = skill_proposal("gate-opened-application")
+        proposal["pattern_fingerprint"] = fingerprint
+        evidence = {
+            "messages": [
+                {"role": "user", "content": "one", "tool_name": ""},
+                {"role": "assistant", "content": "two", "tool_name": ""},
+                {"role": "tool", "content": "three", "tool_name": "http"},
+            ],
+            "error_count": 5,
+            "error_patterns": [{
+                "fingerprint": fingerprint, "count": 5, "sessions_seen": 1,
+                "tool": "http", "sample": "request failed",
+            }],
+            "user_corrections": [],
+            "collection_status": "ok",
+        }
+        with patch.object(core, "collect_evidence", return_value=evidence), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]):
+            result = core.refine_run(MockLlm(proposal))
+        self.assertTrue(result["success"])
+        self.assertNotEqual(result.get("outcome"), "reviewer_only")
+        self.assertEqual(result["edits_applied"], 1)
+        self.assertEqual(len(FakeHost.actions), 1)
+
+    def test_apply_bar_requires_recurrence_and_refuses_unbacked_multi_edits(self):
+        self._application_gate_patch.stop()
+        def run_with_pattern(
+            proposal, *, count, sessions, explicit_session=False,
+            proposal_fingerprint=True,
+        ):
+            fingerprint = "bcdefa123456"
+            if proposal_fingerprint:
+                proposal = dict(proposal, pattern_fingerprint=fingerprint)
+            evidence = {
+                "messages": [
+                    {"role": "user", "content": "one", "tool_name": ""},
+                    {"role": "assistant", "content": "two", "tool_name": ""},
+                    {"role": "tool", "content": "three", "tool_name": "http"},
+                ],
+                "error_count": count,
+                "error_patterns": [{
+                    "fingerprint": fingerprint, "count": count, "sessions_seen": sessions,
+                    "tool": "http", "sample": "request failed",
+                }],
+                "user_corrections": [],
+                "collection_status": "ok",
+            }
+            with patch.object(core, "collect_evidence", return_value=evidence), \
+                 patch.object(core, "collect_cross_session_patterns", return_value=[]):
+                return core.refine_run(
+                    MockLlm(proposal), session_id="session",
+                    explicit_session=explicit_session,
+                )
+
+        two_sessions = run_with_pattern(
+            skill_proposal("two-session-application"), count=2, sessions=2,
+        )
+        self.assertTrue(two_sessions["success"])
+        self.assertEqual(two_sessions["edits_applied"], 1)
+
+        before_thin = journal.count_today_applied()
+        thin = run_with_pattern(
+            skill_proposal("thin-evidence-application"), count=2, sessions=1,
+        )
+        self.assertTrue(thin["success"])
+        self.assertEqual(thin["outcome"], "thin_evidence")
+        self.assertEqual(thin["edits_applied"], 0)
+        self.assertEqual(journal.count_today_applied(), before_thin)
+        self.assertFalse(FakeHost.actions[-1]["name"] == "thin-evidence-application")
+        self.assertEqual(journal.get_entry(thin["journal_id"])["outcome"], "thin_evidence")
+
+        no_fingerprint = skill_proposal("missing-fingerprint-application")
+        no_fingerprint.pop("pattern_fingerprint")
+        missing = run_with_pattern(
+            no_fingerprint, count=5, sessions=1, proposal_fingerprint=False,
+        )
+        self.assertTrue(missing["success"])
+        self.assertEqual(missing["outcome"], "unbacked_pattern")
+        self.assertEqual(missing["edits_applied"], 0)
+        self.assertEqual(journal.get_entry(missing["journal_id"])["outcome"], "unbacked_pattern")
+
+        five_occurrences = run_with_pattern(
+            skill_proposal("five-occurrence-application"), count=5, sessions=1,
+        )
+        self.assertTrue(five_occurrences["success"])
+        self.assertEqual(five_occurrences["edits_applied"], 1)
+
+        named_thin = run_with_pattern(
+            skill_proposal("named-thin-evidence"), count=2, sessions=1,
+            explicit_session=True,
+        )
+        self.assertTrue(named_thin["success"])
+        self.assertEqual(named_thin["outcome"], "explicit_session_thin_evidence")
+        self.assertIn("cannot contribute cross-session evidence", named_thin["message"])
+        self.assertEqual(named_thin["edits_applied"], 0)
+
+        backed = skill_proposal("backed-multi-edit")
+        backed["pattern_fingerprint"] = "bcdefa123456"
+        unbacked = skill_proposal("unbacked-multi-edit")
+        unbacked["pattern_fingerprint"] = "fedcba654321"
+        multi = multi_proposal(backed, unbacked)
+        multi_result = run_with_pattern(multi, count=5, sessions=1)
+        self.assertTrue(multi_result["success"])
+        self.assertEqual(multi_result["outcome"], "unbacked_pattern")
+        self.assertEqual(multi_result["edits_applied"], 0)
+        self.assertNotIn("backed-multi-edit", FakeHost.skills)
+        self.assertNotIn("unbacked-multi-edit", FakeHost.skills)
+        self.assertEqual(journal.get_entry(multi_result["journal_id"])["outcome"], "unbacked_pattern")
 
     def test_reviewer_json_mode_fallback_and_snake_case_key(self):
         """Wave 2.8: reviewer retries with json_mode on schema failure and accepts should_refine."""
@@ -10043,6 +10181,7 @@ class RefineTests(unittest.TestCase):
             "max_edits_per_day": 1,
             "max_edits_per_run": 1,
             "min_signal_required": False,
+            "apply_min_sessions": 1,
             "cross_session_enabled": False,
         })
         ready_paths = [self.root / f"ready-{label}" for label in ("a", "b")]
@@ -10088,7 +10227,7 @@ class ProcessLlm(PluginLlm):
         return Result({
             "action": "create", "kind": "skill", "name": name,
             "content": content, "reason": "Cross-process budget proof",
-            "evidence": ["shared temporary root"], "pattern_fingerprint": "deadbeef1234",
+            "evidence": ["shared temporary root"], "pattern_fingerprint": "31a5b9d36e40",
         })
 plugin_module.PluginLlm = PluginLlm
 plugin_module.PluginLlmInput = PluginLlmInput
@@ -10109,6 +10248,7 @@ cli_config.load_config = lambda: {"plugins": {"entries": {"refine": {
     "max_edits_per_day": 1,
     "max_edits_per_run": 1,
     "min_signal_required": False,
+    "apply_min_sessions": 1,
     "cross_session_enabled": False,
 }}}}
 cli.config = cli_config
@@ -23117,6 +23257,11 @@ class NotifyCallSiteTests(unittest.TestCase):
         FakeHost.reset(self.root)
         config._set_runtime_journal_dir(None)
         core._LAST_SESSION_ID = "session"
+        self._application_gate_patch = patch.object(
+            core, "_application_evidence_refusal", return_value=None
+        )
+        self._application_gate_patch.start()
+        self.addCleanup(self._application_gate_patch.stop)
 
     def tearDown(self):
         self.temp.cleanup()

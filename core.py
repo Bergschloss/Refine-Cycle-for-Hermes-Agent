@@ -3796,6 +3796,94 @@ def _terminal_result(
     return base
 
 
+def _application_evidence_refusal(
+    proposal: Dict[str, Any],
+    all_error_patterns: List[Dict[str, Any]],
+    *,
+    signal_path: str,
+    explicit_session: bool,
+) -> Optional[Tuple[str, str]]:
+    """Return a durable non-mutation outcome when a proposal lacks apply evidence.
+
+    The proposal signal gate is intentionally cheaper: it decides whether an LLM
+    call can be useful. This later gate decides whether its answer may change
+    future agent context. Every transaction child is checked before the first
+    backup or host mutation, including children that inherit the top-level
+    fingerprint.
+    """
+    if proposal.get("action") == "no_op":
+        return None
+    if signal_path == "reviewer_approved":
+        return (
+            "reviewer_only",
+            "Proposal was generated from reviewer fallback and deliberately not "
+            "applied; reviewer approval is advisory only.",
+        )
+
+    shared_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
+    application_fingerprints: List[Tuple[int, str]] = []
+    if proposal.get("action") == "multi":
+        for index, edit in enumerate(proposal.get("edits", [])):
+            if isinstance(edit, dict):
+                application_fingerprints.append((
+                    index,
+                    str(edit.get("pattern_fingerprint", "") or "")
+                    or shared_fingerprint,
+                ))
+    else:
+        application_fingerprints.append((0, shared_fingerprint))
+
+    patterns_by_fingerprint = {
+        str(pattern.get("fingerprint", "") or ""): pattern
+        for pattern in all_error_patterns
+        if isinstance(pattern, dict) and pattern.get("fingerprint")
+    }
+    for index, fingerprint in application_fingerprints:
+        backing_pattern = patterns_by_fingerprint.get(fingerprint)
+        if not fingerprint or backing_pattern is None:
+            message = (
+                "Proposal was not applied: its pattern fingerprint was not observed "
+                "in this refinement evidence."
+            )
+            if proposal.get("action") == "multi":
+                message += f" Unbacked edit index: {index}."
+            return "unbacked_pattern", message
+        try:
+            sessions_seen = max(0, int(backing_pattern.get("sessions_seen", 0)))
+        except (TypeError, ValueError):
+            sessions_seen = 0
+        try:
+            occurrences = max(0, int(backing_pattern.get("count", 0)))
+        except (TypeError, ValueError):
+            occurrences = 0
+        if (
+            sessions_seen < config.apply_min_sessions()
+            and occurrences < config.apply_min_occurrences()
+        ):
+            outcome = (
+                "explicit_session_thin_evidence"
+                if explicit_session else "thin_evidence"
+            )
+            if explicit_session:
+                message = (
+                    "Proposal was not applied: the named historical-session route "
+                    "cannot contribute cross-session evidence, and this pattern has "
+                    f"only {occurrences} occurrence(s), below the apply minimum of "
+                    f"{config.apply_min_occurrences()}."
+                )
+            else:
+                message = (
+                    "Proposal was not applied: the cited failure was observed in "
+                    f"{sessions_seen} session(s) and {occurrences} occurrence(s); "
+                    f"applying requires at least {config.apply_min_sessions()} sessions "
+                    f"or {config.apply_min_occurrences()} occurrences."
+                )
+            if proposal.get("action") == "multi":
+                message += f" Thin-evidence edit index: {index}."
+            return outcome, message
+    return None
+
+
 def record_evidence_failure(
     session_id: str,
     collection_status: str,
@@ -5413,6 +5501,31 @@ def _refine_once(
                 "would_apply": not would_reject,
                 "guardrail_error": would_reject,
             },
+        )
+
+    # The signal gate controls whether it is worth asking for a proposal; it is
+    # deliberately weaker than the application bar. This common point is after
+    # dry-run (which must remain a complete preview) and before either mutation
+    # path, so reviewer-only, single-edit, and multi-edit proposals share it.
+    _apply_decision = _application_evidence_refusal(
+        proposal,
+        all_error_patterns,
+        signal_path=_signal_path,
+        explicit_session=explicit_session,
+    )
+    if _apply_decision is not None:
+        _apply_outcome, _apply_message = _apply_decision
+        return _terminal_result(
+            outcome=_apply_outcome,
+            success=True,
+            message=_apply_message,
+            trigger=trigger,
+            safe_reason=safe_reason,
+            session=session,
+            proposal=proposal,
+            llm_meta=_run_llm_meta,
+            evidence=evidence_summary,
+            extra={"llm_called": True, "edits_applied": 0, "reversible": False},
         )
 
     if proposal.get("action") == "multi":

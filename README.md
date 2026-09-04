@@ -761,7 +761,9 @@ All keys live under `plugins.entries.refine`:
 | `history_max_entries` | int | `20` | Recent create/patch outcomes fed back into a proposal prompt. |
 | `min_signal_required` | bool | `true` | Require a signal before the proposal call; may enable reviewer fallback. |
 | `min_pattern_count` | int | `2` | Repeats before a failure counts as a mechanical signal. |
-| `reviewer_fallback_enabled` | bool | `true` | Allow one reviewer call when the mechanical gate finds nothing. |
+| `apply_min_sessions` | int | `2` | Distinct sessions required before a proposed edit may be applied. |
+| `apply_min_occurrences` | int | `5` | Failure occurrences required before a proposed edit may be applied. |
+| `reviewer_fallback_enabled` | bool | `true` | Allow one reviewer call when the mechanical gate finds nothing; its approved proposal is advisory and is never applied. |
 | `reviewer_min_messages` | int | `20` | Minimum session size for reviewer fallback. |
 | `reviewer_cooldown_minutes` | int | `60` | Minimum durable gap between reviewer decisions. |
 | `proposer_subagent_enabled` | bool | `true` | Produce proposals via a read-only subagent that can open skill bodies before deciding. Requires a bound parent turn; without one the structured call is the fallback either way. |

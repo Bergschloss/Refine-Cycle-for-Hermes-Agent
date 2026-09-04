@@ -340,6 +340,16 @@ def min_pattern_count() -> int:
     return get_int("min_pattern_count", 2, min_val=1)
 
 
+def apply_min_sessions() -> int:
+    """Distinct observed sessions required before an edit may be applied."""
+    return get_int("apply_min_sessions", 2, min_val=1)
+
+
+def apply_min_occurrences() -> int:
+    """Observed failure occurrences required before an edit may be applied."""
+    return get_int("apply_min_occurrences", 5, min_val=1)
+
+
 def min_signal_required() -> bool:
     """Skip the LLM call entirely when nothing repeated and nothing was corrected."""
     return get_bool("min_signal_required", True)
