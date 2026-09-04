@@ -1608,6 +1608,9 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         # dict, zero included: "no suppression" and "field absent" must not
         # look alike to a reader of a journaled summary.
         "self_correcting_suppressed": 0,
+        # Failures with a bounded, explicit successful recovery are counted
+        # separately from tool-supplied self-correcting errors.
+        "resolved_failure_suppressed": 0,
         "user_corrections": [],
         "session_id": "",
         "session_id_source": "unknown",
@@ -1692,7 +1695,7 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         # most `FORMAT_PATTERNS_LIMIT` patterns, so the prompt does not grow — only
         # the counts stop being wrong.
         failure_sql = (
-            "SELECT m.content, m.tool_name, m.timestamp FROM messages m "
+            "SELECT m.rowid AS message_order, m.content, m.tool_name, m.timestamp FROM messages m "
             "LEFT JOIN sessions s ON s.id = m.session_id "
             "WHERE m.session_id = ? AND m.active = 1 AND m.role = 'tool'"
             " AND m.timestamp > ? AND m.timestamp <= ?"
@@ -1752,6 +1755,7 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 # the occurrence is still real evidence, it just contributes
                 # no first_ts/last_ts. See _row_ts.
                 "ts": _row_ts(row["timestamp"]),
+                "message_order": row["message_order"],
             })
 
         for row in chronological_rows:
@@ -1765,7 +1769,10 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 scrub_text(str(row["tool_name"] or ""))
             )[:120]
             shown = content[:400] + ("…" if len(content) > 400 else "")
-            messages.append({"role": role, "content": shown, "tool_name": tool_name})
+            messages.append({
+                "role": role, "content": shown, "tool_name": tool_name,
+                "_message_order": row["message_order"],
+            })
             # Tool failures are collected above, over the whole session; collecting
             # them here as well would count every windowed failure twice.
             if role == "user" and _is_correction(
@@ -1781,12 +1788,60 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         _current_patterns = patterns.extract_patterns(
             error_items, suppressed_out=_suppressed
         )
+        message_indices = {
+            item.get("_message_order"): index for index, item in enumerate(messages)
+        }
+        resolution_by_fingerprint: Dict[str, List[str]] = {}
+        for item in error_items:
+            index = message_indices.get(item.get("message_order"))
+            if index is None:
+                continue
+            fingerprint = patterns.fingerprint(item.get("tool", ""), item.get("content", ""))
+            resolution_by_fingerprint.setdefault(fingerprint, []).append(
+                _resolution_for_occurrence(messages, index, fingerprint)
+            )
+        resolved_suppressed = 0
+        kept_patterns = []
+        for pattern in _current_patterns:
+            statuses = resolution_by_fingerprint.get(pattern.get("fingerprint", ""), [])
+            corrected = statuses.count("corrected")
+            abandoned = statuses.count("abandoned")
+            repeated = statuses.count("repeated")
+            unknown = statuses.count("unknown")
+            pattern.update({
+                "resolved_occurrences": corrected + abandoned,
+                "abandoned_occurrences": abandoned,
+                "repeated_occurrences": repeated,
+                "unknown_occurrences": unknown,
+                "resolution_status": (
+                    "repeated" if repeated else (
+                        "mixed" if (corrected + abandoned) and unknown else (
+                            "abandoned" if abandoned and not corrected and not unknown else (
+                                "corrected" if corrected and not unknown else "unknown"
+                            )
+                        )
+                    )
+                ),
+            })
+            # A user correction is explicit contrary evidence; do not suppress a
+            # pattern it may be correcting.
+            if statuses and not corrections and all(
+                status in {"corrected", "abandoned"} for status in statuses
+            ):
+                resolved_suppressed += int(pattern.get("count", 0) or 0)
+                continue
+            kept_patterns.append(pattern)
+        safe_messages = [
+            {key: value for key, value in item.items() if key != "_message_order"}
+            for item in messages[-limit:]
+        ]
         return {
-            "messages": messages[-limit:],
+            "messages": safe_messages,
             "error_count": len(tool_errors),
             "tool_errors": tool_errors[-10:],
-            "error_patterns": _current_patterns,
+            "error_patterns": kept_patterns,
             "self_correcting_suppressed": int(_suppressed.get("self_correcting", 0)),
+            "resolved_failure_suppressed": resolved_suppressed,
             "user_corrections": corrections[-5:],
             "session_id": resolved,
             "session_id_source": how,
@@ -2970,6 +3025,18 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
             return "Prompt-note store is unavailable"
         if duplicate:
             return "Identical active prompt note already exists"
+        # A narrow bilingual signature catches the measured cross-language
+        # restatement without pretending to translate arbitrary policy prose.
+        for active_note in journal.load_prompt_notes() or []:
+            if not isinstance(active_note, dict):
+                continue
+            relation = _operational_rule_relation(
+                str(active_note.get("content", "")), content
+            )
+            if relation == "duplicate":
+                return "An active prompt note already covers the same operational rule"
+            if relation == "contradiction":
+                return "An active prompt note contradicts this operational rule; an explicit user correction is required"
         # Item 3: dedup by PATTERN, not only by wording. A note carrying a
         # fingerprint that an active note already holds addresses a problem
         # already solved, even when the sentence is reworded. The exact-content
@@ -3406,6 +3473,14 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
         logger.warning("Cannot read memory store for duplicate check: %s", scrub_text(str(exc)))
         return f"{_MEMORY_STORE_UNAVAILABLE_MARKER} for the duplicate check"
     for existing in entries:
+        relation = _operational_rule_relation(str(existing), content)
+        if relation == "duplicate":
+            return (
+                "An active memory entry already covers the same operational rule "
+                f"({_MEMORY_DUPLICATE_MARKER})"
+            )
+        if relation == "contradiction":
+            return "An active memory entry contradicts this operational rule; an explicit user correction is required"
         existing_tokens = _memory_token_set(existing)
         score = _jaccard_similarity(proposed_tokens, existing_tokens)
         if score < _MEMORY_DUPLICATE_JACCARD_THRESHOLD:
@@ -3921,6 +3996,7 @@ def _application_evidence_refusal(
     *,
     signal_path: str,
     explicit_session: bool,
+    explicit_user_correction: bool = False,
 ) -> Optional[Tuple[str, str]]:
     """Return a durable non-mutation outcome when a proposal lacks apply evidence.
 
@@ -3970,6 +4046,14 @@ def _application_evidence_refusal(
         sessions_seen, occurrences = _pattern_sessions_and_occurrences(
             backing_pattern
         )
+        contradiction = _proposal_contradicts_resolution(
+            proposal, backing_pattern, explicit_user_correction=explicit_user_correction
+        )
+        if contradiction:
+            return contradiction, (
+                "Proposal was not applied: it prescribes retrying although the "
+                "observed trajectory stopped retrying and made alternate progress."
+            )
         if not _pattern_meets_apply_bar(backing_pattern):
             outcome = (
                 "explicit_session_thin_evidence"
@@ -4038,6 +4122,106 @@ def _reviewer_cooldown_elapsed() -> bool:
         return True
     return time.time() - last_review >= config.reviewer_cooldown_minutes() * 60
 
+
+
+_RESOLUTION_RETRY_RE = re.compile(r"\b(?:retry|rerun|try again|повтор(?:и|ювати|іть)|спробуй(?:те)? ще)\b", re.IGNORECASE)
+_RESOLUTION_STOP_RE = re.compile(r"\b(?:stop(?: retrying)?|do not retry|abandon|switch|alternate|не повтор(?:юй|ювати|юйте)|припини)\b", re.IGNORECASE)
+
+
+def _resolution_for_occurrence(
+    messages: List[Dict[str, Any]], failure_index: int, fingerprint: str, *, lookahead: int = 6
+) -> str:
+    """Classify one sanitized failure by its bounded immediate outcome.
+
+    The caller supplies only database-egress-scrubbed messages. A later user turn
+    ends the observation window, so this cannot attribute a future task's success
+    to the earlier failure. ``repeated`` wins over a later success because it is
+    evidence that the first action did not repair the failure.
+    """
+    changed_action = False
+    abandoned = False
+    upper = min(len(messages), failure_index + 1 + max(0, lookahead))
+    for message in messages[failure_index + 1:upper]:
+        role = str(message.get("role", "")).lower()
+        if role == "user":
+            break
+        content = str(message.get("content", ""))
+        if role == "assistant" and content.strip():
+            if _RESOLUTION_STOP_RE.search(content):
+                abandoned = True
+            else:
+                changed_action = True
+            continue
+        if role != "tool":
+            continue
+        tool_name = str(message.get("tool_name", ""))
+        # Successful results are intentionally excluded by the evidence choke
+        # point, but still resolve the preceding already-scrubbed failure.
+        status = _structured_error_status(content, tool_name=tool_name)
+        if status is False:
+            if abandoned:
+                return "abandoned"
+            if changed_action:
+                return "corrected"
+            continue
+        trusted = _evidence_text_or_none(content, tool_name)
+        if trusted is None:
+            continue
+        if patterns.fingerprint(tool_name, trusted) == fingerprint:
+            return "repeated"
+    return "unknown"
+
+
+def _operational_rule_signature(content: str) -> Tuple[frozenset, frozenset, str]:
+    """Return conservative bilingual subject/action tags for operational rules."""
+    text = content.casefold()
+    subjects = set()
+    actions = set()
+    for tag, words in {
+        "command": ("command", "команд"),
+        "timeout": ("timeout", "таймаут"),
+        "permission": ("permission", "access", "доступ", "дозвіл"),
+        "token": ("token", "токен"),
+        "gateway": ("gateway", "шлюз"),
+    }.items():
+        if any(word in text for word in words):
+            subjects.add(tag)
+    if _RESOLUTION_RETRY_RE.search(text):
+        actions.add("retry")
+    if _RESOLUTION_STOP_RE.search(text):
+        actions.add("stop")
+    if re.search(r"\b(?:verify|check|перевір)\w*\b", text):
+        actions.add("verify")
+    if re.search(r"\b(?:ask|clarif|уточн|запитай)\w*\b", text):
+        actions.add("ask")
+    polarity = "negative" if "stop" in actions or re.search(r"\b(?:not|never|не|ні)\b", text) else "positive"
+    return frozenset(subjects), frozenset(actions), polarity
+
+
+def _operational_rule_relation(existing: str, proposed: str) -> Optional[str]:
+    """Return duplicate/contradiction only for a measured, shared rule subject."""
+    existing_subjects, existing_actions, existing_polarity = _operational_rule_signature(existing)
+    proposed_subjects, proposed_actions, proposed_polarity = _operational_rule_signature(proposed)
+    if not (existing_subjects & proposed_subjects):
+        return None
+    if existing_actions & proposed_actions and existing_polarity == proposed_polarity:
+        return "duplicate"
+    if ({"retry", "stop"} <= (existing_actions | proposed_actions)
+            or (existing_actions == proposed_actions and existing_polarity != proposed_polarity)):
+        return "contradiction"
+    return None
+
+
+def _proposal_contradicts_resolution(
+    proposal: Dict[str, Any], backing_pattern: Dict[str, Any], *, explicit_user_correction: bool = False
+) -> Optional[str]:
+    """Reject retry lessons when the observed successful policy was rerouting."""
+    if explicit_user_correction or backing_pattern.get("resolution_status") != "abandoned":
+        return None
+    content = " ".join(str(proposal.get(key, "")) for key in ("content", "reason", "expected_outcome"))
+    if "retry" in _operational_rule_signature(content)[1]:
+        return "contradicted_by_trajectory"
+    return None
 
 def _render_evidence_text(evidence: Dict[str, Any]) -> str:
     """Render collected messages into the prompt evidence block.
@@ -5096,7 +5280,15 @@ def _refine_once(
     # that were actually read. A window that could not be read at all
     # (cross-session collection disabled, or the DB unavailable) contributes
     # nothing and is reported by its own existing signals, not by this field.
-    _evidence_suppression = {"self_correcting_suppressed": _suppressed_total}
+    _evidence_suppression = {
+        "self_correcting_suppressed": _suppressed_total,
+        # Temporal recovery is not a tool-provided self-correction. Keep a
+        # separate count so operations can tell a quiet pass from a trajectory
+        # that repaired itself with a changed successful action.
+        "resolved_failure_suppressed": int(
+            evidence.get("resolved_failure_suppressed", 0) or 0
+        ),
+    }
     all_error_patterns = patterns.merge_patterns(
         evidence.get("error_patterns", []), cross_session_patterns
     )
@@ -5705,6 +5897,7 @@ def _refine_once(
         all_error_patterns,
         signal_path=_signal_path,
         explicit_session=explicit_session,
+        explicit_user_correction=bool(corrections),
     )
     if _apply_decision is not None:
         _apply_outcome, _apply_message = _apply_decision
@@ -5716,7 +5909,8 @@ def _refine_once(
             safe_reason=safe_reason,
             session=session,
             proposal=proposal,
-            llm_meta=_run_llm_meta,
+            llm_meta=({**_run_llm_meta, "result_code": _apply_outcome}
+                      if _apply_outcome == "contradicted_by_trajectory" else _run_llm_meta),
             evidence=evidence_summary,
             extra={"llm_called": True, "edits_applied": 0, "reversible": False},
         )

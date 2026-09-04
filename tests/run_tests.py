@@ -25336,5 +25336,74 @@ class InstallerMemoryBudgetTests(unittest.TestCase):
         )
 
 
+class Release0144ContractTests(unittest.TestCase):
+    """Release contracts that must run in the monolithic CI suite."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory(prefix="refine-0144-")
+        FakeHost.reset(Path(self._temp.name))
+        config._set_runtime_journal_dir(None)
+        core._LAST_SESSION_ID = "session"
+
+    def tearDown(self):
+        self._temp.cleanup()
+
+    def test_budget_default_and_controlled_override_remain_distinct(self):
+        entry = FakeHost.entry_config()
+        old = entry.get("max_edits_per_day")
+        try:
+            entry.pop("max_edits_per_day", None)
+            self.assertEqual(config.max_edits_per_day(), 3)
+            for configured in (10, 3, 2, 1):
+                entry["max_edits_per_day"] = configured
+                self.assertEqual(config.max_edits_per_day(), configured)
+        finally:
+            if old is None:
+                entry.pop("max_edits_per_day", None)
+            else:
+                entry["max_edits_per_day"] = old
+
+    def test_trajectory_refusal_is_distinct_and_reviewer_cannot_bypass_it(self):
+        proposal = {
+            "action": "create", "content": "Retry the failed command once more.",
+            "pattern_fingerprint": "abc123abc123",
+        }
+        pattern = {
+            "fingerprint": "abc123abc123", "count": 2, "sessions_seen": 2,
+            "resolution_status": "abandoned", "abandoned_occurrences": 2,
+        }
+        self.assertEqual(
+            core._application_evidence_refusal(
+                proposal, [pattern], signal_path="gate_disabled", explicit_session=False,
+            )[0],
+            "contradicted_by_trajectory",
+        )
+        self.assertEqual(
+            core._application_evidence_refusal(
+                proposal, [pattern], signal_path="reviewer_approved", explicit_session=False,
+            )[0],
+            "reviewer_only",
+        )
+        self.assertIsNone(
+            core._application_evidence_refusal(
+                proposal, [pattern], signal_path="gate_disabled", explicit_session=False,
+                explicit_user_correction=True,
+            )
+        )
+
+    def test_registered_rollback_command_is_the_public_rollback_path(self):
+        with patch.object(
+            plugin_init.core,
+            "refine_rollback",
+            return_value={"success": True, "message": "restored"},
+        ) as rollback:
+            response = plugin_init._handle_refine_command("rollback abcdef123456")
+        rollback.assert_called_once_with("abcdef123456")
+        self.assertIn("Rollback abcdef123456", response)
+        with patch.object(plugin_init.core, "refine_rollback") as invalid:
+            plugin_init._handle_refine_command("rollback malformed")
+        invalid.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -7,6 +7,7 @@ Run: python -m tests.test_usefulness  (from the plugin repo root)
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -289,6 +290,90 @@ class TestExtractedHelpersDirect(unittest.TestCase):
         self.assertIsInstance(result, dict)
         self.assertTrue(result["success"])
         self.assertFalse(result["llm_called"])
+
+
+class TestResolutionAndBilingualOperationalRules(UsefulnessBase):
+    """Synthetic regressions for the 0.14.4 usefulness findings only."""
+
+    def _evidence(self, rows):
+        _seed_session(
+            config.state_db_path(),
+            "resolution-synthetic",
+            rows,
+            started_at=time.time() - 600,
+        )
+        return core.collect_evidence(session_id="resolution-synthetic")
+
+    def test_resolved_failure_is_not_offered_as_a_lesson(self):
+        evidence = self._evidence([
+            ("user", "Deploy the synthetic service.", None),
+            ("assistant", "I will run deploy-missing.", None),
+            ("tool", '{"output":"deploy-missing: command not found", "exit_code":127}', "terminal"),
+            ("assistant", "I will use deploy-known --staging instead.", None),
+            ("tool", '{"output":"deployment completed", "exit_code":0}', "terminal"),
+        ])
+        self.assertEqual(evidence["error_patterns"], [])
+        self.assertEqual(evidence["resolved_failure_suppressed"], 1)
+
+    def test_unresolved_recurrence_remains_eligible(self):
+        evidence = self._evidence([
+            ("user", "Deploy the synthetic service.", None),
+            ("assistant", "I will run deploy-missing.", None),
+            ("tool", '{"output":"deploy-missing: command not found", "exit_code":127}', "terminal"),
+            ("assistant", "Trying the same command again.", None),
+            ("tool", '{"output":"deploy-missing: command not found", "exit_code":127}', "terminal"),
+        ])
+        patterns_found = evidence["error_patterns"]
+        self.assertEqual(len(patterns_found), 1)
+        self.assertEqual(patterns_found[0]["count"], 2)
+        self.assertEqual(patterns_found[0]["resolution_status"], "repeated")
+
+    def test_retry_proposal_is_rejected_when_trajectory_abandoned_retries(self):
+        pattern = {
+            "fingerprint": "abc123abc123", "count": 2, "sessions_seen": 2,
+            "resolution_status": "abandoned", "abandoned_occurrences": 2,
+        }
+        retry = {"action": "create", "content": "Retry the failed command once more."}
+        stop = {"action": "create", "content": "Stop retrying and use an alternate command."}
+        self.assertEqual(
+            core._proposal_contradicts_resolution(retry, pattern),
+            "contradicted_by_trajectory",
+        )
+        self.assertIsNone(core._proposal_contradicts_resolution(stop, pattern))
+        self.assertIsNone(
+            core._proposal_contradicts_resolution(
+                retry, pattern, explicit_user_correction=True
+            )
+        )
+
+    def test_cross_language_active_rule_blocks_same_stop_action(self):
+        self.assertEqual(
+            core._operational_rule_relation(
+                "Не повторюй команду після command not found; перейди на інший шлях.",
+                "For command-not-found failures, stop retrying and use an alternate command.",
+            ),
+            "duplicate",
+        )
+
+    def test_explicit_user_correction_can_override_conflicting_rule(self):
+        pattern = {
+            "fingerprint": "abc123abc123", "count": 2, "sessions_seen": 2,
+            "resolution_status": "abandoned", "abandoned_occurrences": 2,
+        }
+        retry = {"action": "create", "content": "Retry the command after the user asks to retry."}
+        self.assertIsNone(
+            core._proposal_contradicts_resolution(
+                retry, pattern, explicit_user_correction=True
+            )
+        )
+
+    def test_unrelated_bilingual_rules_do_not_collide(self):
+        self.assertIsNone(
+            core._operational_rule_relation(
+                "Не повторюй команду після command not found.",
+                "For gateway timeouts, verify the endpoint before retrying.",
+            )
+        )
 
 
 if __name__ == "__main__":

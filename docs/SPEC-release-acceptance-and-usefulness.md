@@ -76,3 +76,15 @@ To verify Gate 3 against real historical dialogues:
 3. Run the proposer model (`gpt-5.6-luna-900k` on server or Hermes LLM route) against each case.
 4. Grade each proposal against the 5 Quality Principles.
 5. Verify dry-run application, journal logging, and rollback mechanics.
+
+
+## 0.14.4 release clarification
+
+The production default is **3 edits per day**. Controlled test and corpus-replay
+configuration may explicitly select a higher limit (for example, 10); Refine must
+honour that operator-selected value and must not clamp it to the production default.
+
+Rollback is deliberately an explicit human command, not a model tool. Verify a
+successful lifecycle through the command registered by Hermes: `/<resolved-command-name>
+rollback <journal_id>` (or in-process with `_handle_refine_command("rollback <journal_id>")`).
+When Hermes owns `/refine`, the plugin's resolved command is `/refine-cycle`.

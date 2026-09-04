@@ -907,4 +907,13 @@ def format_patterns(
                 fp=scrub_text(str(entry.get("fingerprint", ""))),
             )
         )
+        if "resolution_status" in entry:
+            lines.append(
+                "    resolution: corrected={corrected} abandoned={abandoned} repeated={repeated} unknown={unknown}".format(
+                    corrected=max(0, int(entry.get("resolved_occurrences", 0) or 0) - int(entry.get("abandoned_occurrences", 0) or 0)),
+                    abandoned=max(0, int(entry.get("abandoned_occurrences", 0) or 0)),
+                    repeated=max(0, int(entry.get("repeated_occurrences", 0) or 0)),
+                    unknown=max(0, int(entry.get("unknown_occurrences", 0) or 0)),
+                )
+            )
     return "\n".join(lines)
