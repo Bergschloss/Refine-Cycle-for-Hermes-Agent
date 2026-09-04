@@ -235,6 +235,7 @@ class TestExtractedHelpersDirect(unittest.TestCase):
                 run_target={"provider": "p", "model": "m"},
                 run_target_source="invocation_bound",
                 run_target_issues=[], run_target_unusable=False,
+                intended_target={"provider": "p", "model": "m"},
             )
         self.assertIsInstance(result, dict)
         self.assertTrue(result["success"])
@@ -261,6 +262,7 @@ class TestExtractedHelpersDirect(unittest.TestCase):
                 run_target={"provider": "p", "model": "m"},
                 run_target_source="invocation_bound",
                 run_target_issues=[], run_target_unusable=False,
+                intended_target={"provider": "p", "model": "m"},
             )
         self.assertIsInstance(result, tuple)
         context, signal_path = result
@@ -282,6 +284,7 @@ class TestExtractedHelpersDirect(unittest.TestCase):
                 run_target={"provider": "p", "model": "m"},
                 run_target_source="invocation_bound",
                 run_target_issues=[], run_target_unusable=False,
+                intended_target={"provider": "p", "model": "m"},
             )
         self.assertIsInstance(result, dict)
         self.assertTrue(result["success"])
