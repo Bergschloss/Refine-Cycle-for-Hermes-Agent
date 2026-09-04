@@ -3168,6 +3168,83 @@ def _preview_guardrail_error(proposal: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# The stable result_code for a preview that a content/schema guardrail would
+# refuse. _preview_guardrail_error() returns prose only; a durable code lets a
+# release census and the journal tell a predicted content rejection apart from a
+# "nothing to change" no_op, instead of silently falling back to the generic
+# "dry_run"/"ok" outcome the way the pre-0.14.5 preview did.
+PREVIEW_CONTENT_GUARDRAIL_CODE = "guardrail_error"
+
+
+def _application_preview_refusal(
+    proposal: Dict[str, Any],
+    all_error_patterns: List[Dict[str, Any]],
+    *,
+    signal_path: str,
+    explicit_session: bool,
+    explicit_user_correction: bool,
+    include_daily_budget: bool,
+) -> Optional[Tuple[str, str]]:
+    """The first refusal a real apply would produce, as ``(result_code, message)``.
+
+    Read-only. This is the single ordered decision the dry-run preview consumes so
+    its ``would_apply`` verdict predicts the real apply outcome. It acquires no
+    lock and mutates nothing; the budget check is a point-in-time snapshot.
+
+    The precedence mirrors the real, non-dry apply path exactly:
+
+    1. **daily budget** — a real non-dry ``refine_run`` refuses at
+       ``journal.daily_limit_reached()`` *before* the model is even asked for a
+       proposal (see ``refine_run``'s early budget gate). At the moment of
+       preview, an exhausted budget is therefore the first refusal a caller who
+       switched to ``dry_run=False`` right now would hit, so it is reported first.
+       This is a read-only snapshot: the real apply keeps its own recheck under
+       ``journal.mutation_lock()`` because another process can consume the last
+       slot between preview and apply.
+    2. **application evidence** — ``_application_evidence_refusal`` runs next,
+       exactly as the real apply calls it before any mutation. For a
+       ``reviewer_approved`` pass this is ``reviewer_only``; otherwise it covers
+       unbacked / thin / trajectory-contradicted proposals.
+    3. **content/schema** — only if the proposal cleared the evidence gate does
+       the real apply reach ``_apply_edit`` / ``_apply_transaction``, where
+       ``_validate_proposal`` performs the deterministic content checks (duplicate
+       skill, oversized memory, etc.). ``_preview_guardrail_error`` reproduces
+       those without writing. This is the one declared multi-transaction
+       inaccuracy already documented on ``_preview_guardrail_error``: an edit that
+       depends on an earlier edit in the same transaction previews as rejected
+       because nothing has landed yet; erring toward "would be rejected" is the
+       right way round for a preview.
+    4. a valid ``no_op`` is well-formed but applies nothing, so it is left to the
+       caller to mark non-applyable.
+    5. otherwise the proposal is applyable and this returns ``None``.
+
+    The real apply path validates content *after* the evidence gate (evidence
+    first, content inside the mutation helpers). The pre-0.14.5 preview ran the
+    content guard first, so a reviewer-approved-but-duplicate proposal previewed
+    as the content failure while the real apply returned ``reviewer_only``. This
+    ordering removes that disagreement.
+    """
+    if include_daily_budget and journal.daily_limit_reached():
+        return (
+            "daily_limit_reached",
+            f"Daily edit limit reached ({config.max_edits_per_day()}). "
+            f"Applied/pending/prepared today: {journal.count_today_applied()}.",
+        )
+    evidence_refusal = _application_evidence_refusal(
+        proposal,
+        all_error_patterns,
+        signal_path=signal_path,
+        explicit_session=explicit_session,
+        explicit_user_correction=explicit_user_correction,
+    )
+    if evidence_refusal is not None:
+        return evidence_refusal
+    content_error = _preview_guardrail_error(proposal)
+    if content_error:
+        return PREVIEW_CONTENT_GUARDRAIL_CODE, content_error
+    return None
+
+
 def _memory_entry_delimiter() -> str:
     """The host's entry delimiter, read from the host rather than restated here.
 
@@ -5897,27 +5974,32 @@ def _refine_once(
 
         # What the apply would decide. A preview that shows a proposal without
         # saying it is unapplyable is worse than no preview: it reads as approval.
-        # The deterministic content/schema guard runs first, exactly as the real
-        # apply path validates the proposal before it reaches the evidence gate.
-        proposal_guardrail_error = _preview_guardrail_error(dry_proposal) or ""
-        # Then, only when the proposal is well-formed, ask the SAME question the
-        # real apply asks. Previously the preview stopped at the content guard and
-        # never consulted this gate, so a reviewer-only/unbacked/thin/contradicted
-        # proposal previewed as would_apply=true while the real apply refused it.
-        # The preview and the apply must answer identically or the census lies.
+        # One shared, read-only decision returns the FIRST refusal a real apply
+        # would produce, in the real apply's own precedence: daily budget snapshot,
+        # then the application-evidence gate, then the content/schema guard. The
+        # preview used to run the content guard first, so a reviewer-only/unbacked/
+        # thin/contradicted OR budget-exhausted proposal previewed as
+        # would_apply=true while the real apply refused it -- and a reviewer-
+        # approved-but-duplicate proposal previewed as the content failure while
+        # the real apply returned reviewer_only. The preview and the apply must
+        # answer identically or the census lies. include_daily_budget=True because
+        # a real non-dry run would refuse at the budget gate before the proposal
+        # was even generated; the snapshot is read-only (no mutation lock), and
+        # the real apply keeps its own under-lock recheck for the preview/apply
+        # race.
         preview_code = ""
         preview_message = ""
-        if not proposal_guardrail_error:
-            preview_decision = _application_evidence_refusal(
-                dry_proposal,
-                all_error_patterns,
-                signal_path=_signal_path,
-                explicit_session=explicit_session,
-                explicit_user_correction=bool(corrections),
-            )
-            if preview_decision is not None:
-                preview_code, preview_message = preview_decision
-        would_reject = proposal_guardrail_error or preview_message
+        preview_decision = _application_preview_refusal(
+            dry_proposal,
+            all_error_patterns,
+            signal_path=_signal_path,
+            explicit_session=explicit_session,
+            explicit_user_correction=bool(corrections),
+            include_daily_budget=True,
+        )
+        if preview_decision is not None:
+            preview_code, preview_message = preview_decision
+        would_reject = preview_message
         # A valid no_op is intentionally accepted by the proposal validator, but
         # it cannot apply an edit. Keep that distinction durable for audits: a
         # release census must not count "nothing to change" as an applicable
@@ -5927,10 +6009,11 @@ def _refine_once(
         )
         dry_run_llm_meta = dict(_run_llm_meta, would_apply=would_apply)
         # Record the predicted application refusal as the entry's result_code, so
-        # the journal and a release census can tell a reviewer-only/unbacked/thin/
-        # contradicted preview apart from a "nothing to change" no_op. The
-        # deterministic content guard has no code of its own; _journal_nonmutation
-        # falls back to the "dry_run" outcome when no application refusal applies.
+        # the journal and a release census can tell a daily_limit_reached/
+        # reviewer-only/unbacked/thin/contradicted preview apart from a "nothing
+        # to change" no_op. The content/schema guard now carries a durable code of
+        # its own (PREVIEW_CONTENT_GUARDRAIL_CODE) so a predicted content rejection
+        # is not silently collapsed into the generic "dry_run" outcome either.
         if preview_code:
             dry_run_llm_meta["result_code"] = preview_code
         # Journal the dry run so /refine audit shows it was considered, and record
