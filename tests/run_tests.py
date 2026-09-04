@@ -1904,6 +1904,64 @@ class RefineTests(unittest.TestCase):
             "a number inside a path is not a port",
         )
 
+    def test_colon_number_is_only_a_port_where_a_host_is_evidenced(self):
+        """``word:number`` is not evidence of a port.
+
+        The host:port rule was any letter-led token followed by ``:digits``, so
+        a source location, a retry counter and a bare key/value field were all
+        preserved as ports. That is the mirror of the defect the rule was added
+        for: instead of fabricating recurrence it splits one recurring failure
+        into a fingerprint per line number. Meanwhile a real IPv4 host:port was
+        NOT preserved, because the rule required the host to start with a letter.
+        """
+        # --- incidental colon fields: these must COLLAPSE again ---
+        for label, first, second in (
+            ("a source location", "parse failed at file.py:42", "parse failed at file.py:99"),
+            ("a counter field", "gave up retries:500", "gave up retries:900"),
+            ("a bare line field", "bad input line:12", "bad input line:87"),
+            ("an attempt field", "failed attempt:2", "failed attempt:7"),
+        ):
+            self.assertEqual(
+                patterns.fingerprint("tool", first),
+                patterns.fingerprint("tool", second),
+                f"{label} is not a host:port",
+            )
+        self.assertNotIn("netport", patterns.normalize_error("bad input line:12"))
+
+        # --- evidenced hosts: these must stay DISTINCT ---
+        self.assertNotEqual(
+            patterns.fingerprint("net", "connection refused localhost:8080"),
+            patterns.fingerprint("net", "connection refused localhost:9090"),
+            "localhost:port is a host:port",
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("net", "connection refused 192.168.0.10:443"),
+            patterns.fingerprint("net", "connection refused 192.168.0.10:8443"),
+            "an IPv4 host:port is a host:port",
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("net", "cannot connect to api.example.com:443"),
+            patterns.fingerprint("net", "cannot connect to api.example.com:8443"),
+            "a DNS host:port is a host:port",
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("db", "connect to db:5432 timed out"),
+            patterns.fingerprint("db", "connect to db:6379 timed out"),
+            "a host introduced by connection context is a host:port",
+        )
+
+        # --- and the numbers that must keep collapsing regardless ---
+        self.assertEqual(
+            patterns.fingerprint("log", "started at 12:34:56"),
+            patterns.fingerprint("log", "started at 01:02:03"),
+            "a clock is not a host:port",
+        )
+        self.assertEqual(
+            patterns.fingerprint("pkg", "requires v1:2 or newer"),
+            patterns.fingerprint("pkg", "requires v1:5 or newer"),
+            "a version field is not a host:port",
+        )
+
     def test_path_normalization_stays_linear_on_long_separator_runs(self):
         """/refine audit normalizes every row twice, with no bound on row count.
 

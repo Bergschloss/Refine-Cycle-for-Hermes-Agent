@@ -134,19 +134,69 @@ def _preserve_http_status(text: str) -> str:
 # Each rule is keyword-anchored so an incidental number nearby is NOT promoted:
 # ``\bport\b`` will not fire inside ``reported``/``export``, and the count in
 # ``the port was busy; 500 retries`` is not adjacent to the keyword so it still
-# collapses. The colon-port form is anchored on ``tcp``/``udp`` or a
-# letter-led host (``localhost:8080``), never a bare ``:NN`` -- a clock
-# (``12:34:56``) has only digits around its colons, and a port inside a path
-# (``/v2/8080/items``) has no host:port colon, so both keep collapsing.
+# collapses. The colon-port form requires evidence of a HOST on its left (see
+# the four rules below), never a bare ``:NN`` -- a clock (``12:34:56``) has only
+# digits around its colons, and a port inside a path (``/v2/8080/items``) has no
+# host:port colon, so both keep collapsing.
 _EXIT_CODE_NUM = re.compile(
     r"(?i)\bexit(?:\s*(?:code|status)|code|status)\b\s*[:=]?\s*(\d+)"
 )
 _SIGNAL_NUM = re.compile(r"(?i)\bsignal\b\s*[:=]?\s*(\d+)")
 _PORT_WORD_NUM = re.compile(r"(?i)\bport\b\s*[:=]?\s*(\d+)")
-# A colon-port after tcp/udp (``tcp :22``) or a letter-led host (``host:443``);
-# a trailing ``[:.]\d`` guard keeps it off a clock or a dotted-decimal.
+# A colon-port after tcp/udp (``tcp :22``); a trailing ``[:.]\d`` guard keeps it
+# off a clock or a dotted-decimal.
 _PORT_TCP_NUM = re.compile(r"(?i)\b(?:tcp|udp)\b\s*:\s*(\d{1,5})\b(?![:.]\d)")
-_PORT_HOST_NUM = re.compile(r"(?i)\b[a-z][\w.-]*:(\d{1,5})\b(?![:.]\d)")
+
+# ``<token>:<digits>`` is NOT evidence of a port. The rule here used to be any
+# letter-led token followed by ``:digits``, which promoted every source location
+# (``file.py:42``), retry counter (``retries:500``) and bare key/value field to a
+# port. That is this module's other failure direction: rather than fabricating
+# recurrence it split ONE recurring failure into a fingerprint per line number,
+# while a real IPv4 host:port was left to collapse because the host does not
+# start with a letter. So each rule below needs actual host evidence:
+#   * the literal ``localhost``;
+#   * a dotted-quad IPv4 address;
+#   * a dotted DNS name whose last label is not a source-file suffix -- that
+#     guard is what separates ``api.example.com:443`` from ``file.py:42``;
+#   * any host token introduced by explicit connection context
+#     (``connect to db:5432``), which is the only case where a single-label host
+#     can be told apart from a field name.
+_PORT_LOCALHOST_NUM = re.compile(r"(?i)\blocalhost:(\d{1,5})\b(?![:.]\d)")
+_PORT_IPV4_NUM = re.compile(
+    r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}:(\d{1,5})\b(?![:.]\d)"
+)
+_PORT_DNS_NUM = re.compile(
+    r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24}):(\d{1,5})\b(?![:.]\d)"
+)
+_PORT_CONTEXT_NUM = re.compile(
+    r"(?i)\b(?:connect(?:ing|ed)?\s+to|connection\s+to|dial(?:ing)?(?:\s+to)?"
+    r"|upstream|proxy|hostname|host|server|address)\b\s*[:=]?\s*"
+    r"[a-z][\w-]*(?:\.[\w-]+)*:(\d{1,5})\b(?![:.]\d)"
+)
+# ``name.py:12`` is a source location, not a host:port. Kept deliberately small:
+# the suffixes that actually appear before a line number in tool output. A
+# suffix missing from here only costs a false port preservation on that one
+# shape; a TLD allowlist instead would silently stop preserving real hosts.
+_SOURCE_FILE_SUFFIXES = frozenset({
+    "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "rs", "rb", "php",
+    "java", "kt", "kts", "swift", "c", "h", "cc", "cpp", "hpp", "cs", "sh", "bash",
+    "ps1", "psm1", "sql", "yml", "yaml", "json", "toml", "ini", "cfg", "conf",
+    "md", "rst", "txt", "log", "csv", "html", "htm", "css", "scss", "vue", "svelte",
+    "tf", "lua", "pl", "r", "scala", "ex", "exs", "dart", "m", "mm", "asm", "s",
+})
+
+
+def _glue_group(match: "re.Match[str]", prefix: str, group: int = 1) -> str:
+    """Prefix the digits captured by ``group`` inside the whole match.
+
+    Span-based, not ``str.replace``: a host can repeat its own port's digits
+    (``443.example.com:443``) and replacing the first occurrence would glue the
+    prefix onto the host instead of the port.
+    """
+    start, end = match.span(group)
+    offset = match.start()
+    text = match.group(0)
+    return f"{text[:start - offset]}{prefix}{match.group(group)}{text[end - offset:]}"
 
 
 def _glue_number(match: "re.Match[str]", prefix: str) -> str:
@@ -154,6 +204,13 @@ def _glue_number(match: "re.Match[str]", prefix: str) -> str:
     so the digits survive the later blanket-integer rule (see httpstatus)."""
     number = next(group for group in match.groups() if group)
     return match.group(0).replace(number, f"{prefix}{number}", 1)
+
+
+def _glue_dns_port(match: "re.Match[str]") -> str:
+    """Preserve a DNS host's port unless the "host" is really a source file."""
+    if match.group(1).lower() in _SOURCE_FILE_SUFFIXES:
+        return match.group(0)
+    return _glue_group(match, "netport", 2)
 
 
 def _preserve_semantic_numbers(text: str) -> str:
@@ -167,7 +224,10 @@ def _preserve_semantic_numbers(text: str) -> str:
     text = _SIGNAL_NUM.sub(lambda m: _glue_number(m, "signal"), text)
     text = _PORT_WORD_NUM.sub(lambda m: _glue_number(m, "netport"), text)
     text = _PORT_TCP_NUM.sub(lambda m: _glue_number(m, "netport"), text)
-    text = _PORT_HOST_NUM.sub(lambda m: _glue_number(m, "netport"), text)
+    text = _PORT_LOCALHOST_NUM.sub(lambda m: _glue_group(m, "netport"), text)
+    text = _PORT_IPV4_NUM.sub(lambda m: _glue_group(m, "netport"), text)
+    text = _PORT_DNS_NUM.sub(_glue_dns_port, text)
+    text = _PORT_CONTEXT_NUM.sub(lambda m: _glue_group(m, "netport"), text)
     return text
 
 
