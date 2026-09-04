@@ -4364,6 +4364,92 @@ class RefineTests(unittest.TestCase):
             self.assertFalse(result["success"])
             self.assertEqual(result["outcome"], "journal_unreadable")
 
+    def test_session_unknown_is_journaled_not_silent(self):
+        """An unidentifiable session is a legitimate outcome, but it must leave a
+        durable row: otherwise it is indistinguishable afterward from a pass
+        that never ran (AGENTS.md: silent no_op is the default failure mode).
+
+        On the parent, core.refine_run returns outcome='session_unknown' but
+        _terminal_result was called without a trigger, so nothing was journaled
+        (journal_id is None and the entry count does not move)."""
+        with patch.object(core, "resolve_session_id", return_value=("", "unknown")):
+            before = len(journal.entries())
+            result = core.refine_run(MockLlm(), session_id="")
+            after = len(journal.entries())
+        self.assertEqual(result["outcome"], "session_unknown")
+        self.assertFalse(result["success"])
+        self.assertEqual(after - before, 1, "session_unknown must journal exactly one row")
+        self.assertIsNotNone(result.get("journal_id"))
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "session_unknown")
+
+    def test_daily_limit_reached_is_journaled_not_silent(self):
+        """A budget refusal is a legitimate outcome that must still be journaled,
+        so it can be told apart from a pass that never ran. It must NOT consume
+        a daily edit slot, because it applied nothing.
+
+        On the parent the daily-limit branch returns a raw dict with no outcome
+        key and no journal write, so no row is left behind."""
+        with patch.object(journal, "daily_limit_reached", return_value=True):
+            before = len(journal.entries())
+            budget_before = journal.count_today_applied()
+            result = core.refine_run(MockLlm(), session_id="session")
+            after = len(journal.entries())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "daily_limit_reached")
+        self.assertIn("Daily edit limit reached", result["message"])
+        self.assertEqual(after - before, 1, "daily_limit_reached must journal exactly one row")
+        self.assertIsNotNone(result.get("journal_id"))
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "daily_limit_reached")
+        # A refusal that applied nothing must not itself count against the budget.
+        self.assertEqual(
+            journal.count_today_applied(), budget_before,
+            "journaling the refusal must not consume a daily edit slot",
+        )
+
+    def test_cross_session_db_failure_is_recorded_in_no_signal_meta(self):
+        """A gate-closed pass whose CROSS-SESSION window could not be read must
+        say so in the no_signal entry, so it is distinguishable from a window
+        that was genuinely quiet.
+
+        The current-session read is guarded separately (collection_status !=
+        'ok' -> evidence_unavailable), so this exercises the narrower path the
+        SPEC's out-parameter targets: current-session evidence is fine, but the
+        cross-session collector reports the DB was unavailable."""
+        FakeHost.entry_config()["min_signal_required"] = True
+        # A current session with no repeated failure: the gate would close on
+        # no_signal, and the cross-session window is where a repeat could appear.
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "hello", "", now - 3, 1),
+            ("session", "assistant", "hi", "", now - 2, 1),
+            ("session", "user", "ok", "", now - 1, 1),
+        ])
+        core._LAST_SESSION_ID = "session"
+        real = core.collect_cross_session_patterns
+
+        def collector_reports_db_unavailable(*args, **kwargs):
+            out = kwargs.get("unavailable_out")
+            if out is not None:
+                out["reason"] = "db_unavailable"
+            return []
+
+        with patch.object(
+            core, "collect_cross_session_patterns",
+            side_effect=collector_reports_db_unavailable,
+        ):
+            result = core.refine_run(
+                MockLlm({"action": "no_op", "reason": "none"}), session_id="session"
+            )
+        self.assertTrue(result["success"])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "no_op")
+        self.assertEqual(
+            entry["llm_meta"].get("cross_session_unavailable"), "db_unavailable",
+            "a no_signal pass that could not read the cross-session DB must record it",
+        )
+
     def test_journal_transient_permission_error_retries_then_succeeds(self):
         """A single transient PermissionError is retried and reading succeeds."""
         journal.log(

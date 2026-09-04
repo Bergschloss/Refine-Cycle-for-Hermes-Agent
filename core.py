@@ -1694,6 +1694,7 @@ def collect_cross_session_patterns(
     strict: bool = False,
     truncation_out: Optional[Dict[str, bool]] = None,
     suppressed_out: Optional[Dict[str, int]] = None,
+    unavailable_out: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     ``truncation_out``, when given a dict, is filled in place with
@@ -1707,13 +1708,29 @@ def collect_cross_session_patterns(
     occurrences ``extract_patterns`` dropped from lesson candidacy in this
     window, so a gate closed by suppression can be told apart from a genuinely
     quiet one.
+
+    ``unavailable_out`` is the same pattern again, for the same reason: when
+    this returns ``[]`` because the cross-session window could not be READ (the
+    DB would not open) rather than because it was quiet, it records
+    ``reason='db_unavailable'`` so a no_signal pass can say the window was
+    unreadable instead of empty. ``reason='disabled'`` is recorded too, so a
+    pass that deliberately did not consult the window is distinct from one that
+    consulted it and found nothing. The current-session read is guarded
+    elsewhere (``collection_status``); this closes the narrower case where the
+    current read succeeds but this second open fails. An out-parameter, not a
+    raise, because the non-strict path here currently cannot fail and adding a
+    raise would change control flow on it.
     """
     if not config.cross_session_enabled():
+        if unavailable_out is not None:
+            unavailable_out["reason"] = "disabled"
         if strict:
             raise IOError("Cross-session pattern collection is disabled")
         return []
     connection = _open_db()
     if not connection:
+        if unavailable_out is not None:
+            unavailable_out["reason"] = "db_unavailable"
         if strict:
             raise IOError("Cross-session database is unavailable")
         return []
@@ -3786,6 +3803,7 @@ def _handle_no_signal(
     intended_target: Dict[str, str],
     cross_session_truncation: Optional[Dict[str, bool]] = None,
     evidence_suppression: Optional[Dict[str, int]] = None,
+    cross_session_unavailable: Optional[Dict[str, str]] = None,
 ) -> Union[Dict[str, Any], Tuple[str, str]]:
     """Handle a gate-closed pass: reviewer fallback or journaled no_op.
 
@@ -3803,6 +3821,11 @@ def _handle_no_signal(
     reason: a gate closed because every observed failure was suppressed as
     self-correcting is a different fact from a gate closed on thin evidence,
     and only the count makes them distinguishable in the journal.
+
+    ``cross_session_unavailable`` carries ``reason`` from the cross-session
+    collector ('db_unavailable' or 'disabled') and is folded into the meta the
+    same way, so a no_signal verdict reached without a readable cross-session
+    window says so, rather than reading as a window that was quiet.
     """
     _signal_path = "no_signal"
     should_review = (
@@ -3846,6 +3869,8 @@ def _handle_no_signal(
             reviewer_llm_meta.update(cross_session_truncation)
         if evidence_suppression:
             reviewer_llm_meta.update(evidence_suppression)
+        if cross_session_unavailable and cross_session_unavailable.get("reason"):
+            reviewer_llm_meta["cross_session_unavailable"] = cross_session_unavailable["reason"]
         reviewer_substituted = _model_substituted(
             intended_target.get("provider", ""), intended_target.get("model", ""),
             str(reviewer_call_meta.get("reported_provider", "")),
@@ -4004,6 +4029,11 @@ def _handle_no_signal(
                 "signal_path": _signal_path,
                 **(cross_session_truncation or {}),
                 **(evidence_suppression or {}),
+                **(
+                    {"cross_session_unavailable": cross_session_unavailable["reason"]}
+                    if cross_session_unavailable and cross_session_unavailable.get("reason")
+                    else {}
+                ),
             },
         )
         if not entry_id:
@@ -4451,6 +4481,13 @@ def _refine_once(
             outcome="session_unknown",
             success=False,
             message="Cannot identify the current session; refine did not run.",
+            # Journal it: an unknown session is a legitimate outcome, but with no
+            # durable row it is indistinguishable afterward from a pass that
+            # never ran (AGENTS.md: silent no_op). trigger routes it through
+            # _journal_nonmutation; it consumes no budget slot.
+            trigger=trigger,
+            safe_reason=safe_reason,
+            session=resolved_session,
             evidence=evidence,
         )
 
@@ -4531,17 +4568,29 @@ def _refine_once(
         return response
 
     if not dry_run and journal.daily_limit_reached():
-        return {
-            "success": False,
-            "message": f"Daily edit limit reached ({config.max_edits_per_day()}). "
-            f"Applied/pending/prepared today: {journal.count_today_applied()}.",
-            "evidence": {
+        limit_message = (
+            f"Daily edit limit reached ({config.max_edits_per_day()}). "
+            f"Applied/pending/prepared today: {journal.count_today_applied()}."
+        )
+        # Journal the refusal so it is distinguishable from a pass that never
+        # ran (AGENTS.md: silent no_op). daily_limit_reached() only reads the
+        # budget and this branch applies nothing, so the row must NOT consume a
+        # slot -- and it does not: 'daily_limit_reached' is not in journal's
+        # _CONSUMED_EDIT_OUTCOMES.
+        return _terminal_result(
+            outcome="daily_limit_reached",
+            success=False,
+            message=limit_message,
+            trigger=trigger,
+            safe_reason=safe_reason,
+            session=resolved_session,
+            evidence={
                 "session_id": resolved_session,
                 "session_id_source": resolved_source,
                 "session_source": session_db_source,
                 "source_lookup_status": source_lookup_status,
             },
-        }
+        )
 
     # Resolve the LLM target once per pass so every unbound compatibility call
     # is deterministic and attributable. An invocation-bound facade already
@@ -4711,12 +4760,19 @@ def _refine_once(
     # of them from lesson candidacy must not read afterwards like a pass that
     # saw nothing (AGENTS.md, silent no_op).
     _cross_session_suppressed: Dict[str, int] = {}
+    # Why the cross-session window returned nothing, when it did: 'db_unavailable'
+    # (could not read) or 'disabled' (deliberately not consulted). Folded into
+    # the no_signal entry below so an unreadable window is distinguishable from
+    # a quiet one (AGENTS.md: silent no_op). The current-session read has its
+    # own guard (collection_status); this covers the second open.
+    _cross_session_unavailable: Dict[str, str] = {}
     cross_session_patterns = (
         []
         if explicit_session
         else collect_cross_session_patterns(
             truncation_out=_cross_session_truncation,
             suppressed_out=_cross_session_suppressed,
+            unavailable_out=_cross_session_unavailable,
         )
     )
     # max(), never a sum: the cross-session window includes the current
@@ -4773,6 +4829,7 @@ def _refine_once(
             intended_target=_intended_target,
             cross_session_truncation=_cross_session_truncation,
             evidence_suppression=_evidence_suppression,
+            cross_session_unavailable=_cross_session_unavailable,
         )
         if isinstance(_handled, dict):
             return _handled
@@ -6433,11 +6490,22 @@ def refine_run(
         run_reason = scrub_text(run_reason)
 
     if not runs:
-        return {
-            "success": False,
-            "message": f"Daily edit limit reached ({config.max_edits_per_day()}).",
-            "reversible": False,
-        }
+        # The budget was already exhausted before the first pass, so no
+        # _refine_once ran and nothing above journaled. Record the refusal here
+        # (AGENTS.md: silent no_op) so it is distinguishable from a pass that
+        # never happened. It applied nothing and 'daily_limit_reached' is not a
+        # consumed-edit outcome, so this does not itself spend a slot. Resolve
+        # the session only for the journal row; the pre-pass budget gate needs
+        # no trajectory.
+        limit_session, _ = resolve_session_id(session_id or "")
+        return _terminal_result(
+            outcome="daily_limit_reached",
+            success=False,
+            message=f"Daily edit limit reached ({config.max_edits_per_day()}).",
+            trigger="auto" if auto else "manual",
+            safe_reason=run_reason,
+            session=limit_session,
+        )
     if len(runs) == 1:
         return runs[0]
 
