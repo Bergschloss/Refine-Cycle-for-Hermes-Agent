@@ -1,5 +1,5 @@
 name: refine
-version: 0.14.0
+version: 0.14.1
 description: "Measurement layer for Hermes self-improvement: finds failures that recur across sessions, proposes one minimal skill/memory/prompt edit, and grades whether the fix held."
 author: Bergschloss
 provides_tools: [refine_run]
