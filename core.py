@@ -1710,16 +1710,17 @@ def collect_cross_session_patterns(
     quiet one.
 
     ``unavailable_out`` is the same pattern again, for the same reason: when
-    this returns ``[]`` because the cross-session window could not be READ (the
-    DB would not open) rather than because it was quiet, it records
-    ``reason='db_unavailable'`` so a no_signal pass can say the window was
-    unreadable instead of empty. ``reason='disabled'`` is recorded too, so a
-    pass that deliberately did not consult the window is distinct from one that
-    consulted it and found nothing. The current-session read is guarded
+    this returns ``[]`` because the cross-session window could not be READ
+    rather than because it was quiet, it records why, so a no_signal pass can
+    say the window was unreadable instead of empty. Three reasons, all
+    categorical and never carrying content: ``db_unavailable`` (the DB would not
+    open), ``query_error`` (it opened but the query or its iteration failed) and
+    ``disabled`` (the window was deliberately not consulted, which is distinct
+    from consulting it and finding nothing). The current-session read is guarded
     elsewhere (``collection_status``); this closes the narrower case where the
-    current read succeeds but this second open fails. An out-parameter, not a
-    raise, because the non-strict path here currently cannot fail and adding a
-    raise would change control flow on it.
+    current read succeeds but this second one fails. An out-parameter, not a
+    raise, because the non-strict path here is expected to degrade rather than
+    abort a pass, and adding a raise would change control flow on it.
     """
     if not config.cross_session_enabled():
         if unavailable_out is not None:
@@ -1873,6 +1874,14 @@ def collect_cross_session_patterns(
     except Exception as exc:
         safe_error = scrub_text(str(exc))
         logger.warning("Cross-session query failed: %s", safe_error)
+        # Same reason as the two branches above, for the failure that actually
+        # happens on a live host: the window could not be READ. Without this the
+        # SQL/iteration failure returned [] and filled nothing, so a broken query
+        # was journaled exactly like a quiet window. Only the categorical code
+        # travels -- the exception text stays in the log, never in evidence, the
+        # journal or a tool result.
+        if unavailable_out is not None:
+            unavailable_out["reason"] = "query_error"
         if strict:
             raise IOError(f"Cross-session query failed: {safe_error}") from exc
         return []
@@ -3823,9 +3832,10 @@ def _handle_no_signal(
     and only the count makes them distinguishable in the journal.
 
     ``cross_session_unavailable`` carries ``reason`` from the cross-session
-    collector ('db_unavailable' or 'disabled') and is folded into the meta the
-    same way, so a no_signal verdict reached without a readable cross-session
-    window says so, rather than reading as a window that was quiet.
+    collector ('db_unavailable', 'query_error' or 'disabled') and is folded into
+    the meta the same way, so a no_signal verdict reached without a readable
+    cross-session window says so, rather than reading as a window that was
+    quiet. A window that WAS read and was simply quiet carries no such key.
     """
     _signal_path = "no_signal"
     should_review = (

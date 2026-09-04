@@ -4521,6 +4521,93 @@ class RefineTests(unittest.TestCase):
             "a no_signal pass that could not read the cross-session DB must record it",
         )
 
+    def test_cross_session_query_error_is_reported_by_the_real_collector(self):
+        """The sibling test above injects the reason; this exercises the real
+        collector's exception path, which is where the assignment was missing.
+
+        A cross-session SQL/iteration failure returned [] and filled nothing, so
+        a window that could not be READ was journaled exactly like a quiet one.
+        Only the categorical code leaves here -- the exception text is scrubbed
+        into the log, never into the out-parameter.
+        """
+        secret = "cross-session-secret-123456"
+
+        class BrokenConnection:
+            def execute(self, *_args, **_kwargs):
+                raise sqlite3.OperationalError(f'token="{secret}"')
+
+            def close(self):
+                pass
+
+        unavailable = {}
+        with patch.object(core, "_open_db", return_value=BrokenConnection()):
+            result = core.collect_cross_session_patterns(unavailable_out=unavailable)
+        self.assertEqual(result, [])
+        self.assertEqual(unavailable, {"reason": "query_error"})
+        self.assertNotIn(secret, json.dumps(unavailable))
+
+    def test_cross_session_query_error_reaches_the_no_signal_journal_entry(self):
+        """End to end: current-session evidence is fine, the cross-session query
+        fails, and the no_signal entry says so instead of reading as quiet."""
+        FakeHost.entry_config()["min_signal_required"] = True
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "hello", "", now - 3, 1),
+            ("session", "assistant", "hi", "", now - 2, 1),
+            ("session", "user", "ok", "", now - 1, 1),
+        ])
+        core._LAST_SESSION_ID = "session"
+
+        class BrokenConnection:
+            def execute(self, *_args, **_kwargs):
+                raise sqlite3.OperationalError("no such table: messages")
+
+            def close(self):
+                pass
+
+        real_collect = core.collect_cross_session_patterns
+
+        def collect_against_a_broken_db(*args, **kwargs):
+            # The REAL collector runs; only its own DB handle is broken. Scoping
+            # the broken handle this way (rather than breaking _open_db for the
+            # whole pass) keeps current-session evidence and the source-revision
+            # capture intact, which is the narrow case this covers -- and unlike
+            # a stubbed collector, the reason must be filled by shipped code.
+            with patch.object(core, "_open_db", return_value=BrokenConnection()):
+                return real_collect(*args, **kwargs)
+
+        with patch.object(
+            core, "collect_cross_session_patterns",
+            side_effect=collect_against_a_broken_db,
+        ):
+            result = core.refine_run(
+                MockLlm({"action": "no_op", "reason": "none"}), session_id="session"
+            )
+        self.assertTrue(result["success"], result.get("message"))
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "no_op")
+        self.assertEqual(entry["llm_meta"].get("cross_session_unavailable"), "query_error")
+
+    def test_genuinely_quiet_cross_session_window_records_no_unavailable_reason(self):
+        """The mirror direction: a window that was read and was simply quiet must
+        NOT be labelled unavailable. Manufacturing a failure for silence is the
+        same defect reflected."""
+        FakeHost.entry_config()["min_signal_required"] = True
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "hello", "", now - 3, 1),
+            ("session", "assistant", "hi", "", now - 2, 1),
+            ("session", "user", "ok", "", now - 1, 1),
+        ])
+        core._LAST_SESSION_ID = "session"
+        result = core.refine_run(
+            MockLlm({"action": "no_op", "reason": "none"}), session_id="session"
+        )
+        self.assertTrue(result["success"], result.get("message"))
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "no_op")
+        self.assertIsNone(entry["llm_meta"].get("cross_session_unavailable"))
+
     def test_journal_transient_permission_error_retries_then_succeeds(self):
         """A single transient PermissionError is retried and reading succeeds."""
         journal.log(
