@@ -5897,7 +5897,27 @@ def _refine_once(
 
         # What the apply would decide. A preview that shows a proposal without
         # saying it is unapplyable is worse than no preview: it reads as approval.
-        would_reject = _preview_guardrail_error(dry_proposal) or ""
+        # The deterministic content/schema guard runs first, exactly as the real
+        # apply path validates the proposal before it reaches the evidence gate.
+        proposal_guardrail_error = _preview_guardrail_error(dry_proposal) or ""
+        # Then, only when the proposal is well-formed, ask the SAME question the
+        # real apply asks. Previously the preview stopped at the content guard and
+        # never consulted this gate, so a reviewer-only/unbacked/thin/contradicted
+        # proposal previewed as would_apply=true while the real apply refused it.
+        # The preview and the apply must answer identically or the census lies.
+        preview_code = ""
+        preview_message = ""
+        if not proposal_guardrail_error:
+            preview_decision = _application_evidence_refusal(
+                dry_proposal,
+                all_error_patterns,
+                signal_path=_signal_path,
+                explicit_session=explicit_session,
+                explicit_user_correction=bool(corrections),
+            )
+            if preview_decision is not None:
+                preview_code, preview_message = preview_decision
+        would_reject = proposal_guardrail_error or preview_message
         # A valid no_op is intentionally accepted by the proposal validator, but
         # it cannot apply an edit. Keep that distinction durable for audits: a
         # release census must not count "nothing to change" as an applicable
@@ -5906,6 +5926,13 @@ def _refine_once(
             dry_proposal.get("action") != "no_op" and not would_reject
         )
         dry_run_llm_meta = dict(_run_llm_meta, would_apply=would_apply)
+        # Record the predicted application refusal as the entry's result_code, so
+        # the journal and a release census can tell a reviewer-only/unbacked/thin/
+        # contradicted preview apart from a "nothing to change" no_op. The
+        # deterministic content guard has no code of its own; _journal_nonmutation
+        # falls back to the "dry_run" outcome when no application refusal applies.
+        if preview_code:
+            dry_run_llm_meta["result_code"] = preview_code
         # Journal the dry run so /refine audit shows it was considered, and record
         # the verdict, so a previewed-but-unapplyable proposal is distinguishable
         # afterwards from one that would have landed.

@@ -25498,6 +25498,220 @@ class Release0144ContractTests(unittest.TestCase):
             self.assertIn("contradicts", error)
             self.assertNotIn("explicit user correction", error)
 
+    # ── 0.14.5: dry-run preview must agree with the real apply decision ──────
+    def _reviewer_dry_run_setup(self):
+        """Build the exact real control path: 20 routine messages, no repeated
+        error signal, reviewer fallback enabled. The reviewer approves a thin/
+        clean session and the proposer emits a valid create. This reproduces the
+        `reviewer_approved` signal_path end-to-end, not via a helper call."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+        })
+        # Clear process-lifetime globals the reviewer path reads, so one test
+        # cannot leak block rules or output-mode state into this pass.
+        plugin_init._BLOCK_RULES = []
+        llm._call_transport.preferred_output_mode = ""
+        llm._call_meta.value = {}
+
+    def test_reviewer_approved_dry_run_reports_not_applyable(self):
+        """RED on 5f1e919: the dry-run preview reports would_apply=true and
+        result_code=dry_run for a reviewer-approved create, disagreeing with the
+        real apply gate which refuses it as reviewer_only. The preview must give
+        the same verdict as a real apply."""
+        self._reviewer_dry_run_setup()
+        model = MockLlm(
+            SchemaUnsupportedError(),
+            MockResult(
+                None,
+                text='{"shouldRefine":true,"rationale":"durable",'
+                     '"instructions":"persist retry lesson"}',
+            ),
+            skill_proposal("reviewer-dry-run"),
+        )
+        result = core.refine_run(model, session_id="session", dry_run=True)
+
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertEqual(result["proposal"]["action"], "create")
+        self.assertEqual(result["llm_meta"]["signal_path"], "reviewer_approved")
+        self.assertFalse(result["would_apply"])
+        self.assertFalse(result["reversible"])
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(result["llm_meta"]["result_code"], "reviewer_only")
+        self.assertIn("advisory", result["guardrail_error"].lower())
+        self.assertEqual(FakeHost.actions, [])
+
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "dry_run")
+        self.assertIs(entry["llm_meta"]["would_apply"], False)
+        self.assertEqual(entry["llm_meta"]["result_code"], "reviewer_only")
+        self.assertIn("advisory", entry["error"].lower())
+
+    # ── 0.14.5: preview/apply parity matrix (Cases A–G) ─────────────────────
+    def _preview(self, proposal, evidence, *, explicit_session=False):
+        """Drive one dry-run preview through the real _refine_once path with the
+        given evidence, returning the terminal result. collect_evidence and the
+        cross-session collector are patched so the backing patterns are exactly
+        the ones the case declares; the application-evidence gate runs for real."""
+        with patch.object(core, "collect_evidence", return_value=evidence), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]):
+            return core.refine_run(
+                MockLlm(proposal), session_id="session", dry_run=True,
+                explicit_session=explicit_session,
+            )
+
+    @staticmethod
+    def _grounded_evidence(pattern=None, *, error_count=5):
+        evidence = {
+            "messages": [
+                {"role": "user", "content": "one", "tool_name": ""},
+                {"role": "assistant", "content": "two", "tool_name": ""},
+                {"role": "tool", "content": "three", "tool_name": "http"},
+            ],
+            "error_count": error_count,
+            "error_patterns": [pattern] if pattern else [],
+            "user_corrections": [],
+            "collection_status": "ok",
+        }
+        return evidence
+
+    def test_case_a_valid_create_previews_applyable_then_really_applies(self):
+        """A: a gate-opened create whose fingerprint clears the apply bar must
+        preview as applyable, and the same proposal must really apply non-dry."""
+        fingerprint = "abcdef123456"
+        pattern = {"fingerprint": fingerprint, "count": 5, "sessions_seen": 1,
+                   "tool": "http", "sample": "request failed"}
+        proposal = dict(skill_proposal("case-a"), pattern_fingerprint=fingerprint)
+
+        result = self._preview(proposal, self._grounded_evidence(pattern))
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertTrue(result["would_apply"])
+        self.assertEqual(result["guardrail_error"], "")
+        self.assertFalse(result["reversible"])
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(FakeHost.actions, [])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertIs(entry["llm_meta"]["would_apply"], True)
+
+        # A separate, fresh home proves the same proposal actually lands.
+        FakeHost.reset(Path(self._temp.name))
+        core._LAST_SESSION_ID = "session"
+        proposal_apply = dict(skill_proposal("case-a"), pattern_fingerprint=fingerprint)
+        with patch.object(core, "collect_evidence",
+                          return_value=self._grounded_evidence(pattern)), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]):
+            applied = core.refine_run(MockLlm(proposal_apply), session_id="session")
+        self.assertTrue(applied["success"])
+        self.assertEqual(applied["outcome"], "applied")
+        self.assertEqual(applied["edits_applied"], 1)
+        self.assertEqual(len(FakeHost.actions), 1)
+
+    def test_case_b_model_no_op_previews_non_applyable(self):
+        """B: keep the e6158bc regression green — a no_op is never applyable and
+        never reversible in preview."""
+        proposal = {"action": "no_op", "reason": "nothing durable to change",
+                    "expected_outcome": ""}
+        result = self._preview(proposal, self._grounded_evidence())
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertFalse(result["would_apply"])
+        self.assertFalse(result["reversible"])
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(FakeHost.actions, [])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertIs(entry["llm_meta"]["would_apply"], False)
+
+    def test_case_c_reviewer_approved_preview_parity(self):
+        """C: the reviewer-only refusal the real apply returns for a
+        reviewer_approved create is exactly what the preview must report. The
+        end-to-end reviewer preview is asserted in
+        test_reviewer_approved_dry_run_reports_not_applyable; here we pin the
+        shared decision both paths consume."""
+        proposal = dict(skill_proposal("case-c"), pattern_fingerprint="abcdef123456")
+        pattern = {"fingerprint": "abcdef123456", "count": 5, "sessions_seen": 2}
+        code, message = core._application_evidence_refusal(
+            proposal, [pattern], signal_path="reviewer_approved",
+            explicit_session=False,
+        )
+        self.assertEqual(code, "reviewer_only")
+        self.assertIn("advisory", message.lower())
+
+    def test_case_d_unbacked_fingerprint_previews_non_applyable(self):
+        """D: a fingerprint that was never observed in this evidence must refuse
+        in preview exactly as the apply gate refuses it."""
+        proposal = dict(skill_proposal("case-d"), pattern_fingerprint="ffffffffffff")
+        # Evidence carries a DIFFERENT fingerprint, so the proposal is unbacked.
+        pattern = {"fingerprint": "aaaaaaaaaaaa", "count": 5, "sessions_seen": 2,
+                   "tool": "http", "sample": "request failed"}
+        result = self._preview(proposal, self._grounded_evidence(pattern))
+        self.assertFalse(result["would_apply"])
+        self.assertEqual(result["llm_meta"]["result_code"], "unbacked_pattern")
+        self.assertIn("not observed", result["guardrail_error"].lower())
+        self.assertEqual(FakeHost.actions, [])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["llm_meta"]["result_code"], "unbacked_pattern")
+
+    def test_case_e_thin_explicit_session_previews_non_applyable(self):
+        """E: a thin pattern reached through the explicit historical-session
+        route cannot contribute cross-session evidence and must refuse."""
+        fingerprint = "abcdef123456"
+        proposal = dict(skill_proposal("case-e"), pattern_fingerprint=fingerprint)
+        pattern = {"fingerprint": fingerprint, "count": 1, "sessions_seen": 1,
+                   "tool": "http", "sample": "request failed"}
+        result = self._preview(
+            proposal, self._grounded_evidence(pattern, error_count=1),
+            explicit_session=True,
+        )
+        self.assertFalse(result["would_apply"])
+        self.assertEqual(
+            result["llm_meta"]["result_code"], "explicit_session_thin_evidence"
+        )
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_case_f_trajectory_contradiction_previews_non_applyable(self):
+        """F: a retry proposal contradicted by an abandoned trajectory must
+        refuse in preview with the distinct contradiction code."""
+        fingerprint = "abc123abc123"
+        proposal = dict(
+            skill_proposal("case-f", "# Guidance\n\nRetry the failed command once more."),
+            pattern_fingerprint=fingerprint,
+        )
+        pattern = {"fingerprint": fingerprint, "count": 2, "sessions_seen": 2,
+                   "resolution_status": "abandoned", "abandoned_occurrences": 2,
+                   "tool": "http", "sample": "request failed"}
+        result = self._preview(proposal, self._grounded_evidence(pattern, error_count=2))
+        self.assertFalse(result["would_apply"])
+        self.assertEqual(
+            result["llm_meta"]["result_code"], "contradicted_by_trajectory"
+        )
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_case_g_multi_with_one_refused_child_previews_non_applyable(self):
+        """G: a multi proposal where one child is unbacked must preview as
+        non-applyable — the transaction's pre-mutation decision refuses the whole
+        transaction, so no child may be counted applyable."""
+        good_fp = "abcdef123456"
+        bad_fp = "ffffffffffff"
+        proposal = multi_proposal(
+            {**skill_proposal("case-g-ok"), "pattern_fingerprint": good_fp},
+            {**skill_proposal("case-g-bad"), "pattern_fingerprint": bad_fp},
+            summary="Two edits, one unbacked",
+        )
+        proposal["pattern_fingerprint"] = good_fp
+        # Only the good fingerprint is observed; the second child is unbacked.
+        pattern = {"fingerprint": good_fp, "count": 5, "sessions_seen": 2,
+                   "tool": "http", "sample": "request failed"}
+        result = self._preview(proposal, self._grounded_evidence(pattern))
+        self.assertFalse(result["would_apply"])
+        self.assertEqual(result["llm_meta"]["result_code"], "unbacked_pattern")
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(FakeHost.actions, [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
