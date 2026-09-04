@@ -2857,6 +2857,31 @@ class RefineTests(unittest.TestCase):
             reviewer_model.calls[0]["max_tokens"], llm.REVIEWER_MAX_TOKENS
         )
 
+    def test_proposal_timeout_budget_is_shared_by_all_proposer_arms(self):
+        """Proposal, reviewer, and subagent wait describe one latency budget."""
+        self.assertEqual(llm._PROPOSAL_TIMEOUT_SECONDS, 180.0)
+        self.assertEqual(llm._REVIEW_TIMEOUT_SECONDS, llm._PROPOSAL_TIMEOUT_SECONDS)
+        self.assertEqual(
+            config.proposer_subagent_timeout_seconds(),
+            int(llm._PROPOSAL_TIMEOUT_SECONDS),
+        )
+
+        proposal_model = MockLlm({"action": "no_op", "reason": "none"})
+        llm.propose(proposal_model, "evidence", [], [])
+        self.assertEqual(
+            proposal_model.calls[0]["timeout"], llm._PROPOSAL_TIMEOUT_SECONDS
+        )
+
+        reviewer_model = MockLlm({
+            "shouldRefine": False,
+            "rationale": "No durable lesson.",
+            "instructions": "",
+        })
+        llm.review_fallback(reviewer_model, "evidence")
+        self.assertEqual(
+            reviewer_model.calls[0]["timeout"], llm._REVIEW_TIMEOUT_SECONDS
+        )
+
     def test_incomplete_reply_is_journaled_distinctly_and_stops_the_run(self):
         FakeHost.entry_config()["max_edits_per_run"] = 2
         raw = json.dumps(skill_proposal("cut-off-proposal"))
@@ -21995,6 +22020,34 @@ class SubagentProposerTests(unittest.TestCase):
             core._set_subagent_lifecycle_provider(None)
         self.assertEqual(result["llm_meta"].get("subagent_fallback_reason"), "launch_failed")
         self.assertNotEqual(result.get("outcome"), "subagent_strict_error")
+
+    def test_launch_failure_then_bound_route_error_preserves_both_causes(self):
+        """A structured fallback must not hide either the launch or route failure."""
+        lifecycle = self._FakeLifecycle(launch_error=RuntimeError("no parent"))
+        core._set_subagent_lifecycle_provider(lambda: lifecycle)
+        entry = FakeHost.entry_config()
+        entry["proposer_subagent_strict"] = False
+        entry["proposer_subagent_enabled"] = True
+        model = MockLlm(PluginLlmInvocationError("incomplete_route"))
+        model.invocation_bound = True
+        try:
+            result = core.refine_run(
+                model, reason="route census probe", session_id="session"
+            )
+        finally:
+            entry.pop("proposer_subagent_strict", None)
+            entry.pop("proposer_subagent_enabled", None)
+            core._set_subagent_lifecycle_provider(None)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "llm_error")
+        self.assertEqual(result["failure"], "llm_route_error")
+        self.assertEqual(result["llm_meta"]["proposal_source"], "structured")
+        self.assertEqual(result["llm_meta"]["subagent_fallback_reason"], "launch_failed")
+        self.assertEqual(result["llm_meta"]["result_code"], "llm_route_error")
+        journal_meta = journal.get_entry(result["journal_id"])["llm_meta"]
+        self.assertEqual(journal_meta["subagent_fallback_reason"], "launch_failed")
+        self.assertEqual(journal_meta["result_code"], "llm_route_error")
 
     def test_wait_timeout_cancels_and_falls_back(self):
         lifecycle = self._FakeLifecycle(timed_out=True)
