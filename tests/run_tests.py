@@ -20891,6 +20891,22 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(trusted_pattern["count"], 2)
         self.assertEqual(trusted_pattern["sessions_seen"], 2)
 
+    def test_pass_evidence_reports_observed_session_span(self):
+        """A completed pass exposes the largest span it actually offered."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", "Please inspect the repeated failure.", "", now - 4, 1),
+            ("session", "assistant", "Inspecting it.", "", now - 3, 1),
+            ("session", "tool", "ERROR: shared route failure", "http", now - 2, 1),
+            ("other", "tool", "ERROR: shared route failure", "http", now - 1, 1),
+        ])
+        result = core.refine_run(
+            MockLlm({"action": "no_op", "reason": "nothing to change"}),
+            session_id="session",
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["evidence"]["max_sessions_seen"], 2)
+
 
 class SuiteDiscoveryContractTests(unittest.TestCase):
     """Guard against the 08-24 class of failure: a suite that runs ZERO tests.

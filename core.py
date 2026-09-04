@@ -4911,6 +4911,14 @@ def _refine_once(
         session_cap=config.cross_session_max_sessions(),
     )
     evidence["error_patterns"] = error_patterns
+    # The harness must distinguish a local repetition from a pattern that was
+    # actually observed across sessions. This is a count-only summary of the
+    # prioritized patterns rendered to the proposal path; it carries no session
+    # ids or trajectory text and is present for both no-signal and model-call exits.
+    evidence["max_sessions_seen"] = max(
+        (int(pattern.get("sessions_seen", 0) or 0) for pattern in error_patterns),
+        default=0,
+    )
     corrections = evidence.get("user_corrections", [])
     evidence_text = _render_evidence_text(evidence)
     proposal_context = safe_reason
@@ -5199,6 +5207,7 @@ def _refine_once(
         "source_lookup_status": source_lookup_status,
         "messages": len(evidence.get("messages", [])),
         "errors": evidence.get("error_count", 0),
+        "max_sessions_seen": evidence["max_sessions_seen"],
         "fingerprint_offered": _run_llm_meta["fingerprint_offered"],
         "grounded": _run_llm_meta["grounded"],
         # Reported next to ``errors`` because the two are read together: a
