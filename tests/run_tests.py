@@ -14559,6 +14559,42 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(dry_entries)
         self.assertEqual(journal.count_today_applied(), before)
 
+    def test_dry_run_verdict_distinguishes_noop_from_applyable_create(self):
+        """A valid no-op is a durable dry-run decision, never an edit preview."""
+        before = journal.count_today_applied()
+        FakeHost.actions.clear()
+        no_op = core.refine_run(
+            MockLlm({
+                "action": "no_op", "reason": "Synthetic evidence is already covered.",
+                "evidence": ["synthetic"], "pattern_fingerprint": "abcdef123456",
+            }),
+            session_id="session",
+            dry_run=True,
+        )
+        self.assertTrue(no_op["success"])
+        self.assertEqual(no_op["outcome"], "dry_run")
+        self.assertEqual(no_op["proposal"]["action"], "no_op")
+        self.assertFalse(no_op["would_apply"])
+        self.assertFalse(no_op["reversible"])
+        self.assertEqual(no_op["edits_applied"], 0)
+        self.assertEqual(no_op["guardrail_error"], "")
+        no_op_entry = journal.get_entry(no_op["journal_id"])
+        self.assertEqual(no_op_entry["outcome"], "dry_run")
+        self.assertEqual(no_op_entry["proposal"]["action"], "no_op")
+        self.assertFalse(no_op_entry["llm_meta"]["would_apply"])
+        self.assertFalse(list((self.root / "journal" / "backups").glob("*")))
+
+        create = core.refine_run(
+            MockLlm(skill_proposal("dry-run-applyable-create")),
+            session_id="session",
+            dry_run=True,
+        )
+        self.assertTrue(create["would_apply"])
+        self.assertFalse(create["reversible"])
+        self.assertTrue(journal.get_entry(create["journal_id"])["llm_meta"]["would_apply"])
+        self.assertEqual(journal.count_today_applied(), before)
+        self.assertEqual(FakeHost.actions, [])
+
     def test_dry_run_with_reason(self):
         model = MockLlm({
             "action": "no_op", "reason": "nothing", "evidence": [],

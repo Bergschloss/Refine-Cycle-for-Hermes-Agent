@@ -5898,7 +5898,14 @@ def _refine_once(
         # What the apply would decide. A preview that shows a proposal without
         # saying it is unapplyable is worse than no preview: it reads as approval.
         would_reject = _preview_guardrail_error(dry_proposal) or ""
-
+        # A valid no_op is intentionally accepted by the proposal validator, but
+        # it cannot apply an edit. Keep that distinction durable for audits: a
+        # release census must not count "nothing to change" as an applicable
+        # proposal merely because no guardrail rejected its reasoning.
+        would_apply = (
+            dry_proposal.get("action") != "no_op" and not would_reject
+        )
+        dry_run_llm_meta = dict(_run_llm_meta, would_apply=would_apply)
         # Journal the dry run so /refine audit shows it was considered, and record
         # the verdict, so a previewed-but-unapplyable proposal is distinguishable
         # afterwards from one that would have landed.
@@ -5909,7 +5916,7 @@ def _refine_once(
             proposal=dry_proposal,
             outcome="dry_run",
             error=would_reject,
-            llm_meta=_run_llm_meta,
+            llm_meta=dry_run_llm_meta,
         )
         if not dry_run_entry_id:
             return _terminal_result(
@@ -5918,7 +5925,7 @@ def _refine_once(
                 message="Dry-run proposal was generated, but its journal write failed.",
                 proposal=dry_proposal,
                 evidence=evidence_summary,
-                llm_meta=_run_llm_meta,
+                llm_meta=dry_run_llm_meta,
                 extra={"llm_called": True, "edits_applied": 0},
             )
 
@@ -5932,7 +5939,7 @@ def _refine_once(
                 else "Dry run: proposal shown, nothing applied."
             ),
             proposal=dry_proposal,
-            llm_meta=_run_llm_meta,
+            llm_meta=dry_run_llm_meta,
             evidence=evidence_summary,
             extra={
                 "journal_id": dry_run_entry_id,
@@ -5940,9 +5947,12 @@ def _refine_once(
                 "diff_truncated": truncated,
                 "llm_called": True,
                 "edits_applied": 0,
+                # A preview writes no recovery target; it can never be rolled
+                # back, whether its proposed edit is applicable or not.
+                "reversible": False,
                 # The preview's verdict, as data rather than prose, so a census
                 # can count what would actually land.
-                "would_apply": not would_reject,
+                "would_apply": would_apply,
                 "guardrail_error": would_reject,
             },
         )
