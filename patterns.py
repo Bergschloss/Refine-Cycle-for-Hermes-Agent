@@ -121,6 +121,56 @@ def _preserve_http_status(text: str) -> str:
     return text
 
 
+# An exit code, a port and a signal number are the semantic core of a failure
+# the same way an HTTP status is: ``exit code 127`` (command not found) and
+# ``exit code 1`` (any failure) carry different lessons, ``port 22`` and
+# ``443`` are different services, and ``signal 9`` (SIGKILL) and ``15``
+# (SIGTERM) are different deaths. The blanket ``\b\d+\b -> N`` rule erased all
+# of them into one shape, so two unrelated failures fingerprinted as one seen
+# twice -- exactly the recurrence the signal gate then trusts. Preserve the
+# value by gluing it to a letter prefix (``exitcode127``), so the later
+# ``\b\d+\b`` rule cannot reach the digits, mirroring ``httpstatus404``.
+#
+# Each rule is keyword-anchored so an incidental number nearby is NOT promoted:
+# ``\bport\b`` will not fire inside ``reported``/``export``, and the count in
+# ``the port was busy; 500 retries`` is not adjacent to the keyword so it still
+# collapses. The colon-port form is anchored on ``tcp``/``udp`` or a
+# letter-led host (``localhost:8080``), never a bare ``:NN`` -- a clock
+# (``12:34:56``) has only digits around its colons, and a port inside a path
+# (``/v2/8080/items``) has no host:port colon, so both keep collapsing.
+_EXIT_CODE_NUM = re.compile(
+    r"(?i)\bexit(?:\s*(?:code|status)|code|status)\b\s*[:=]?\s*(\d+)"
+)
+_SIGNAL_NUM = re.compile(r"(?i)\bsignal\b\s*[:=]?\s*(\d+)")
+_PORT_WORD_NUM = re.compile(r"(?i)\bport\b\s*[:=]?\s*(\d+)")
+# A colon-port after tcp/udp (``tcp :22``) or a letter-led host (``host:443``);
+# a trailing ``[:.]\d`` guard keeps it off a clock or a dotted-decimal.
+_PORT_TCP_NUM = re.compile(r"(?i)\b(?:tcp|udp)\b\s*:\s*(\d{1,5})\b(?![:.]\d)")
+_PORT_HOST_NUM = re.compile(r"(?i)\b[a-z][\w.-]*:(\d{1,5})\b(?![:.]\d)")
+
+
+def _glue_number(match: "re.Match[str]", prefix: str) -> str:
+    """Replace the captured number with ``<prefix><number>`` in the whole match,
+    so the digits survive the later blanket-integer rule (see httpstatus)."""
+    number = next(group for group in match.groups() if group)
+    return match.group(0).replace(number, f"{prefix}{number}", 1)
+
+
+def _preserve_semantic_numbers(text: str) -> str:
+    """Shield exit codes, ports and signals before the blanket digit rule.
+
+    Runs after ``_preserve_http_status`` and before ``_NORMALIZERS``: the glued
+    token (``exitcode127``) carries no ``\\b\\d+\\b`` boundary, so the general
+    integer rule leaves it alone while still erasing genuinely volatile numbers.
+    """
+    text = _EXIT_CODE_NUM.sub(lambda m: _glue_number(m, "exitcode"), text)
+    text = _SIGNAL_NUM.sub(lambda m: _glue_number(m, "signal"), text)
+    text = _PORT_WORD_NUM.sub(lambda m: _glue_number(m, "netport"), text)
+    text = _PORT_TCP_NUM.sub(lambda m: _glue_number(m, "netport"), text)
+    text = _PORT_HOST_NUM.sub(lambda m: _glue_number(m, "netport"), text)
+    return text
+
+
 # Order matters: timestamps and paths must be replaced before bare integers,
 # otherwise the digit rule eats the parts that make them recognizable.
 _NORMALIZERS = [
@@ -363,6 +413,9 @@ def normalize_error(content: str) -> str:
     # the path rule reads "HTTP/1.1" as a relative path with a ".1" extension
     # (swallowing the anchor along with the code). See _preserve_http_status.
     text = _preserve_http_status(text)
+    # Same idea, for exit codes / ports / signals: shield the semantically
+    # meaningful number before the blanket integer rule collapses it.
+    text = _preserve_semantic_numbers(text)
 
     for pattern, replacement in _NORMALIZERS:
         text = pattern.sub(replacement, text)

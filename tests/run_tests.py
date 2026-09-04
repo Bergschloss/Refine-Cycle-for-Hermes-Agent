@@ -1833,6 +1833,77 @@ class RefineTests(unittest.TestCase):
             "unknown option cliflag_help, try again",
         )
 
+    def test_exit_code_and_port_numbers_are_preserved_like_http_status(self):
+        """Exit codes, ports and signals are the semantic core of a failure, so
+        the blanket integer rule must not erase them into one 'N'.
+
+        exit code 127 (command not found) and exit code 1 (any failure) are
+        different failures with different lessons; port 22 and 443, and signal 9
+        (SIGKILL) and 15 (SIGTERM), likewise. On the parent all three pairs
+        collapsed to one fingerprint -- manufacturing a recurrence the signal
+        gate then trusts. HTTP statuses were already preserved (httpstatus404);
+        these get the same treatment, ahead of the general \\b\\d+\\b rule.
+        """
+        # --- the three defect cases: these must now be DISTINCT ---
+        self.assertNotEqual(
+            patterns.fingerprint("sh", "command failed with exit code 1"),
+            patterns.fingerprint("sh", "command failed with exit code 127"),
+            "exit code 1 and 127 are different failures",
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("net", "connection refused on port 22"),
+            patterns.fingerprint("net", "connection refused on port 443"),
+            "port 22 and 443 are different failures",
+        )
+        self.assertNotEqual(
+            patterns.fingerprint("net", "connection to tcp :22 failed"),
+            patterns.fingerprint("net", "connection to tcp :443 failed"),
+            "tcp :22 and :443 are different failures",
+        )
+        # Signals: the SPEC asked to check them. SIGKILL(9) vs SIGTERM(15) are
+        # different failures, so they are preserved too.
+        self.assertNotEqual(
+            patterns.fingerprint("proc", "killed by signal 9"),
+            patterns.fingerprint("proc", "killed by signal 15"),
+            "signal 9 and 15 are different failures",
+        )
+        # exit status / exitcode= spellings are the same shape and preserved too.
+        self.assertNotEqual(
+            patterns.fingerprint("sh", "process returned exit status 2"),
+            patterns.fingerprint("sh", "process returned exit status 3"),
+        )
+
+        # --- regression guards: things that MUST still collapse ---
+        # A request id / row id underneath a path is still volatile.
+        self.assertEqual(
+            patterns.fingerprint("api", "cannot read /users/8821"),
+            patterns.fingerprint("api", "cannot read /users/9134"),
+            "an id in a path must still collapse",
+        )
+        # A timeout duration is still one failure regardless of the number.
+        self.assertEqual(
+            patterns.fingerprint("net", "request timed out after 10s"),
+            patterns.fingerprint("net", "request timed out after 15s"),
+            "a duration must still collapse",
+        )
+        # A number that merely sits near the word "port" but is not a port is
+        # incidental and must still collapse -- "reported N rows" contains
+        # "port" only inside "reported", and a count after "port was busy" is
+        # not the port itself.
+        self.assertNotIn("netport", patterns.normalize_error("reported 500 rows"))
+        self.assertEqual(
+            patterns.fingerprint("net", "the port was busy; 500 retries"),
+            patterns.fingerprint("net", "the port was busy; 900 retries"),
+            "a count that is not the port must still collapse",
+        )
+        # A port-looking number inside a path segment is not a port: it must
+        # collapse with the rest of the path, not be preserved.
+        self.assertEqual(
+            patterns.fingerprint("api", "GET /v2/8080/items failed"),
+            patterns.fingerprint("api", "GET /v2/9090/items failed"),
+            "a number inside a path is not a port",
+        )
+
     def test_path_normalization_stays_linear_on_long_separator_runs(self):
         """/refine audit normalizes every row twice, with no bound on row count.
 
