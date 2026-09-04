@@ -2123,8 +2123,33 @@ def _active_prompt_notes_safe() -> List[Dict[str, str]]:
         content = scrub_text(note["content"]).strip()
         if _stored_prompt_note_content_error(content):
             continue
-        selected.append({"id": note["id"], "content": content})
+        entry = {"id": note["id"], "content": content}
+        # Preserve the fingerprint when the note carries one (notes written from
+        # 0.14.2 onward do; legacy notes do not). Item 1 uses it to drop a
+        # pattern already solved by a note from the offered set; it is not
+        # rendered into the prompt, only consulted for coverage.
+        fingerprint = str(note.get("fingerprint", "") or "")
+        if fingerprint:
+            entry["fingerprint"] = fingerprint
+        selected.append(entry)
     return selected[-config.prompt_notes_max_count():]
+
+
+def _note_covered_fingerprints() -> frozenset:
+    """Fingerprints already addressed by an active prompt note.
+
+    A pattern whose fingerprint is in this set is an already-solved problem and
+    must not be offered to the proposer (Item 1). Reads the notes already loaded
+    for the proposer context rather than the store a second time. Legacy notes
+    carry no fingerprint and contribute nothing here; they are still deduplicated
+    by the existing text checks at proposal/apply time.
+    """
+    covered = set()
+    for note in _active_prompt_notes_safe():
+        fingerprint = str(note.get("fingerprint", "") or "")
+        if fingerprint:
+            covered.add(fingerprint)
+    return frozenset(covered)
 
 
 def _render_notes_overview(notes: List[Dict[str, str]]) -> str:
@@ -3828,6 +3853,41 @@ def _terminal_result(
     return base
 
 
+def _pattern_sessions_and_occurrences(pattern: Dict[str, Any]) -> Tuple[int, int]:
+    """Read a pattern's clamped (sessions_seen, count), tolerating bad values.
+
+    Shared by the apply check and the render gate so a malformed field is read
+    the same way in both -- a pattern that the apply bar would treat as zero
+    must not slip into the prompt because the renderer read it more leniently.
+    """
+    try:
+        sessions_seen = max(0, int(pattern.get("sessions_seen", 0)))
+    except (TypeError, ValueError):
+        sessions_seen = 0
+    try:
+        occurrences = max(0, int(pattern.get("count", 0)))
+    except (TypeError, ValueError):
+        occurrences = 0
+    return sessions_seen, occurrences
+
+
+def _pattern_meets_apply_bar(pattern: Dict[str, Any]) -> bool:
+    """Whether a pattern clears the same bar the apply check enforces.
+
+    The single predicate: a pattern is applicable when it was seen in at least
+    ``apply_min_sessions()`` distinct sessions OR occurred at least
+    ``apply_min_occurrences()`` times. Both ``_application_evidence_refusal``
+    (the apply bar) and the prompt renderer call this, so the model can only be
+    offered a pattern that could actually be applied. Two copies of this rule
+    would drift; AGENTS.md names that failure mode.
+    """
+    sessions_seen, occurrences = _pattern_sessions_and_occurrences(pattern)
+    return (
+        sessions_seen >= config.apply_min_sessions()
+        or occurrences >= config.apply_min_occurrences()
+    )
+
+
 def _application_evidence_refusal(
     proposal: Dict[str, Any],
     all_error_patterns: List[Dict[str, Any]],
@@ -3880,18 +3940,10 @@ def _application_evidence_refusal(
             if proposal.get("action") == "multi":
                 message += f" Unbacked edit index: {index}."
             return "unbacked_pattern", message
-        try:
-            sessions_seen = max(0, int(backing_pattern.get("sessions_seen", 0)))
-        except (TypeError, ValueError):
-            sessions_seen = 0
-        try:
-            occurrences = max(0, int(backing_pattern.get("count", 0)))
-        except (TypeError, ValueError):
-            occurrences = 0
-        if (
-            sessions_seen < config.apply_min_sessions()
-            and occurrences < config.apply_min_occurrences()
-        ):
+        sessions_seen, occurrences = _pattern_sessions_and_occurrences(
+            backing_pattern
+        )
+        if not _pattern_meets_apply_bar(backing_pattern):
             outcome = (
                 "explicit_session_thin_evidence"
                 if explicit_session else "thin_evidence"
@@ -5025,11 +5077,38 @@ def _refine_once(
     # returned through several tool-result paths and rendered to the proposal
     # model, so it must remain bounded and include the pattern that opens the
     # gate instead of exposing an arbitrary full cross-session history.
-    error_patterns = patterns.prioritize_signal_patterns(
+    prioritized_patterns = patterns.prioritize_signal_patterns(
         all_error_patterns,
         min_count=_min_pattern_count,
         session_cap=config.cross_session_max_sessions(),
     )
+    # Item 1 (stop-generating-garbage): when the signal gate is in force, the
+    # model may only be offered a pattern it could actually apply, and one that
+    # is not already solved. Two filters, both before the evidence is rendered:
+    #   * apply-bar predicate -- the SAME ``_pattern_meets_apply_bar`` the apply
+    #     check enforces, so the renderer and the guard cannot drift; and
+    #   * note coverage -- a pattern whose fingerprint matches an active prompt
+    #     note is an already-solved problem, dropped using the notes already
+    #     loaded for the proposer (``_active_prompt_notes_safe``), not a second
+    #     read of the store.
+    # Both are conditioned on ``_min_signal_required`` -- the same switch that
+    # already governs "skip the model when nothing repeated". With it off, the
+    # operator has asked for the model to run regardless of signal, so narrowing
+    # what is offered (and its ``offered_fingerprints`` telemetry) would silently
+    # override that. ``all_error_patterns`` stays the full observed set either
+    # way: grounding (``_observed_fps``) and the apply check measure against
+    # everything seen; only the OFFERED set narrows.
+    if _min_signal_required:
+        _covered_fingerprints = _note_covered_fingerprints()
+        error_patterns = [
+            pattern
+            for pattern in prioritized_patterns
+            if _pattern_meets_apply_bar(pattern)
+            and str(pattern.get("fingerprint", "") or "")
+            not in _covered_fingerprints
+        ]
+    else:
+        error_patterns = prioritized_patterns
     evidence["error_patterns"] = error_patterns
     # The harness must distinguish a local repetition from a pattern that was
     # actually observed across sessions. This is a count-only summary of the
@@ -5044,6 +5123,61 @@ def _refine_once(
     proposal_context = safe_reason
     reviewer_context = ""
     _signal_path = "gate_disabled"
+    # Item 1: a window can pass the signal gate (a pattern repeated enough to be
+    # worth a look) yet have nothing that clears the higher APPLY bar, or have
+    # its only qualifying pattern already covered by an active note. That is the
+    # xsession-01 shape: the gate opened on a real pattern and the model then
+    # wrote about the noise beside it. When the signal gate WOULD open on the
+    # observed patterns but the filtered offer set is empty (and there is no
+    # explicit correction to act on), the proposer has nothing legitimate to be
+    # shown, so the pass reaches no_op WITHOUT any model call -- neither proposer
+    # nor reviewer. Journaled as its own outcome so it is distinguishable from
+    # "the model was asked and declined" (AGENTS.md silent-no_op rule).
+    #
+    # This is deliberately NOT the "nothing repeated at all" case: that still
+    # falls through to ``_handle_no_signal`` below, which owns the reviewer
+    # fallback the operator may have enabled for exactly a quiet window.
+    _gate_would_open = patterns.has_signal(
+        prioritized_patterns, corrections, min_count=_min_pattern_count,
+        session_cap=config.cross_session_max_sessions(),
+    )
+    if (
+        _min_signal_required
+        and _gate_would_open
+        and not error_patterns
+        and not corrections
+    ):
+        _no_offer_reason = (
+            "A pattern passed the signal gate but none cleared the apply bar (or "
+            "every one was already covered by an active note), and there was no "
+            "explicit correction; nothing could be offered to the model."
+        )
+        return _terminal_result(
+            outcome="no_applicable_pattern",
+            success=True,
+            message=f"No actionable improvement found. {_no_offer_reason}",
+            trigger=trigger,
+            safe_reason=safe_reason or _no_offer_reason,
+            session=session,
+            proposal={
+                "action": "no_op",
+                "reason": _no_offer_reason,
+                "expected_outcome": "",
+            },
+            evidence=evidence,
+            llm_meta={
+                "signal_path": "no_applicable_pattern",
+                **_evidence_suppression,
+                **(_cross_session_truncation or {}),
+                **(
+                    {"cross_session_unavailable": _cross_session_unavailable["reason"]}
+                    if _cross_session_unavailable
+                    and _cross_session_unavailable.get("reason")
+                    else {}
+                ),
+            },
+            extra={"llm_called": False, "edits_applied": 0, "reversible": False},
+        )
     if _min_signal_required and not patterns.has_signal(
         error_patterns, corrections, min_count=_min_pattern_count,
         session_cap=config.cross_session_max_sessions(),

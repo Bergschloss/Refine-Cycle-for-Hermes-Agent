@@ -13975,10 +13975,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_signal_path_gate_opened_when_repeated_error_signal_present(self):
         now = time.time()
+        # Five occurrences of one normalized shape: clears the apply bar (>=5
+        # occurrences) so the gate opens AND the pattern is offerable, which is
+        # what "gate opened, model reached" now requires (Item 1).
         FakeHost.make_db([
-            ("session", "tool", "ERROR: request failed for /item/100", "http", now - 3, 1),
-            ("session", "assistant", "Retrying", "", now - 2, 1),
-            ("session", "tool", "ERROR: request failed for /item/200", "http", now - 1, 1),
+            ("session", "tool", f"ERROR: request failed for /item/{index}00", "http", now - 10 + index, 1)
+            for index in range(5)
         ])
         FakeHost.entry_config()["min_signal_required"] = True
         model = MockLlm({"action": "no_op", "reason": "nothing"})
@@ -13991,10 +13993,11 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_signal_path_uses_one_per_pass_gate_config_snapshot(self):
         now = time.time()
+        # Above-bar occurrence count so the pattern is offerable and the gate
+        # opens (Item 1); the test's subject is the config snapshot, not the bar.
         FakeHost.make_db([
-            ("session", "tool", "ERROR: request failed for /item/100", "http", now - 3, 1),
-            ("session", "assistant", "Retrying", "", now - 2, 1),
-            ("session", "tool", "ERROR: request failed for /item/200", "http", now - 1, 1),
+            ("session", "tool", f"ERROR: request failed for /item/{index}00", "http", now - 10 + index, 1)
+            for index in range(5)
         ])
         values = iter((True, False, False))
         with patch.object(
@@ -14148,6 +14151,142 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         # the eight rendered into the prompt, which is a separate fact.
         self.assertIs(meta["grounded"], True)
         self.assertIs(meta["fingerprint_rendered"], False)
+
+    # ── Item 1: only offer patterns that could actually be applied ────────────
+
+    def _run_with_patterns(self, proposal, error_patterns, *, active_notes=None):
+        """Drive one refine pass over a fixed pattern set, gate live.
+
+        The apply gate is normally patched off in this class; Item 1's render
+        gate is a SEPARATE decision made before the model call, so it must be
+        exercised with the real predicate."""
+        evidence = {
+            "messages": [
+                {"role": "user", "content": "one", "tool_name": ""},
+                {"role": "assistant", "content": "two", "tool_name": ""},
+                {"role": "tool", "content": "three", "tool_name": "http"},
+            ],
+            "error_count": sum(p.get("count", 0) for p in error_patterns),
+            "error_patterns": [dict(p) for p in error_patterns],
+            "user_corrections": [],
+            "collection_status": "ok",
+        }
+        notes = list(active_notes or [])
+        # Item 1's offer gate is in force only when the signal switch is on --
+        # the same switch that governs "skip the model when nothing repeated".
+        FakeHost.entry_config()["min_signal_required"] = True
+        with patch.object(core, "collect_evidence", return_value=evidence), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]), \
+             patch.object(core, "_active_prompt_notes_safe", return_value=notes):
+            model = MockLlm(proposal)
+            result = core.refine_run(model, session_id="session")
+        return result, model
+
+    def test_below_bar_pattern_is_not_offered_and_reaches_no_op_without_llm(self):
+        """Item 1: a lone pattern that clears neither the session bar (>=2) nor
+        the occurrence bar (>=5) is never rendered, so the pass has nothing
+        legitimate to offer and must reach no_op WITHOUT calling the model, with
+        a journal outcome distinguishable from a model that was asked and
+        declined."""
+        below = [{
+            "fingerprint": "aaaaaaaaaaaa", "count": 2, "sessions_seen": 1,
+            "tool": "http", "sample": "request failed",
+        }]
+        result, model = self._run_with_patterns(
+            skill_proposal("must-not-be-proposed"), below
+        )
+        self.assertEqual(len(model.calls), 0, "the model must not be called")
+        self.assertFalse(result.get("llm_called"))
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(FakeHost.actions, [])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "no_applicable_pattern")
+        # Distinguishable from an ordinary no_op the model produced.
+        self.assertNotEqual(entry["outcome"], "no_op")
+
+    def test_pattern_meeting_either_half_of_the_bar_is_offered(self):
+        """sessions_seen=2 (session half) and count>=5 (occurrence half) each
+        clear the bar on their own; sessions_seen=1/count=2 does not. The gate
+        and the apply check move together when the config moves."""
+        self.assertTrue(core._pattern_meets_apply_bar(
+            {"count": 2, "sessions_seen": 2}))
+        self.assertTrue(core._pattern_meets_apply_bar(
+            {"count": 5, "sessions_seen": 1}))
+        self.assertFalse(core._pattern_meets_apply_bar(
+            {"count": 2, "sessions_seen": 1}))
+        # Renderer and apply check share ONE predicate: move the config and both
+        # move. Raise the session bar to 3 -- a 2-session pattern now fails both.
+        FakeHost.entry_config()["apply_min_sessions"] = 3
+        FakeHost.entry_config()["apply_min_occurrences"] = 99
+        self.assertFalse(core._pattern_meets_apply_bar(
+            {"count": 2, "sessions_seen": 2}))
+
+    def test_proposal_citing_an_unoffered_fingerprint_does_not_apply(self):
+        """Item 1 rule 2: a proposal whose fingerprint was never offered to the
+        model does not apply, and the journal names that it was not offered
+        (as opposed to being empty)."""
+        self._application_gate_patch.stop()
+        offered = [{
+            "fingerprint": "bbbbbbbbbbbb", "count": 5, "sessions_seen": 1,
+            "tool": "http", "sample": "request failed",
+        }]
+        proposal = skill_proposal("cites-a-ghost")
+        proposal["pattern_fingerprint"] = "ffffffffffff"  # never observed/offered
+        result, model = self._run_with_patterns(proposal, offered)
+        self.assertEqual(len(model.calls), 1, "a qualifying pattern was offered")
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(result["outcome"], "unbacked_pattern")
+
+    def test_pattern_covered_by_an_active_note_is_not_offered(self):
+        """Item 1: a pattern already addressed by an active prompt note is not an
+        unsolved problem and must not be offered, while an uncovered pattern
+        beside it still is. Coverage is by fingerprint carried on the note."""
+        covered_fp = "cccccccccccc"
+        uncovered_fp = "dddddddddddd"
+        patterns_two = [
+            {"fingerprint": covered_fp, "count": 5, "sessions_seen": 1,
+             "tool": "http", "sample": "covered failure"},
+            {"fingerprint": uncovered_fp, "count": 5, "sessions_seen": 1,
+             "tool": "shell", "sample": "uncovered failure"},
+        ]
+        note = {
+            "id": "0123456789ab",
+            "content": "When http fails, check the endpoint.",
+            "fingerprint": covered_fp,
+        }
+        proposal = skill_proposal("about-the-uncovered-one")
+        proposal["pattern_fingerprint"] = uncovered_fp
+        result, model = self._run_with_patterns(
+            proposal, patterns_two, active_notes=[note]
+        )
+        # The model was still called: an uncovered qualifying pattern remained.
+        self.assertEqual(len(model.calls), 1)
+        rendered = model.calls[0]["input"][0].text
+        self.assertIn(uncovered_fp, rendered)
+        self.assertNotIn(covered_fp, rendered)
+
+    def test_every_pattern_covered_by_a_note_reaches_no_op_without_llm(self):
+        """When the only qualifying pattern is already covered by an active
+        note, nothing is left to offer -- no_op, no model call."""
+        covered_fp = "eeeeeeeeeeee"
+        patterns_one = [{
+            "fingerprint": covered_fp, "count": 5, "sessions_seen": 1,
+            "tool": "http", "sample": "covered failure",
+        }]
+        note = {
+            "id": "0123456789ac",
+            "content": "When http fails, check the endpoint.",
+            "fingerprint": covered_fp,
+        }
+        result, model = self._run_with_patterns(
+            skill_proposal("already-covered"), patterns_one, active_notes=[note]
+        )
+        self.assertEqual(len(model.calls), 0)
+        self.assertFalse(result.get("llm_called"))
+        self.assertEqual(
+            journal.get_entry(result["journal_id"])["outcome"],
+            "no_applicable_pattern",
+        )
 
     # ── Dry-run (Part E) ──────────────────────────────────────────────────────
 
