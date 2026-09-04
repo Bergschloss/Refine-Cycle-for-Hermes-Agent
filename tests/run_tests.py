@@ -25712,6 +25712,146 @@ class Release0144ContractTests(unittest.TestCase):
         self.assertEqual(result["edits_applied"], 0)
         self.assertEqual(FakeHost.actions, [])
 
+    # ── 0.14.5 follow-up P1: refusal precedence (evidence before content) ────
+    def test_reviewer_refusal_precedes_content_guard_in_preview(self):
+        """RED on 834d62a: a reviewer-approved proposal that is ALSO content
+        invalid (duplicate skill) previews as the content failure, while a real
+        apply refuses it as reviewer_only BEFORE ever validating content.
+
+        The real apply order is: _application_evidence_refusal() first (which
+        returns reviewer_only for a reviewer_approved pass), then content/
+        application validation inside _apply_edit only if that gate passes. The
+        preview must report the SAME first refusal — reviewer_only — not the
+        content guard that the real apply never reaches."""
+        self._reviewer_dry_run_setup()
+        # Pre-create the skill so the reviewer-approved create is also a
+        # deterministic content rejection (_validate_proposal: "already exists").
+        FakeHost.add_skill(
+            "reviewer-dry-run", skill_content("reviewer-dry-run", "# Guidance\n\nExisting."),
+        )
+        model = MockLlm(
+            SchemaUnsupportedError(),
+            MockResult(
+                None,
+                text='{"shouldRefine":true,"rationale":"durable",'
+                     '"instructions":"persist retry lesson"}',
+            ),
+            skill_proposal("reviewer-dry-run"),
+        )
+        result = core.refine_run(model, session_id="session", dry_run=True)
+
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertEqual(result["llm_meta"]["signal_path"], "reviewer_approved")
+        self.assertFalse(result["would_apply"])
+        self.assertFalse(result["reversible"])
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(result["llm_meta"]["result_code"], "reviewer_only")
+        self.assertIn("advisory", result["guardrail_error"].lower())
+        self.assertEqual(FakeHost.actions, [])
+
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["llm_meta"]["result_code"], "reviewer_only")
+        self.assertIs(entry["llm_meta"]["would_apply"], False)
+        self.assertIn("advisory", entry["error"].lower())
+
+    def test_gate_opened_content_guard_remains_content_rejection(self):
+        """Control for the precedence fix: a non-reviewer (gate_opened) pass with
+        the SAME content-invalid proposal and sufficient grounded evidence must
+        still report the CONTENT guardrail as the reason, and must NOT be
+        mislabeled reviewer_only. Moving the evidence gate ahead of the content
+        guard must not change the answer for a gate-opened pass."""
+        fingerprint = "abcdef123456"
+        pattern = {"fingerprint": fingerprint, "count": 5, "sessions_seen": 2,
+                   "tool": "http", "sample": "request failed"}
+        # Pre-create the skill so the create is a duplicate content rejection.
+        FakeHost.add_skill(
+            "gate-dup", skill_content("gate-dup", "# Guidance\n\nExisting."),
+        )
+        proposal = dict(skill_proposal("gate-dup"), pattern_fingerprint=fingerprint)
+        result = self._preview(proposal, self._grounded_evidence(pattern))
+
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertFalse(result["would_apply"])
+        self.assertNotEqual(result["llm_meta"].get("result_code"), "reviewer_only")
+        self.assertIn("already exists", result["guardrail_error"].lower())
+        self.assertEqual(FakeHost.actions, [])
+
+    # ── 0.14.5 follow-up P2: dry-run must honor the daily edit budget ────────
+    def _budget_grounded_evidence(self, fingerprint):
+        pattern = {"fingerprint": fingerprint, "count": 5, "sessions_seen": 1,
+                   "tool": "http", "sample": "request failed"}
+        return self._grounded_evidence(pattern)
+
+    def test_dry_run_exhausted_budget_previews_non_applyable(self):
+        """RED on 834d62a: the dry-run preview never consults
+        journal.daily_limit_reached(), so an otherwise-applicable create previews
+        as would_apply=true even though an immediate real apply refuses at the
+        budget gate (core.py real non-dry path) before proposal generation.
+
+        The preview is a point-in-time snapshot: with the budget exhausted right
+        now, the first real-apply refusal is daily_limit_reached."""
+        fingerprint = "abcdef123456"
+        proposal = dict(skill_proposal("budget-full"), pattern_fingerprint=fingerprint)
+        with patch.object(journal, "daily_limit_reached", return_value=True), \
+             patch.object(journal, "count_today_applied",
+                          return_value=config.max_edits_per_day()):
+            result = self._preview(proposal, self._budget_grounded_evidence(fingerprint))
+
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertFalse(result["would_apply"])
+        self.assertFalse(result["reversible"])
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(result["llm_meta"]["result_code"], "daily_limit_reached")
+        self.assertIn("Daily edit limit reached", result["guardrail_error"])
+        self.assertEqual(FakeHost.actions, [])
+
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["llm_meta"]["result_code"], "daily_limit_reached")
+        self.assertIs(entry["llm_meta"]["would_apply"], False)
+        self.assertIn("Daily edit limit reached", entry["error"])
+
+    def test_dry_run_available_budget_previews_applyable(self):
+        """Control: with budget available and the same grounded proposal, the
+        preview must report would_apply=true and no guardrail error."""
+        fingerprint = "abcdef123456"
+        proposal = dict(skill_proposal("budget-ok"), pattern_fingerprint=fingerprint)
+        with patch.object(journal, "daily_limit_reached", return_value=False):
+            result = self._preview(proposal, self._budget_grounded_evidence(fingerprint))
+
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertTrue(result["would_apply"])
+        self.assertEqual(result["guardrail_error"], "")
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_dry_run_budget_precedes_reviewer_and_content(self):
+        """Combination precedence: because a real non-dry run exits at the budget
+        gate BEFORE proposal generation, an exhausted budget must be the reported
+        preview verdict even when the proposal is reviewer-approved and content
+        invalid. Budget is the first real-apply refusal at the moment of preview."""
+        self._reviewer_dry_run_setup()
+        FakeHost.add_skill(
+            "reviewer-dry-run", skill_content("reviewer-dry-run", "# Guidance\n\nExisting."),
+        )
+        model = MockLlm(
+            SchemaUnsupportedError(),
+            MockResult(
+                None,
+                text='{"shouldRefine":true,"rationale":"durable",'
+                     '"instructions":"persist retry lesson"}',
+            ),
+            skill_proposal("reviewer-dry-run"),
+        )
+        with patch.object(journal, "daily_limit_reached", return_value=True), \
+             patch.object(journal, "count_today_applied",
+                          return_value=config.max_edits_per_day()):
+            result = core.refine_run(model, session_id="session", dry_run=True)
+
+        self.assertEqual(result["outcome"], "dry_run")
+        self.assertFalse(result["would_apply"])
+        self.assertEqual(result["llm_meta"]["result_code"], "daily_limit_reached")
+        self.assertIn("Daily edit limit reached", result["guardrail_error"])
+        self.assertEqual(FakeHost.actions, [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
