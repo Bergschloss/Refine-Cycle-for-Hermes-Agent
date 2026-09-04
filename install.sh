@@ -198,6 +198,24 @@ mapfile -t TOUCHED_FILES < <(patch_touched_files "$PATCH_FILE")
 say "Touched files  : ${#TOUCHED_FILES[@]}"
 
 # ---------------------------------------------------------------------------
+# Fail closed on a touched path the user has already STAGED.
+#
+# restore() puts working-tree bytes back from a backup and then resets the
+# touched paths to HEAD. A backup cannot carry an index stage, so if the user
+# had staged their own change to a touched path, that scoped reset would
+# silently destroy work this installer never made. Refusing here — before any
+# backup, apply or index write — is the only honest option: the alternative is
+# serializing and replaying arbitrary index state, which is exactly the kind of
+# approximation that makes an undo path lie.
+# ---------------------------------------------------------------------------
+if ! git -C "$HERMES_SRC" diff --cached --quiet -- "${TOUCHED_FILES[@]}" 2>/dev/null; then
+    fail "a touched path has staged changes in $HERMES_SRC; nothing was modified.
+  Touched paths: ${TOUCHED_FILES[*]}
+  This installer's undo step resets those paths to HEAD, which would discard
+  index state it did not create. Commit or unstage them, then re-run."
+fi
+
+# ---------------------------------------------------------------------------
 # Backup every touched file before writing; restore() is the single undo step
 #
 # Restore has to put the host back the way a user would expect "undo" to mean:
@@ -230,8 +248,14 @@ restore() {
     done
     # Unstage the touched paths so the index matches HEAD again; scoped to the
     # paths we touched, never a bare `git reset`.
+    #
+    # A failing reset counts as a FAILED restore (`ok=0`), not as an ignorable
+    # detail. It used to be `|| true`: the index stayed staged from `git apply`,
+    # the script still printed "pre-patch state fully restored", and the EXIT
+    # trap then deleted the only recovery copy — the exact combination this
+    # restore path exists to prevent.
     if [ "${#TOUCHED_FILES[@]}" -gt 0 ]; then
-        git -C "$HERMES_SRC" reset -q -- "${TOUCHED_FILES[@]}" >/dev/null 2>&1 || true
+        git -C "$HERMES_SRC" reset -q -- "${TOUCHED_FILES[@]}" >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
         say "pre-patch state fully restored; recovery copy at $BACKUP_DIR removed on exit."

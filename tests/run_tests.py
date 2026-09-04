@@ -21322,6 +21322,98 @@ class InstallScriptTests(unittest.TestCase):
             cwd=str(self.hermes_src),
         ).returncode == 0
 
+    def test_preexisting_staged_touched_path_refuses_before_mutation(self):
+        """The installer cannot reset a user-owned staged entry to HEAD.
+
+        A backup preserves only working-tree bytes, not arbitrary index stages.
+        Refusing before mutation is therefore the only fail-closed behavior for
+        a touched path that already differs between HEAD and the index.
+        """
+        self._write_patch_and_generate(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
+            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
+        )
+        touched = self.hermes_src / "agent" / "plugin_llm.py"
+        touched.write_text("MODEL_LLM = True\nUSER_STAGED = True\n", encoding="utf-8")
+        subprocess.run(
+            [self.GIT or "git", "add", "agent/plugin_llm.py"],
+            cwd=self.hermes_src,
+            check=True,
+        )
+        staged_before = subprocess.run(
+            [self.GIT or "git", "diff", "--cached", "--binary"],
+            cwd=self.hermes_src,
+            capture_output=True,
+            check=True,
+        ).stdout
+        # Keep the user-owned index entry staged while making the worktree match
+        # HEAD, so git apply --check can reach the installer's staged-state gate.
+        base_bytes = subprocess.run(
+            [self.GIT or "git", "show", "HEAD:agent/plugin_llm.py"],
+            cwd=self.hermes_src,
+            capture_output=True,
+            check=True,
+        ).stdout
+        touched.write_bytes(base_bytes)
+        worktree_before = self._snapshot()
+
+        done = self._run_install()
+
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("staged changes", done.stderr)
+        self.assertEqual(self._snapshot(), worktree_before)
+        staged_after = subprocess.run(
+            [self.GIT or "git", "diff", "--cached", "--binary"],
+            cwd=self.hermes_src,
+            capture_output=True,
+            check=True,
+        ).stdout
+        self.assertEqual(staged_after, staged_before, "refusal must preserve the user's index")
+        self.assertEqual(self._backup_dirs(), [], "refusal happens before creating a backup")
+
+    def test_reset_failure_is_reported_and_keeps_recovery_copy(self):
+        """A failed scoped reset is a failed restore, not a clean recovery.
+
+        BASH_ENV installs a git function in the non-interactive installer shell.
+        Every git command delegates to the real binary except the exact restore
+        reset, which fails after verification has already forced restoration.
+        """
+        self._write_patch_and_generate(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",
+            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
+        )
+        bash_env = self.base / "fail-reset.bash"
+        bash_env.write_text(
+            "git() {\n"
+            "  if [ \"${1:-}\" = \"-C\" ] && [ \"${3:-}\" = \"reset\" ]; then\n"
+            "    return 73\n"
+            "  fi\n"
+            "  command git \"$@\"\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        env = {
+            "HERMES_SRC": str(self.hermes_src),
+            "PYTHON": sys.executable,
+            "TMPDIR": str(self.base),
+            "PATH": os.environ.get("PATH", ""),
+            "BASH_ENV": bash_env.as_posix(),
+        }
+
+        done = subprocess.run(
+            [self.BASH or "bash", str(self.repo_dir / "install.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(self.repo_dir),
+        )
+
+        self.assertNotEqual(done.returncode, 0)
+        output = done.stdout + done.stderr
+        self.assertIn("RESTORE FAILED", output)
+        self.assertNotIn("pre-patch state fully restored", output)
+        self.assertEqual(len(self._backup_dirs()), 1, "failed restore must retain recovery")
+
     def test_verification_failure_undoes_created_file_and_index(self):
         """A verification failure must undo a file the patch CREATED and leave
         the index clean — not just copy pre-existing files back.
