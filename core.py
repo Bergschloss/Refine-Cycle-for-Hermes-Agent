@@ -97,6 +97,36 @@ _UNTRUSTED_TOOL_REGION = re.compile(
 # tool_name, which is why the payload shape is checked too and not just the name.
 _REFINE_OWN_TOOL_NAMES = frozenset({"refine_run"})
 
+# Rows the plugin generated about itself, which are not agent failures and must
+# not become evidence (spec: stop-generating-garbage, Item 2). Two markers, each
+# named and no broader:
+#   * the plugin's own synthetic-test scratch prefix -- a directory created and
+#     destroyed by refine's own synthetic test, e.g.
+#     ``scratch/refine-synth-test-1788433382``; the agent never had a real
+#     problem there;
+#   * this repository's own suite entry point -- ``tests.run_tests``, including
+#     the ``python -m tests.run_tests`` form.
+# Deliberately NOT matched: ``AssertionError``, ``pytest``, ``unittest``,
+# ``Traceback``, or the bare word "test". The agent legitimately runs and debugs
+# the user's own tests, and those failures are real evidence; a filter that
+# swallowed them would trade one blindness for a worse one.
+_SELF_GENERATED_EVIDENCE_MARKERS = (
+    "scratch/refine-synth-",
+    "scratch\\refine-synth-",
+    "tests.run_tests",
+)
+
+
+def _is_self_generated_evidence(content: str) -> bool:
+    """True when a row references only the plugin's own synthetic scratch or suite.
+
+    Matched against the raw row rather than the classified text so a suite or
+    synthetic-scratch failure is excluded regardless of how it is phrased. The
+    markers are literal substrings, not error-shape heuristics, so a real agent
+    failure that merely resembles a test cannot be caught here.
+    """
+    return any(marker in content for marker in _SELF_GENERATED_EVIDENCE_MARKERS)
+
 
 def _strip_untrusted_regions(text: str) -> str:
     """Remove untrusted regions entirely, tags and enclosed content alike.
@@ -148,6 +178,8 @@ def _evidence_text_or_none(raw_content: str, tool_name: str) -> Optional[str]:
     returns, not the raw row, or the removal is cosmetic.
     """
     if _is_refine_own_result(raw_content, tool_name):
+        return None
+    if _is_self_generated_evidence(raw_content):
         return None
     trusted = _strip_untrusted_regions(raw_content)
     if not trusted.strip():

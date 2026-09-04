@@ -1115,6 +1115,41 @@ class RefineTests(unittest.TestCase):
         self.assertTrue(core._is_error_content("x" * 10000 + " timeout"))
         self.assertFalse(core._is_error_content("exit_code: 0\ncompleted normally"))
 
+    def test_synthetic_scratch_and_suite_rows_are_not_evidence(self):
+        """Item 2: the plugin's own synthetic scratch path and this repo's suite
+        entry point are self-generated noise, not agent failures. They are
+        excluded at the single admission point so both collectors inherit it.
+
+        Deliberately NOT excluded: an ordinary scratch path, and an
+        AssertionError from an unrelated project -- those are real evidence the
+        agent debugs for the user, and over-filtering them is the worse blindness."""
+        synth = (
+            "cd: /home/ubuntu/.hermes/scratch/refine-synth-test-1788433382: "
+            "No such file or directory"
+        )
+        self.assertIsNone(core._evidence_text_or_none(synth, "terminal"))
+
+        suite = "FAILED (errors=1) running python -m tests.run_tests"
+        self.assertIsNone(core._evidence_text_or_none(suite, "terminal"))
+        suite_dotted = "ModuleNotFoundError raised from tests.run_tests import"
+        self.assertIsNone(core._evidence_text_or_none(suite_dotted, "terminal"))
+
+        # An ordinary scratch path is still real evidence.
+        ordinary = "cd: /home/ubuntu/scratch/build-output: No such file or directory"
+        self.assertIsNotNone(core._evidence_text_or_none(ordinary, "terminal"))
+        # An AssertionError from an unrelated project is still real evidence.
+        # This is the test that proves we did not over-filter: it names a test
+        # file and an AssertionError but not the plugin's own suite entry point.
+        unrelated = (
+            "Traceback (most recent call last):\n"
+            '  File "src/app/handlers.py", line 12, in check\n'
+            "AssertionError: expected 200 but got 500"
+        )
+        self.assertIsNotNone(core._evidence_text_or_none(unrelated, "pytest"))
+        # The filter itself must not match this row -- proving the None above,
+        # if it ever occurs, would come from classification, never from Item 2.
+        self.assertFalse(core._is_self_generated_evidence(unrelated))
+
     def test_returned_data_mentioning_an_error_is_not_a_failed_call(self):
         """A successful read of a file that talks about errors is a success.
 
