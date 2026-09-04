@@ -6,6 +6,7 @@ under a fresh TemporaryDirectory; it never reads or writes live Hermes state.
 """
 
 import ast
+import hashlib
 import importlib.util
 import inspect
 import re
@@ -595,11 +596,20 @@ def grouped_entries():
     return [entry for entry in journal.entries() if entry.get("group")]
 
 
-def prompt_proposal(content):
+def prompt_proposal(content, *, pattern_fingerprint=None):
+    # A note's fingerprint is derived from its content by default, so two
+    # DISTINCT-content notes carry DISTINCT fingerprints -- matching the real
+    # world (different lessons come from different patterns) and keeping tests
+    # that create several notes clear of the Item 3 fingerprint-dedup. Pass
+    # ``pattern_fingerprint`` explicitly to force a collision.
+    if pattern_fingerprint is None:
+        pattern_fingerprint = hashlib.sha1(
+            content.encode("utf-8", "replace")
+        ).hexdigest()[:12]
     return {
         "action": "create", "kind": "prompt", "name": "",
         "content": content, "reason": "Repeated behavioral failure",
-        "evidence": ["request failed"], "pattern_fingerprint": "deadbeef1234",
+        "evidence": ["request failed"], "pattern_fingerprint": pattern_fingerprint,
     }
 
 
@@ -8451,9 +8461,15 @@ class RefineTests(unittest.TestCase):
         note_id = entry["recovery"]["note_id"]
         self.assertEqual(entry["recovery"], {"type": "prompt_note", "note_id": note_id})
         stored = json.loads(journal.prompt_notes_path().read_text(encoding="utf-8"))
+        # The note now persists the fingerprint of the pattern it addresses
+        # (Item 3); prompt_proposal derives it from the content by default.
+        expected_fp = hashlib.sha1(policy.encode("utf-8", "replace")).hexdigest()[:12]
         self.assertEqual(
             stored["notes"],
-            [{"id": note_id, "content": policy, "scope": "global"}],
+            [{
+                "id": note_id, "content": policy, "scope": "global",
+                "fingerprint": expected_fp,
+            }],
         )
         self.assertEqual(plugin_init._on_pre_llm_call(), {"context": f"Refine notes:\n- {policy}"})
         audit_rows = core.refine_audit()["rows"]
@@ -9191,6 +9207,97 @@ class RefineTests(unittest.TestCase):
         remaining = journal.load_prompt_notes()
         self.assertTrue(any(note["id"] == changed_entry["recovery"]["note_id"] and note["content"] == "A user changed this policy after creation." for note in remaining))
         self.assertTrue(any(note["id"] == journal.get_entry(later["journal_id"])["recovery"]["note_id"] for note in remaining))
+
+    # ── Item 3: prompt notes deduplicate by pattern fingerprint ───────────────
+
+    def test_new_prompt_note_persists_its_pattern_fingerprint(self):
+        """A note written from now on carries the fingerprint of the pattern it
+        addresses, so a later pass can recognize the pattern as already solved
+        (Item 1 coverage) without guessing from the wording."""
+        fp = "abc123abc123"
+        result = self.run_proposal(
+            prompt_proposal(
+                "When a request times out, verify the endpoint.",
+                pattern_fingerprint=fp,
+            )
+        )
+        self.assertTrue(result["success"], result.get("message"))
+        notes = journal.load_prompt_notes()
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].get("fingerprint"), fp)
+
+    def test_same_fingerprint_note_applies_once_then_is_refused(self):
+        """Item 3: two proposals for the SAME fingerprint -- the first applies,
+        the second is refused as a duplicate, even though the wording differs."""
+        fp = "1a2b3c4d5e6f"
+        first = self.run_proposal(
+            prompt_proposal(
+                "When a call times out, verify the endpoint.",
+                pattern_fingerprint=fp,
+            )
+        )
+        self.assertTrue(first["success"], first.get("message"))
+        self.assertEqual(len(journal.load_prompt_notes()), 1)
+
+        second = self.run_proposal(
+            prompt_proposal(
+                "When a request times out, verify the target.",
+                pattern_fingerprint=fp,
+            )
+        )
+        self.assertFalse(second["success"])
+        self.assertEqual(len(journal.load_prompt_notes()), 1)
+        # The refusal names the fingerprint duplication, not a content clash.
+        self.assertIn("fingerprint", second["message"].lower())
+
+    def test_legacy_note_without_fingerprint_still_blocks_exact_restatement(self):
+        """Item 3: the existing exact-content check STAYS as the fallback for
+        legacy notes that carry no fingerprint -- adding the precise check must
+        not remove the imprecise one all 21 live notes still depend on."""
+        legacy = {
+            "id": "0f0f0f0f0f0f",
+            "content": "When a request fails, verify the endpoint.",
+        }
+        self.assertTrue(journal.add_prompt_note(legacy)["success"])
+        # No fingerprint on the stored note.
+        stored = journal.load_prompt_notes()[0]
+        self.assertNotIn("fingerprint", stored)
+        # An identical restatement (any fingerprint) is still refused by content.
+        restated = self.run_proposal(
+            prompt_proposal(
+                "When a request fails, verify the endpoint.",
+                pattern_fingerprint="999999999999",
+            )
+        )
+        self.assertFalse(restated["success"])
+        self.assertEqual(len(journal.load_prompt_notes()), 1)
+
+    def test_deleted_note_lets_the_same_fingerprint_be_proposed_again(self):
+        """Item 3: re-learning stays legal. If the user deleted the note, its
+        fingerprint is no longer active, so the lesson may be proposed again.
+        Deletion is a deliberate user decision and must not become a permanent
+        ban -- journal history is NOT consulted to block it."""
+        fp = "cafebabe0000"
+        first = self.run_proposal(
+            prompt_proposal(
+                "When the upload stalls, verify the endpoint.",
+                pattern_fingerprint=fp,
+            )
+        )
+        self.assertTrue(first["success"], first.get("message"))
+        # The user deletes it (empty the store), leaving a journal record behind.
+        journal._write_prompt_notes([])
+        self.assertEqual(journal.load_prompt_notes(), [])
+        # The same fingerprint is now proposable again -- there is no active note.
+        again = self.run_proposal(
+            prompt_proposal(
+                "When the upload stalls, verify the endpoint.",
+                pattern_fingerprint=fp,
+            )
+        )
+        self.assertTrue(again["success"], again.get("message"))
+        self.assertEqual(len(journal.load_prompt_notes()), 1)
+        self.assertEqual(journal.load_prompt_notes()[0].get("fingerprint"), fp)
 
     def test_prompt_note_injection_limits_drop_whole_oldest_notes(self):
         notes = [

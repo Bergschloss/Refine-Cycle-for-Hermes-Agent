@@ -2970,6 +2970,25 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
             return "Prompt-note store is unavailable"
         if duplicate:
             return "Identical active prompt note already exists"
+        # Item 3: dedup by PATTERN, not only by wording. A note carrying a
+        # fingerprint that an active note already holds addresses a problem
+        # already solved, even when the sentence is reworded. The exact-content
+        # check above stays as the fallback for legacy notes that carry no
+        # fingerprint -- this is an added precise check, not a replacement.
+        # Keyed on the live store, so a note the user deleted no longer blocks
+        # re-learning (its fingerprint is not active).
+        note_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
+        if note_fingerprint:
+            fingerprint_active = journal.prompt_note_fingerprint_active(
+                note_fingerprint
+            )
+            if fingerprint_active is None:
+                return "Prompt-note store is unavailable"
+            if fingerprint_active:
+                return (
+                    "An active prompt note already addresses this pattern "
+                    f"fingerprint ({note_fingerprint})"
+                )
     else:
         if not name:
             return "Proposal missing name"
@@ -3000,7 +3019,15 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
         # then fails for a write that did land: journaled as an error,
         # un-rollbackable, absent from the audit, and permanent in the prompt.
         return "Memory content cannot contain the host's entry delimiter"
-    if journal.was_applied_recently(proposal, config.dedup_window_days()):
+    # Prompt notes are deduplicated against the LIVE store (exact content and
+    # fingerprint, above), never against journal history. The 7-day
+    # journal-history guard is deliberately skipped for them: a note the user
+    # deleted must be re-learnable, and consulting history would turn a
+    # deliberate deletion into a permanent ban (spec Item 3). Skills and memory
+    # keep the history guard -- their reversibility and store semantics differ.
+    if kind != "prompt" and journal.was_applied_recently(
+        proposal, config.dedup_window_days()
+    ):
         return f"Identical edit already applied within {config.dedup_window_days()} day(s)"
     return None
 
@@ -6006,6 +6033,7 @@ def _apply_edit(
             proposal["content"],
             scope=str(proposal.get("scope", "global")),
             session_id=str(proposal.get("session_id", "")),
+            fingerprint=str(proposal.get("pattern_fingerprint", "") or ""),
         )
         if prompt_note is None:
             error = "Cannot access plugin-owned prompt-note storage; mutation aborted"

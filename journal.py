@@ -805,6 +805,20 @@ def _normalize_prompt_note(note: Any) -> Optional[Dict[str, str]]:
         if not session_id:
             return None
         normalized["session_id"] = session_id
+    # Fingerprint of the failure pattern this note addresses. Optional and
+    # additive: legacy notes (all 21 currently in production) carry none and stay
+    # valid, so its absence is never a reason to reject a note. Preserved when
+    # present and well-formed (same 12-hex shape as a note id / a pattern
+    # fingerprint) so a later pass can recognize the pattern as already solved
+    # without inferring it from the wording. A malformed value is dropped rather
+    # than stored, keeping the field a trustworthy key.
+    fingerprint = note.get("fingerprint")
+    if (
+        isinstance(fingerprint, str)
+        and len(fingerprint) == 12
+        and all(char in "0123456789abcdef" for char in fingerprint)
+    ):
+        normalized["fingerprint"] = fingerprint
     return normalized
 
 
@@ -879,10 +893,36 @@ def normalize_prompt_note_content(content: str) -> str:
     return scrub_text(str(content)).strip()
 
 
+def prompt_note_fingerprint_active(fingerprint: str) -> Optional[bool]:
+    """Whether an ACTIVE prompt note already carries this fingerprint.
+
+    Reads the live on-disk store, never the journal: a note the user deleted is
+    not active, so its fingerprint may be learned again. That is the whole point
+    of keying on the live store rather than history -- deletion is a deliberate
+    decision and must not become a permanent ban (spec Item 3).
+
+    Returns None when the store is unavailable so the caller can fail closed,
+    matching ``prompt_note_content_exists``.
+    """
+    if not fingerprint:
+        return False
+    with mutation_lock():
+        notes = _load_prompt_notes()
+        if notes is None:
+            return None
+        return any(note.get("fingerprint") == fingerprint for note in notes)
+
+
 def new_prompt_note(
-    content: str, *, scope: str = "global", session_id: str = ""
+    content: str, *, scope: str = "global", session_id: str = "",
+    fingerprint: str = "",
 ) -> Optional[Dict[str, str]]:
-    """Preflight storage and allocate a stable ID without mutating the store."""
+    """Preflight storage and allocate a stable ID without mutating the store.
+
+    ``fingerprint`` is the pattern this note addresses; it is validated and kept
+    by ``_normalize_prompt_note`` when well-formed and dropped otherwise, so a
+    missing or malformed value never blocks note creation.
+    """
     candidate: Dict[str, str] = {
         "id": uuid.uuid4().hex[:12],
         "content": normalize_prompt_note_content(content),
@@ -890,6 +930,8 @@ def new_prompt_note(
     }
     if scope == "session":
         candidate["session_id"] = session_id
+    if fingerprint:
+        candidate["fingerprint"] = fingerprint
     note = _normalize_prompt_note(candidate)
     if note is None:
         return None
