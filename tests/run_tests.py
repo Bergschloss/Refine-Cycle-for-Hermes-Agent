@@ -21123,6 +21123,150 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("df4b65147d", done.stderr, "refusal must name the patch base")
         self.assertEqual(self._snapshot(), before, "refusal must not modify files")
 
+    # -- restore fidelity: created files, the index, and the recovery copy ---
+
+    def _write_patch_that_also_creates(
+        self, plugin_llm: str, plugins: str, new_path: str, new_content: str
+    ) -> Path:
+        """Like _write_patch_and_generate, but the patch also CREATES new_path.
+
+        The created file is captured with `git add -N` (intent-to-add) so
+        `git diff` emits a real `new file` hunk for it, then the working tree
+        and index are put back so the patch applies against the base commit.
+        """
+        src = self.hermes_src
+        (src / "agent" / "plugin_llm.py").write_text(plugin_llm, encoding="utf-8")
+        (src / "hermes_cli" / "plugins.py").write_text(plugins, encoding="utf-8")
+        created = src / new_path
+        created.parent.mkdir(parents=True, exist_ok=True)
+        created.write_text(new_content, encoding="utf-8")
+        subprocess.run([self.GIT or "git", "add", "-N", new_path], cwd=src, check=True)
+        diff = subprocess.run(
+            [self.GIT or "git", "diff"], cwd=src, capture_output=True, check=True
+        ).stdout
+        # Put the tree AND the index back to the base commit: -N left an
+        # intent-to-add entry staged, which git checkout alone does not clear.
+        subprocess.run([self.GIT or "git", "reset", "-q", "--", "."], cwd=src, check=True)
+        subprocess.run([self.GIT or "git", "checkout", "-q", "--", "."], cwd=src, check=True)
+        created.unlink(missing_ok=True)
+        patch = self.repo_dir / "assets"
+        patch.mkdir(exist_ok=True)
+        file_name = "invocation-route-v2026.8.16.patch"
+        (patch / file_name).write_bytes(diff)
+        return patch / file_name
+
+    def _backup_dirs(self):
+        return sorted(self.base.glob("refine-route-patch.*"))
+
+    def _index_is_clean(self) -> bool:
+        """No staged changes in the host checkout (index == HEAD)."""
+        return subprocess.run(
+            [self.GIT or "git", "diff", "--cached", "--quiet"],
+            cwd=str(self.hermes_src),
+        ).returncode == 0
+
+    def test_verification_failure_undoes_created_file_and_index(self):
+        """A verification failure must undo a file the patch CREATED and leave
+        the index clean — not just copy pre-existing files back.
+
+        On the parent install.sh the created file survives restore (its backup
+        loop only copies pre-existing files back) and the index stays staged
+        from `git apply`, so the tree reads clean-but-staged."""
+        created_rel = "hermes_cli/route_helper.py"
+        # plugin_llm.py carries a syntax error so py_compile fails verification.
+        self._write_patch_that_also_creates(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",
+            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
+            new_path=created_rel,
+            new_content="ROUTE_HELPER = True\n",
+        )
+        done = self._run_install()
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        # (a) the created file is gone after restore.
+        self.assertFalse(
+            (self.hermes_src / created_rel).exists(),
+            "restore must delete a file the patch created",
+        )
+        # (b) the index is clean: git apply's staging was undone.
+        self.assertTrue(self._index_is_clean(), "restore must leave the index clean")
+        # A restore that SUCCEEDED (undid everything) removes its recovery copy.
+        self.assertEqual(
+            self._backup_dirs(), [],
+            "a successful restore removes its recovery copy on exit",
+        )
+
+    # A full install cannot force a genuine `cp` restore failure, because git
+    # apply recreates each touched file with fresh permissions and leaves no
+    # read-only file for restore's cp to trip over. The behaviour that regressed
+    # is the trap's conditionality, so the test asserts the shipped trap's two
+    # branches directly.
+    def _extract_trap_line(self) -> str:
+        """Read the EXIT trap out of the shipped install.sh so the test breaks
+        if the trap is edited back to an unconditional `rm -rf`."""
+        text = (Path(__file__).resolve().parent.parent / "install.sh").read_text(
+            encoding="utf-8"
+        )
+        for line in text.splitlines():
+            if line.startswith("trap ") and "BACKUP_DIR" in line:
+                return line
+        self.fail("no EXIT trap referencing BACKUP_DIR found in install.sh")
+
+    def _run_trap(self, restore_failed: int) -> bool:
+        """Run the shipped trap body with the given RESTORE_FAILED and report
+        whether $BACKUP_DIR survived."""
+        trap_line = self._extract_trap_line()
+        backup = self.base / f"trap-backup-{restore_failed}"
+        backup.mkdir()
+        # Reproduce the trap: install RESTORE_FAILED + BACKUP_DIR, register the
+        # shipped trap, exit, then check the dir. Written to a file so the trap's
+        # own quoting is exercised verbatim.
+        script = (
+            "set -u\n"
+            f'RESTORE_FAILED={restore_failed}\n'
+            f'BACKUP_DIR="{backup.as_posix()}"\n'
+            f"{trap_line}\n"
+            "exit 0\n"
+        )
+        sf = self.base / f"trap-{restore_failed}.sh"
+        sf.write_text(script, encoding="utf-8")
+        subprocess.run([self.BASH or "bash", str(sf)], capture_output=True, text=True)
+        return backup.exists()
+
+    def test_trap_keeps_recovery_only_when_restore_failed(self):
+        """The recovery copy must survive a FAILED restore and be removed on a
+        clean one. On the parent the trap was `rm -rf "$BACKUP_DIR"` with no
+        guard, so it deleted the directory the 'recovery copy remains' message
+        had just pointed the user at."""
+        self.assertTrue(
+            self._run_trap(restore_failed=1),
+            "a failed restore (RESTORE_FAILED=1) must keep the recovery copy",
+        )
+        self.assertFalse(
+            self._run_trap(restore_failed=0),
+            "a clean run (RESTORE_FAILED=0) must remove the recovery copy",
+        )
+
+    def test_clean_install_removes_its_backup(self):
+        """The mirror direction: a clean install must clean up its own backup,
+        and must never touch a file that existed before the install."""
+        created_rel = "hermes_cli/route_helper.py"
+        self._write_patch_that_also_creates(
+            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
+            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
+            new_path=created_rel,
+            new_content="ROUTE_HELPER = True\n",
+        )
+        done = self._run_install()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("applied + verified", done.stdout)
+        # The created file stays; a successful install keeps what the patch adds.
+        self.assertTrue((self.hermes_src / created_rel).exists())
+        # No recovery copy is left behind on the happy path.
+        self.assertEqual(
+            self._backup_dirs(), [],
+            "a clean install must remove its own backup dir",
+        )
+
 
 class SubagentProposerTests(unittest.TestCase):
     """The proposer subagent: preferred path, fallbacks, read-only contract."""

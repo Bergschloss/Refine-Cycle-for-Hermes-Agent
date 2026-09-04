@@ -199,8 +199,23 @@ say "Touched files  : ${#TOUCHED_FILES[@]}"
 
 # ---------------------------------------------------------------------------
 # Backup every touched file before writing; restore() is the single undo step
+#
+# Restore has to put the host back the way a user would expect "undo" to mean:
+#   - a file that EXISTED before is copied back byte-for-byte;
+#   - a file the patch CREATED is deleted (there is no earlier version to
+#     restore, so leaving it behind is not "restored" — it is "half applied").
+#     We only ever delete a path we recorded as created here, never one the
+#     user had;
+#   - the git index is reset for exactly the touched paths, because `git apply`
+#     stages its changes and `cp` alone leaves them staged — a tree that reads
+#     clean-but-staged is not restored either.
+# On a FAILED restore the recovery copy must survive so the message that points
+# at it is true; the EXIT trap only removes it when restore succeeded (or was
+# never needed). CREATED_FILES holds the paths that did not exist pre-patch.
 # ---------------------------------------------------------------------------
 BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/refine-route-patch.XXXXXX")"
+CREATED_FILES=()
+RESTORE_FAILED=0
 restore() {
     local f ok=1
     for f in "${TOUCHED_FILES[@]}"; do
@@ -208,19 +223,32 @@ restore() {
             cp -p "$BACKUP_DIR/$f" "$HERMES_SRC/$f" || ok=0
         fi
     done
+    # Remove exactly the files the patch created — nothing the user already had.
+    for f in "${CREATED_FILES[@]:-}"; do
+        [ -n "$f" ] || continue
+        rm -f "$HERMES_SRC/$f" || ok=0
+    done
+    # Unstage the touched paths so the index matches HEAD again; scoped to the
+    # paths we touched, never a bare `git reset`.
+    if [ "${#TOUCHED_FILES[@]}" -gt 0 ]; then
+        git -C "$HERMES_SRC" reset -q -- "${TOUCHED_FILES[@]}" >/dev/null 2>&1 || true
+    fi
     if [ "$ok" -eq 1 ]; then
-        say "pre-patch state fully restored from $BACKUP_DIR."
+        say "pre-patch state fully restored; recovery copy at $BACKUP_DIR removed on exit."
     else
+        RESTORE_FAILED=1
         say "RESTORE FAILED; recovery copy remains at $BACKUP_DIR" >&2
     fi
 }
-trap 'rm -rf "$BACKUP_DIR"' EXIT
+# Keep the recovery copy when a restore failed; remove it on every clean path.
+trap '[ "$RESTORE_FAILED" -eq 0 ] && rm -rf "$BACKUP_DIR"' EXIT
 
 for f in "${TOUCHED_FILES[@]}"; do
     if [ -f "$HERMES_SRC/$f" ]; then
         mkdir -p "$BACKUP_DIR/$(dirname "$f")"
         cp -p "$HERMES_SRC/$f" "$BACKUP_DIR/$f"
     else
+        CREATED_FILES+=("$f")
         say "note: $f does not exist in this checkout (the patch will create it)."
     fi
 done
