@@ -1635,11 +1635,17 @@ def _ground_parsed(
     *,
     signal_path: str = "",
     target: Optional[Dict[str, str]] = None,
-) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], str]:
     """One bounded repair for a proposal whose fingerprint is not an offered one.
 
-    Returns ``(proposal, failure)``. This runs BEFORE ``_finalize_edit``, and so
-    before ``core._validate_proposal`` and ``core._application_evidence_refusal``,
+    Returns ``(proposal, failure, repaired_fingerprint)``, where the third value
+    is non-empty on exactly the one path that changed the fingerprint. Callers
+    pass it on so a later sub-call cannot quietly move the edit to a different
+    observed failure; every other path returns ``""``, meaning "nothing was
+    pinned here, the pre-existing contract applies".
+
+    This runs BEFORE ``_finalize_edit``, and so before
+    ``core._validate_proposal`` and ``core._application_evidence_refusal``,
     because the point is to hand those checks a complete proposal rather than to
     stand in for them. Nothing here decides that an edit may be applied: the
     apply bar, the contradiction check and the rest run afterward, unchanged, on
@@ -1663,7 +1669,7 @@ def _ground_parsed(
       an unbacked edit keeps failing closed at ``unbacked_pattern``.
     """
     if signal_path == "reviewer_approved":
-        return parsed, None
+        return parsed, None, ""
     allowlist: List[str] = []
     for value in offered or ():
         fingerprint = _valid_fingerprint(value)
@@ -1673,18 +1679,18 @@ def _ground_parsed(
         # No evidence was offered for this pass (or a unit caller passed none).
         # There is nothing to repair a fingerprint against, and inventing one is
         # the failure this whole function exists to avoid.
-        return parsed, None
+        return parsed, None, ""
     raw_edits = parsed.get("edits")
     if isinstance(raw_edits, list) and raw_edits:
-        return parsed, None
+        return parsed, None, ""
     action = str(parsed.get("action", "") or "").strip().lower()
     if action not in ("create", "patch"):
-        return parsed, None
+        return parsed, None, ""
     current = _valid_fingerprint(parsed.get("pattern_fingerprint"))
     if current and current in allowlist:
         # A7: the path that already worked spends no extra model call and is
         # returned untouched.
-        return parsed, None
+        return parsed, None, ""
     cause = (
         "empty or malformed"
         if not current
@@ -1721,7 +1727,7 @@ def _ground_parsed(
         # The repair never got an answer. That is the route failing, not the
         # model declining to comply, and it keeps the route own result code.
         _record_grounding_retry(cause)
-        return parsed, sanitize(reply)
+        return parsed, sanitize(reply), ""
     selected = _valid_fingerprint((reply or {}).get("pattern_fingerprint"))
     pointer = scrub_text(str((reply or {}).get("evidence", "") or "")).strip()
     if reply is None:
@@ -1743,12 +1749,19 @@ def _ground_parsed(
             + detail
             + ". No edit was made.",
             failure="fingerprint_retry_failed",
-        )
+        ), ""
     _record_grounding_retry(cause, selected)
     # Reconstructed here, from the proposal that was already parsed plus the one
     # field the repair was allowed to answer. The reply cannot carry anything
     # else; its schema has no other field.
-    return dict(parsed, pattern_fingerprint=selected), None
+    #
+    # ``selected`` is returned as its own value, not left to be re-derived
+    # downstream. A skill patch makes a SECOND model call after this one, and
+    # that call's reply also carries a fingerprint field -- so the finalizer has
+    # to know "this value was chosen by a repair and is pinned" as a fact it was
+    # handed, not as something inferred from thread-local metadata the later
+    # call has already written to.
+    return dict(parsed, pattern_fingerprint=selected), None, selected
 
 
 def _finalize_edit(
@@ -1761,11 +1774,19 @@ def _finalize_edit(
     allow_content_retry: bool = True,
     target: Optional[Dict[str, str]] = None,
     prompt_content_validator: Optional[Callable[[str], Optional[str]]] = None,
+    repaired_fingerprint: str = "",
 ) -> Dict[str, Any]:
     """Normalize and complete exactly one edit, shared by single and multi proposals.
 
     Returns a flat edit, a ``no_op`` with the reason it was not usable, or a
     reply carrying ``failure`` so an incomplete sub-call is never disguised.
+
+    ``repaired_fingerprint`` is the value ``_ground_parsed`` selected on this
+    pass, or ``""`` when no repair ran. It is passed in rather than looked up so
+    that a later sub-call writing to the shared call metadata cannot change what
+    this function believes was pinned. It is read on exactly one path: the skill
+    patch regeneration below, which is the only sub-call whose reply can carry
+    another fingerprint.
     """
     action, kind, name, content, category = _normalize_fields(parsed)
     if allow_content_retry and action == "create" and not content:
@@ -1791,8 +1812,14 @@ def _finalize_edit(
             # write it" -- so it may not move what the edit is grounded in. The
             # loop above only back-fills fields the retry left EMPTY, which
             # leaves a retry free to return a different fingerprint, including
-            # one the grounding repair has already validated away. Pinning it
-            # here is the same rule the shortening and patch retries follow.
+            # one the grounding repair has already validated away.
+            #
+            # Pinned unconditionally here, which is stricter than the skill-patch
+            # regeneration below: that one pins only what a repair chose and
+            # otherwise keeps its older contract. The difference is what the two
+            # calls were asked for. This one was asked for content and had a
+            # fingerprint already; the regeneration is a complete re-proposal of
+            # the patch, and narrowing it further is a separate change.
             if _valid_fingerprint(parsed.get("pattern_fingerprint")):
                 retry["pattern_fingerprint"] = parsed["pattern_fingerprint"]
             parsed = retry
@@ -2064,7 +2091,61 @@ def _finalize_edit(
         content = retry_content
         category = retry_category
         replacement_fingerprint = _valid_fingerprint(retry.get("pattern_fingerprint"))
-        initial_fingerprint = replacement_fingerprint or initial_fingerprint
+        if repaired_fingerprint:
+            # This pass already spent a repair call whose ONE job was to decide
+            # which observed failure this edit is about, and that decision is
+            # already in the journal as ``grounding_retry_fingerprint``. This
+            # call was asked for a complete SKILL.md, not for a second opinion
+            # on that decision.
+            #
+            # Letting its fingerprint win moves the edit from observed failure A
+            # to observed failure B, and no later gate can see it: both values
+            # were offered, both are backed by a real pattern, so
+            # ``_application_evidence_refusal`` finds nothing unbacked. What
+            # lands is an edit whose final state contradicts its own telemetry.
+            #
+            # Omission is compliance and keeps the pinned value; repeating it is
+            # agreement; returning a different one is a contradiction, and there
+            # is no honest way to pick a winner, so it fails closed under its own
+            # code rather than being silently resolved either way. No extra model
+            # call: a third attempt would be asking the same question again.
+            if (
+                replacement_fingerprint
+                and replacement_fingerprint != repaired_fingerprint
+            ):
+                return _semantic_failure(
+                    "One grounding repair selected pattern "
+                    f"{repaired_fingerprint} for this patch, and the complete "
+                    "replacement came back naming "
+                    f"{replacement_fingerprint} instead. Those are two "
+                    "different observed failures, so the edit no longer matches "
+                    "the failure it was grounded in. No edit was made.",
+                    failure="patch_retry_fingerprint_changed",
+                )
+            initial_fingerprint = repaired_fingerprint
+        else:
+            # No repair ran, so nothing was pinned and the pre-existing contract
+            # stands: the complete replacement's own fields win. Note what that
+            # still allows -- a regeneration can swap one OBSERVED fingerprint
+            # for another observed one here, and because both are backed,
+            # ``_application_evidence_refusal`` sees nothing wrong. It is the
+            # same relabeling the branch above refuses, minus the repair
+            # telemetry that made it detectable. Left as it was on purpose:
+            # changing it is a decision about the regeneration contract itself,
+            # not about isolating a repair, and it needs its own evidence.
+            initial_fingerprint = replacement_fingerprint or initial_fingerprint
+        # Scope of the pin, stated because "pinned" invites a wider reading than
+        # it has: only the fingerprint is held. The replacement CONTENT is the
+        # whole point of this call, and reason/expected_outcome/evidence still
+        # come from it below -- so a regeneration can, in prose, describe a
+        # different failure than the pattern the edit is filed under. That is not
+        # invisible: ``core._proposal_contradicts_resolution`` judges
+        # content+reason+expected_outcome against the pinned pattern's
+        # trajectory, and thin or contradicted evidence still refuses the apply.
+        # Pinning the prose as well would mean keeping a justification written
+        # for a proposal whose content has since been replaced, which is its own
+        # kind of dishonest record; the fingerprint is the field the apply gate
+        # keys on, and it is the one this fix holds.
         if "evidence" in retry:
             initial_evidence = _ensure_list(retry.get("evidence"))
         retry_reason = retry.get("reason")
@@ -2225,7 +2306,7 @@ def finalize_proposal(
     # this function exists: both proposer arms and both transports converge on
     # it. Putting the repair on the json_schema path alone would have fixed one
     # of the three ways the measured corpus failures arrived.
-    parsed, grounding_failure = _ground_parsed(
+    parsed, grounding_failure, repaired_fingerprint = _ground_parsed(
         llm, short, instructions, parsed, offered_fingerprints,
         signal_path=signal_path, target=target,
     )
@@ -2233,6 +2314,8 @@ def finalize_proposal(
         return grounding_failure
     raw_edits = parsed.get("edits")
     if isinstance(raw_edits, list) and raw_edits:
+        # A transaction is never repaired (``_ground_parsed`` returns early on
+        # one), so there is nothing pinned to carry into its edits.
         return _finalize_edits(
             llm,
             short,
@@ -2252,6 +2335,7 @@ def finalize_proposal(
         skill_content_loader=skill_content_loader,
         target=target,
         prompt_content_validator=prompt_content_validator,
+        repaired_fingerprint=repaired_fingerprint,
     )
 
 

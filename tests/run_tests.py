@@ -858,9 +858,11 @@ def _no_grounding_repair(_llm, _short, _instructions, parsed, _offered, **_kwarg
     """setUp stub: hand the proposal back untouched, making no repair call.
 
     Signature mirrors ``llm._ground_parsed`` so a drift in that signature shows
-    up as a failure here rather than as a silently inert stub.
+    up as a failure here rather than as a silently inert stub. The empty third
+    value says "nothing was pinned by a repair", which is what "no repair ran"
+    means to every caller.
     """
-    return parsed, None
+    return parsed, None, ""
 
 
 class RefineTests(unittest.TestCase):
@@ -2875,6 +2877,195 @@ class RefineTests(unittest.TestCase):
         for fingerprint in allowlist:
             self.assertIn(f"fp:{fingerprint}", rendered)
         self.assertNotIn(patterns_list[-1]["fingerprint"], allowlist)
+
+    # --- Repair isolation across skill-patch regeneration ------------------
+    #
+    # A skill patch makes TWO model calls: the grounding repair picks the one
+    # observed failure the lesson is about, and the later regeneration returns a
+    # complete replacement SKILL.md. The regeneration reply also carries a
+    # fingerprint field, and letting it win means the second call can silently
+    # move the edit from observed failure A -- the one the repair selected and
+    # journaled -- to observed failure B. The apply gate does not catch that:
+    # both are offered, both are observed, so nothing downstream is unbacked.
+    # The result is a proposal whose final state disagrees with its own
+    # `grounding_retry_fingerprint` telemetry.
+
+    PATCH_TARGET = "grounding-patch-target"
+
+    def _patch_proposal(self, fingerprint):
+        return {
+            "action": "patch", "kind": "skill", "name": self.PATCH_TARGET,
+            "category": "workflow", "content": "",
+            "reason": "the same connect timeout three times",
+            "expected_outcome": "the next attempt reaches the endpoint",
+            "evidence": ["connect timeout"],
+            "pattern_fingerprint": fingerprint,
+        }
+
+    def _patch_replacement(self, fingerprint=None):
+        reply = {
+            "action": "patch", "kind": "skill", "name": self.PATCH_TARGET,
+            "category": "workflow",
+            "content": skill_content(self.PATCH_TARGET, "# Guidance\n\n# After"),
+            "reason": "the same connect timeout three times",
+            "expected_outcome": "the next attempt reaches the endpoint",
+            "evidence": ["connect timeout"],
+        }
+        if fingerprint is not None:
+            reply["pattern_fingerprint"] = fingerprint
+        return reply
+
+    def _patch_loader(self, _name):
+        return skill_content(self.PATCH_TARGET, "# Guidance\n\n# Before")
+
+    def _finalize_patch(self, model, fingerprint, **kwargs):
+        return self._finalize(
+            model,
+            self._patch_proposal(fingerprint),
+            skill_content_loader=self._patch_loader,
+            **kwargs
+        )
+
+    def test_regeneration_may_not_replace_the_repaired_fingerprint(self):
+        """The defect. Red on 7b6447f: `result["failure"]` was None and the
+        proposal carried `cccc2222dddd`.
+
+        The repair selected `aaaa1111bbbb` and said so in the journal. A
+        regeneration that answers with a different observed failure has
+        contradicted the selection, not completed it -- and because both values
+        are offered, no later gate can tell. Fail closed with its own code."""
+        model = MockLlm(
+            {"pattern_fingerprint": "aaaa1111bbbb",
+             "evidence": "the same connect timeout this lesson is about"},
+            self._patch_replacement("cccc2222dddd"),
+        )
+        result = self._finalize_patch(model, "")
+
+        self.assertEqual(result.get("failure"), "patch_retry_fingerprint_changed")
+        self.assertEqual(result.get("action"), "no_op")
+        self.assertNotEqual(result.get("pattern_fingerprint"), "cccc2222dddd")
+        self.assertNotIn("content", result)
+        # The repair call and the regeneration call. Not a third.
+        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(
+            llm.last_call_meta().get("grounding_retry_fingerprint"),
+            "aaaa1111bbbb",
+            "telemetry keeps the fingerprint the repair actually selected",
+        )
+        reason = result.get("reason", "")
+        self.assertIn("aaaa1111bbbb", reason)
+        self.assertIn("cccc2222dddd", reason)
+
+    def test_regeneration_omitting_a_fingerprint_keeps_the_repaired_one(self):
+        """A regression pin, not a red test: this already held on 7b6447f, where
+        `replacement_fingerprint or initial_fingerprint` fell through to the
+        already-repaired value. It is pinned because the fix rewrote that exact
+        expression, and losing the fall-through would send the repaired lesson
+        back to the apply gate with an empty fingerprint.
+
+        The regeneration is asked for a complete SKILL.md, not for a selection.
+        Omitting the field is compliance, so the repaired value stands."""
+        model = MockLlm(
+            {"pattern_fingerprint": "aaaa1111bbbb",
+             "evidence": "the same connect timeout this lesson is about"},
+            self._patch_replacement(),
+        )
+        result = self._finalize_patch(model, "")
+
+        self.assertNotIn("failure", result)
+        self.assertEqual(result.get("action"), "patch")
+        self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
+        self.assertEqual(
+            llm.last_call_meta().get("grounding_retry_fingerprint"),
+            "aaaa1111bbbb",
+        )
+        self.assertIn("# After", result.get("content", ""))
+        self.assertEqual(len(model.calls), 2)
+
+    def test_regeneration_repeating_the_repaired_fingerprint_is_accepted(self):
+        """Also a regression pin that held on 7b6447f. Echoing the selection back
+        is agreement, and the new mismatch check must not read agreement as a
+        contradiction -- an equality test written as identity, or as `is not`,
+        would refuse every compliant regeneration. It costs no extra call."""
+        model = MockLlm(
+            {"pattern_fingerprint": "aaaa1111bbbb",
+             "evidence": "the same connect timeout this lesson is about"},
+            self._patch_replacement("aaaa1111bbbb"),
+        )
+        result = self._finalize_patch(model, "")
+
+        self.assertNotIn("failure", result)
+        self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
+        self.assertEqual(
+            llm.last_call_meta().get("grounding_retry_fingerprint"),
+            "aaaa1111bbbb",
+        )
+        self.assertEqual(len(model.calls), 2)
+
+    def test_a_patch_with_no_repair_keeps_the_existing_regeneration_contract(self):
+        """The scope boundary, pinned so the fix cannot quietly widen. Nothing
+        was pinned, so nothing is protected: a patch whose fingerprint was
+        already offered spends no repair call, and the pre-existing contract --
+        the complete replacement's own fields win -- is unchanged.
+
+        This path can still relabel one observed failure as another, with no
+        repair telemetry to contradict it. That exposure predates this fix and is
+        deliberately left alone here; changing it is a separate decision about
+        the regeneration contract itself, not about repair isolation."""
+        model = MockLlm(self._patch_replacement("cccc2222dddd"))
+        result = self._finalize_patch(model, "aaaa1111bbbb")
+
+        self.assertNotIn("failure", result)
+        self.assertEqual(result.get("pattern_fingerprint"), "cccc2222dddd")
+        self.assertEqual(len(model.calls), 1, "no grounding repair was needed")
+        self.assertFalse(llm.last_call_meta().get("grounding_retry_attempted"))
+
+    def test_a_pinned_repaired_patch_is_still_judged_by_the_apply_gate(self):
+        """Pinning decides which failure the edit claims, never whether it may be
+        applied: the pinned value is fed to the unstubbed gate here and a thin
+        pattern refuses exactly as it would without a repair."""
+        # setUp stubs the apply gate out for the whole class; this test is
+        # about the gate, so it runs unpatched like the other gate tests.
+        self._application_gate_patch.stop()
+        model = MockLlm(
+            {"pattern_fingerprint": "aaaa1111bbbb",
+             "evidence": "the same connect timeout this lesson is about"},
+            self._patch_replacement(),
+        )
+        result = self._finalize_patch(model, "")
+        self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
+
+        refusal = core._application_evidence_refusal(
+            result,
+            [{"fingerprint": "aaaa1111bbbb", "count": 1, "sessions_seen": 1}],
+            signal_path="gate_opened",
+            explicit_session=False,
+        )
+        self.assertIsNotNone(refusal)
+        self.assertEqual(refusal[0], "thin_evidence")
+
+    def test_the_reviewer_path_pins_nothing_and_still_cannot_apply(self):
+        """The reviewer path never reaches the repair, so a reviewer patch has
+        nothing pinned -- one model call, the regeneration, and the regeneration's
+        own fingerprint wins exactly as it did before this fix. Spending a repair
+        call here would buy nothing: the gate refuses reviewer output as advisory
+        before it looks at a fingerprint at all."""
+        self._application_gate_patch.stop()
+        model = MockLlm(self._patch_replacement("aaaa1111bbbb"))
+        result = self._finalize_patch(
+            model, "", signal_path="reviewer_approved",
+        )
+        self.assertEqual(len(model.calls), 1, "the regeneration, and no repair")
+        self.assertFalse(llm.last_call_meta().get("grounding_retry_attempted"))
+        self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
+
+        refusal = core._application_evidence_refusal(
+            result,
+            [{"fingerprint": "aaaa1111bbbb", "count": 9, "sessions_seen": 5}],
+            signal_path="reviewer_approved",
+            explicit_session=False,
+        )
+        self.assertEqual(refusal[0], "reviewer_only")
 
     # --- Task D: content-only repair for a grounded prompt note ------------
     #
@@ -26476,6 +26667,73 @@ class Release0144ContractTests(unittest.TestCase):
         )
         # Still a preview: the repair changes what CAN apply, never what does.
         self.assertEqual(FakeHost.actions, [])
+
+    def test_case_d3_a_patch_regeneration_may_not_move_the_repaired_pattern(self):
+        """The blocker fix, end to end, because the unit assertion alone does not
+        prove the failure is visible afterwards.
+
+        A skill patch spends two sub-calls: the grounding repair picks pattern A
+        from the observed allowlist, then the regeneration returns the complete
+        replacement SKILL.md -- and that reply can name pattern B. Both are
+        observed here, so `_application_evidence_refusal` finds nothing unbacked
+        and would let it through under A's telemetry.
+
+        What this pins is the journal, not just the return: `result_code` must
+        carry the specific code, the outcome must classify as `llm_incomplete`
+        rather than collapsing into the silent no_op that is this project's
+        default failure mode, and `grounding_retry_fingerprint` must still name
+        the pattern the repair actually chose."""
+        name = "case-d3"
+        FakeHost.add_skill(name, skill_content(name, "# Guidance\n\n# Before"))
+        pattern_a = {"fingerprint": "aaaaaaaaaaaa", "count": 5, "sessions_seen": 2,
+                     "tool": "http", "sample": "connect timeout"}
+        pattern_b = {"fingerprint": "cccccccccccc", "count": 4, "sessions_seen": 2,
+                     "tool": "http", "sample": "permission denied"}
+        evidence = self._grounded_evidence(pattern_a)
+        evidence["error_patterns"] = [pattern_a, pattern_b]
+        model = MockLlm(
+            {"action": "patch", "kind": "skill", "name": name,
+             "category": "workflow", "content": "",
+             "reason": "the same connect timeout three times",
+             "expected_outcome": "the next attempt reaches the endpoint",
+             "evidence": ["connect timeout"], "pattern_fingerprint": ""},
+            {"pattern_fingerprint": "aaaaaaaaaaaa",
+             "evidence": "the same connect timeout this patch is about"},
+            {"action": "patch", "kind": "skill", "name": name,
+             "category": "workflow",
+             "content": skill_content(name, "# Guidance\n\n# After"),
+             "reason": "the same connect timeout three times",
+             "expected_outcome": "the next attempt reaches the endpoint",
+             "evidence": ["connect timeout"],
+             "pattern_fingerprint": "cccccccccccc"},
+        )
+        with patch.object(core, "collect_evidence", return_value=evidence), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]):
+            result = core.refine_run(model, session_id="session", dry_run=True)
+
+        self.assertFalse(result.get("success"))
+        self.assertEqual(result["failure"], "patch_retry_fingerprint_changed")
+        self.assertEqual(
+            result["llm_meta"]["result_code"], "patch_retry_fingerprint_changed"
+        )
+        self.assertEqual(result["outcome"], "llm_incomplete")
+        self.assertEqual(
+            result["llm_meta"]["grounding_retry_fingerprint"], "aaaaaaaaaaaa"
+        )
+        self.assertEqual(
+            len(model.calls), 3, "proposal, repair, regeneration -- no fourth"
+        )
+        self.assertEqual(FakeHost.actions, [])
+        self.assertEqual(result.get("edits_applied", 0), 0)
+        self.assertEqual(
+            FakeHost.skills[name], skill_content(name, "# Guidance\n\n# Before")
+        )
+
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "llm_incomplete")
+        self.assertEqual(
+            entry["llm_meta"]["result_code"], "patch_retry_fingerprint_changed"
+        )
 
     def test_case_e_thin_explicit_session_previews_non_applyable(self):
         """E: a thin pattern reached through the explicit historical-session
