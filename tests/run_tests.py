@@ -2999,22 +2999,136 @@ class RefineTests(unittest.TestCase):
             "the shared limit still accepts a normal note",
         )
 
-    def test_the_shortening_retry_may_not_change_what_is_written(self):
-        """The retry answers one question. A reply that switches kind (or
-        empties a field) would walk past the action/kind/name/content
-        validations this block sits after, so it is refused instead."""
-        model = MockLlm({
-            "action": "create", "kind": "skill", "name": "not-the-target",
-            "content": skill_content("not-the-target"),
-        })
-        result = llm._finalize_edit(
-            model, "short", "instructions",
-            {"action": "create", "kind": "memory", "name": "long-lesson",
-             "content": "x" * 260, "reason": "r", "evidence": []},
+    # --- Task C: content-only memory shortening --------------------------
+    #
+    # `memory_retry_off_target` ended 2 of the 23 recurrent clusters in the
+    # 2026-09-05 real-corpus census. The old retry asked for a whole new
+    # proposal and refused it when action/kind/name drifted, so a model that
+    # shortened the lesson correctly and restated the name lost the lesson.
+
+    OVERSIZED = "x" * 260
+    SHORT_LESSON = "When the schema submission is rejected, resubmit it once."
+
+    def _oversized_memory(self):
+        return {
+            "action": "create", "kind": "memory", "name": "long-lesson",
+            "content": self.OVERSIZED, "category": "workflow",
+            "reason": "the same rejection three times", "evidence": ["rejected"],
+            "expected_outcome": "the resubmission succeeds",
+            "pattern_fingerprint": "aaaa1111bbbb",
+        }
+
+    def _shorten(self, model):
+        return llm._finalize_edit(
+            model, "short", "instructions", self._oversized_memory(),
             allow_content_retry=True,
         )
-        self.assertEqual(result.get("failure"), "memory_retry_off_target")
+
+    def test_an_oversized_entry_gets_exactly_one_content_only_call(self):
+        """C1, C2. One call, and a reply that has nowhere to put anything but
+        the text."""
+        model = MockLlm({"content": self.SHORT_LESSON})
+        result = self._shorten(model)
+
+        self.assertEqual(result.get("content"), self.SHORT_LESSON)
+        self.assertNotIn("failure", result)
         self.assertEqual(len(model.calls), 1)
+        call = model.calls[0]
+        self.assertEqual(call.get("schema_name"), "refine_content_repair")
+        self.assertEqual(set(call["json_schema"]["properties"]), {"content"})
+
+    def test_the_shortening_reply_cannot_change_what_is_written(self):
+        """C3, C4. The old contract detected drift; this one has nowhere to
+        drift to. Everything but the text is reconstructed from the proposal
+        that was already parsed, so a reply that names a different kind, name
+        or fingerprint changes none of them."""
+        original = self._oversized_memory()
+        model = MockLlm({
+            "content": self.SHORT_LESSON,
+            # None of these exist in the repair schema; they are here to prove
+            # that a model volunteering them changes nothing.
+            "action": "patch", "kind": "skill", "name": "not-the-target",
+            "category": "hijacked", "reason": "different reason",
+            "pattern_fingerprint": "999999999999",
+            "evidence": ["something else"],
+        })
+        result = self._shorten(model)
+
+        self.assertEqual(result.get("action"), original["action"])
+        self.assertEqual(result.get("kind"), "memory")
+        self.assertEqual(result.get("name"), original["name"])
+        self.assertEqual(result.get("category"), original["category"])
+        self.assertEqual(result.get("reason"), original["reason"])
+        self.assertEqual(result.get("evidence"), original["evidence"])
+        self.assertEqual(
+            result.get("expected_outcome"), original["expected_outcome"]
+        )
+        self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
+        self.assertEqual(result.get("content"), self.SHORT_LESSON)
+
+    def test_a_shortening_the_model_declines_has_its_own_code(self):
+        """C6. "Cannot be written shorter" and "was written shorter and still
+        does not fit" are two facts. Empty content is the model saying the
+        lesson does not survive the limit, which is a usable answer."""
+        model = MockLlm({"content": "   "})
+        result = self._shorten(model)
+        self.assertEqual(result.get("failure"), "memory_shortening_refused")
+        self.assertIn("no usable text", result.get("reason", ""))
+        self.assertIn("different lesson", result.get("reason", ""))
+        self.assertEqual(len(model.calls), 1, "no second shortening call")
+
+    def test_a_shortened_entry_that_still_does_not_fit_is_refused(self):
+        """C6, C7. One call, then the ceiling. The ceiling itself does not
+        move to accommodate the retry."""
+        model = MockLlm({"content": "y" * 240})
+        result = self._shorten(model)
+        self.assertEqual(result.get("failure"), "memory_entry_too_long")
+        self.assertIn("after one shortening retry", result.get("reason", ""))
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(llm.MEMORY_ENTRY_HARD_LIMIT_CHARS, 200)
+
+    def test_the_shortening_prompt_asks_for_meaning_not_just_length(self):
+        """C5. A shorter entry that drops the trigger, a step, or the scope is
+        a different lesson -- which is exactly how S7 and S8 were measured
+        failing on the synthetic benchmark. The prompt has to say so, and it
+        has to quote the two limits from the constants that enforce them."""
+        model = MockLlm({"content": self.SHORT_LESSON})
+        self._shorten(model)
+        prompt_text = model.calls[0]["input"][0].text
+        self.assertIn("condition that triggers it", prompt_text)
+        self.assertIn("in the order the evidence shows them", prompt_text)
+        self.assertIn("the operation it applies to", prompt_text)
+        self.assertIn(str(llm.MEMORY_ENTRY_HARD_LIMIT_CHARS), prompt_text)
+        self.assertIn(str(llm.MEMORY_ENTRY_TARGET_CHARS), prompt_text)
+        self.assertIn("oversized_memory_entry", prompt_text)
+
+    def test_a_shortening_provider_failure_is_not_a_refusal(self):
+        """The route failing and the model declining are different facts."""
+        model = MockLlm({"failure": "llm_timeout", "reason": "timed out"})
+        result = self._shorten(model)
+        self.assertEqual(result.get("failure"), "llm_timeout")
+
+    def test_a_transaction_keeps_each_edits_own_fingerprint(self):
+        """C9. A shared fingerprint back-fills an edit that has none; it never
+        overwrites one that does. No repair runs inside a transaction, so there
+        is no path by which one edit's grounding can reach another."""
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = llm._finalize_edits(
+            model, "short", "instructions",
+            {"summary": "two lessons", "reason": "r", "evidence": [],
+             "pattern_fingerprint": "cccc2222dddd"},
+            [
+                {"action": "create", "kind": "memory", "name": "first",
+                 "content": "a short compliant lesson",
+                 "pattern_fingerprint": "aaaa1111bbbb"},
+                {"action": "create", "kind": "memory", "name": "second",
+                 "content": "another short compliant lesson"},
+            ],
+            max_edits=3,
+        )
+        self.assertEqual(len(model.calls), 0)
+        self.assertEqual(result["edits"][0]["pattern_fingerprint"], "aaaa1111bbbb")
+        self.assertEqual(result["edits"][1]["pattern_fingerprint"], "cccc2222dddd")
 
     def test_the_prompt_states_the_enforced_ceiling_from_one_constant(self):
         """Two numbers that must agree: the target the model is asked for and
@@ -3118,9 +3232,13 @@ class RefineTests(unittest.TestCase):
         self.assertNotIn("failure", result)
         self.assertEqual(len(model.calls), 0, "no retry was needed")
 
-    def test_a_retry_that_answers_a_different_question_has_its_own_code(self):
-        """"Cannot write it shorter" and "answered a different question" are two
-        failures; a shared code would make them one line in the journal."""
+    def test_a_renamed_shortening_reply_keeps_the_original_target(self):
+        """The measured regression this rule came from, inverted.
+
+        `memory_retry_off_target` ended two real recurrent clusters: the model
+        shortened the lesson correctly and restated the name, and the whole
+        pass was thrown away for it. The name is not the model's to restate
+        any more, so the same reply now produces the intended edit."""
         model = MockLlm({
             "action": "create", "kind": "memory", "name": "renamed-target",
             "content": "a short compliant lesson under a different name",
@@ -3131,7 +3249,12 @@ class RefineTests(unittest.TestCase):
              "content": "x" * 260, "reason": "r", "evidence": []},
             allow_content_retry=True,
         )
-        self.assertEqual(result.get("failure"), "memory_retry_off_target")
+        self.assertNotIn("failure", result)
+        self.assertEqual(result.get("name"), "long-lesson")
+        self.assertEqual(
+            result.get("content"),
+            "a short compliant lesson under a different name",
+        )
 
     def test_merge_journal_stats_preserves_reported_model(self):
         """Wave 3.6: entry without llm_meta keeps existing reported_model."""
@@ -8485,6 +8608,127 @@ class RefineTests(unittest.TestCase):
         self.assertNotIn(applied_policy_record["outcome"], {
             "no_op", "rejected", "daily_limit_reached",
         })
+
+    # --- Task F: reviewer-only advisory noise ----------------------------
+    #
+    # Measured on the 2026-09-05 census: 35 clean control sessions produced 13
+    # reviewer-only proposals and 0 physical mutations. The false-positive
+    # PROPOSAL rate is 13/35 (37%); the false-positive MUTATION rate is 0/35.
+    # Reporting the second as "zero false positives" without the qualifier is
+    # the specific misreading these tests exist to keep honest -- the advisory
+    # noise is real, it is simply never written anywhere.
+    #
+    # Reviewer fallback policy itself is NOT changed here. Making reviewer
+    # proposals applyable would need its own evidence and its own decision.
+
+    def _reviewer_only_run(self):
+        """One real reviewer-approved pass: 20 routine messages, no repeated
+        error signal, reviewer approves, proposer emits a valid create."""
+        self._application_gate_patch.stop()
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+        })
+        model = MockLlm(
+            {
+                "shouldRefine": True,
+                "rationale": "The repeated workflow has a durable recovery lesson.",
+                "instructions": "Persist the narrow retry lesson.",
+            },
+            skill_proposal("reviewer-noise"),
+        )
+        return model, core.refine_run(model)
+
+    def test_reviewer_only_advice_never_becomes_a_physical_write(self):
+        """F: the whole reason 13 false-positive proposals cost nothing."""
+        before = journal.count_today_applied()
+        _, result = self._reviewer_only_run()
+        self.assertEqual(result["outcome"], "reviewer_only")
+        self.assertEqual(result["edits_applied"], 0)
+        self.assertEqual(FakeHost.actions, [], "zero host mutations")
+        self.assertEqual(
+            journal.count_today_applied(), before,
+            "reviewer-only must not consume the daily edit budget",
+        )
+
+    def test_reviewer_only_fires_no_notification(self):
+        """A notification is a claim that an edit landed. Reviewer-only never
+        lands one, so the user must never be told it did."""
+        with patch.object(core._notify, "notify") as notify_spy:
+            _, result = self._reviewer_only_run()
+        self.assertEqual(result["outcome"], "reviewer_only")
+        self.assertEqual(notify_spy.call_count, 0)
+
+    def test_the_audit_does_not_count_reviewer_only_as_a_lesson(self):
+        """An advisory proposal in the audit would be a lesson the user could
+        neither find nor roll back, because it was never written."""
+        _, result = self._reviewer_only_run()
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "reviewer_only")
+        self.assertNotEqual(entry["outcome"], "applied")
+        audit = core.refine_audit()
+        self.assertTrue(audit["success"])
+        self.assertEqual(
+            [row for row in audit["rows"]
+             if "reviewer-noise" in str(row.get("name", ""))],
+            [],
+        )
+
+    def test_top_level_and_journal_agree_that_it_would_not_apply(self):
+        """Two readers, one verdict. A response saying one thing and the durable
+        record saying another is how a census counts a proposal that could never
+        land."""
+        self._application_gate_patch.stop()
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+        })
+        model = MockLlm(
+            {
+                "shouldRefine": True,
+                "rationale": "durable",
+                "instructions": "persist retry lesson",
+            },
+            skill_proposal("reviewer-noise-preview"),
+        )
+        result = core.refine_run(model, session_id="session", dry_run=True)
+        self.assertFalse(result["would_apply"])
+        self.assertEqual(result["llm_meta"]["result_code"], "reviewer_only")
+        entry = journal.get_entry(result["journal_id"])
+        self.assertIs(entry["llm_meta"]["would_apply"], False)
+        self.assertEqual(entry["llm_meta"]["result_code"], "reviewer_only")
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_a_clean_session_with_no_reviewer_cannot_write_anything(self):
+        """The other 22 of the 35 controls: no signal, no reviewer, no call."""
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": False,
+        })
+        before = journal.count_today_applied()
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = core.refine_run(model)
+        self.assertEqual(len(model.calls), 0)
+        self.assertFalse(result.get("llm_called"))
+        self.assertEqual(FakeHost.actions, [])
+        self.assertEqual(journal.count_today_applied(), before)
 
     def test_gate_opened_proposal_with_recurrent_evidence_can_apply(self):
         self._application_gate_patch.stop()

@@ -1853,53 +1853,63 @@ def _finalize_edit(
 
     if kind == "memory" and content and _stored_len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
         if allow_content_retry:
-            retry_text = (
+            # C: the shortening retry asks for TEXT, not for a proposal.
+            #
+            # It used to ask for a whole new proposal and then refuse the reply
+            # when action, kind or name drifted -- `memory_retry_off_target`,
+            # which ended 2 of the 23 recurrent clusters in the 2026-09-05
+            # real-corpus census. A model that shortened the lesson correctly
+            # and restated the name lost the lesson. Asking only for the text
+            # removes the failure mode rather than detecting it: the reply has
+            # nowhere to put a name, so there is nothing to drift. Everything
+            # else -- action, kind, name, category, reason, expected outcome,
+            # evidence, fingerprint, scope -- is reused from the proposal that
+            # was already parsed, below.
+            repair_prompt = (
                 instructions
-                + "\n\nThe memory entry you proposed is "
-                + f"{_stored_len(content)} characters; the hard limit is "
-                + f"{MEMORY_ENTRY_HARD_LIMIT_CHARS}. Return the SAME lesson, "
-                + "same kind=memory and name, shortened to fit -- one plain "
-                + "sentence, no lost meaning, target about "
-                + f"{MEMORY_ENTRY_TARGET_CHARS} characters."
-            )
-            retry = _ensure_dict(
-                _propose_structured(
-                    llm,
-                    short,
-                    [PluginLlmTextInput(text=retry_text)],
-                    target=target,
+                + "\n\n=== MEMORY ENTRY REPAIR ===\n"
+                + f"The memory entry you proposed is {_stored_len(content)} "
+                + "characters; the hard limit is "
+                + f"{MEMORY_ENTRY_HARD_LIMIT_CHARS}.\n"
+                + "Rewrite ONLY the entry text. The action, kind, name, "
+                + "category, fingerprint, reason, evidence and scope are "
+                + "already fixed and will be reused unchanged; nothing you "
+                + "return can alter them.\n"
+                + "Say the SAME lesson in one plain sentence of about "
+                + f"{MEMORY_ENTRY_TARGET_CHARS} characters. Keep the condition "
+                + "that triggers it, every corrective step in the order the "
+                + "evidence shows them, and the operation it applies to. An "
+                + "entry that fits by dropping one of those is a different "
+                + "lesson, not a shorter one. If it cannot be said inside the "
+                + "limit without losing one of them, return empty content.\n"
+                + "=== THE ENTRY BEING SHORTENED (UNTRUSTED JSON) ===\n"
+                + _untrusted_json_record(
+                    "oversized_memory_entry", content, escape_tags=True
                 )
             )
-            if retry is not None and retry.get("failure"):
-                return sanitize(retry)
-            if retry is not None:
-                for key in (
-                    "action", "kind", "name", "category", "reason",
-                    "expected_outcome", "evidence", "pattern_fingerprint",
-                ):
-                    if not retry.get(key) and parsed.get(key):
-                        retry[key] = parsed[key]
-                retry_fields = _normalize_fields(retry)
-                # The retry answers one question -- "say the same thing
-                # shorter" -- so it may not change what is being written. The
-                # block sits AFTER the action/kind/name/content validations
-                # above, so a retry that switched kind or emptied a field
-                # would walk past every one of them; the skill-patch retry
-                # below guards its own target the same way.
-                if (retry_fields[0], retry_fields[1], retry_fields[2]) != (
-                    action, kind, name,
-                ) or not retry_fields[3]:
-                    # Its own code: "the model cannot write a short entry" and
-                    # "the model answered a different question" are two
-                    # failures, and a shared code would make them one line in
-                    # the journal.
-                    return _semantic_failure(
-                        "Shortening retry changed the edit's action, kind or "
-                        "name, or omitted content",
-                        failure="memory_retry_off_target",
-                    )
-                parsed = retry
-                action, kind, name, content, category = retry_fields
+            shortened, provider_failure = _repair_content(
+                llm, short, repair_prompt, target=target
+            )
+            if provider_failure is not None:
+                return provider_failure
+            if not shortened:
+                # Its own code: "the model cannot write it shorter" and "the
+                # entry is still over the limit" are two facts, and a shared
+                # code would make them one line in the journal.
+                return _semantic_failure(
+                    f"The memory entry is {_stored_len(content)} characters "
+                    f"against a hard limit of {MEMORY_ENTRY_HARD_LIMIT_CHARS}, "
+                    "and one shortening repair returned no usable text. An "
+                    "entry that fits only by dropping the trigger, a "
+                    "corrective step or the scope teaches a different lesson, "
+                    "so nothing was written.",
+                    failure="memory_shortening_refused",
+                )
+            # Only the text changes. `content` is what the rest of this
+            # function reads; the remaining fields are never re-read from a
+            # reply that could not carry them.
+            content = shortened
+            parsed = dict(parsed, content=shortened)
         if _stored_len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
             return _semantic_failure(
                 f"Memory entry is {_stored_len(content)} characters; the hard limit is "
