@@ -13173,6 +13173,88 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                     "teaches: %s" % (idx, branch[:60]),
                 )
 
+    def test_memory_guidance_requires_a_trigger_condition(self):
+        """A lesson with no trigger cannot reach the moment it applies.
+
+        Measured on the synthetic usefulness benchmark: entries that stated
+        only a corrective action ("use the current schema argument") left a
+        later agent with nothing to match against, because the agent meets a
+        situation, not a maxim. The guidance therefore asks for the condition
+        as well as the action -- as meaning, not as a labelled field.
+        """
+        prompt = llm.REFINE_SYSTEM_PROMPT.lower()
+        self.assertIn("condition that triggers", prompt)
+
+    def test_memory_guidance_requires_the_whole_ordered_correction(self):
+        """Half a sequence teaches half a fix.
+
+        S7 on the benchmark needs three steps in one fixed order (meet the
+        malformed record, read it raw once, normalize it). Proposals that
+        recorded only the final step produced agents that normalized without
+        inspecting, which the oracle scores as a failure -- the edit looked
+        reasonable and changed nothing for the better.
+        """
+        prompt = llm.REFINE_SYSTEM_PROMPT.lower()
+        self.assertIn("in that order", prompt)
+        self.assertIn("partial sequence", prompt)
+
+    def test_memory_guidance_bounds_the_lesson_to_the_failing_operation(self):
+        """The regression that made this rule necessary.
+
+        S8 pairs a permanently failing operation with a transient sibling. A
+        lesson written as "stop retrying and report" was applied by a later
+        agent to BOTH siblings, aborting the one that would have succeeded on
+        a retry. The edit was graded as a regression: it did change behaviour,
+        and the change was worse. Scope has to be part of what the entry says.
+        """
+        prompt = llm.REFINE_SYSTEM_PROMPT.lower()
+        self.assertIn("was not failing", prompt)
+
+    def test_memory_guidance_forbids_substituting_an_unrelated_operation(self):
+        """S4's failure mode: the agent reached for a different tool entirely.
+
+        Faced with a schema submission it had been told to correct, the agent
+        substituted a generic success operation. A lesson that says what to
+        stop doing, without saying the corrected action stays inside the same
+        operation, invites exactly that.
+        """
+        prompt = llm.REFINE_SYSTEM_PROMPT.lower()
+        self.assertIn("replaces a different operation", prompt)
+
+    def test_memory_guidance_demands_meaning_not_labels(self):
+        """The trap this rule must not fall into.
+
+        Requiring literal `Trigger:` / `Action:` / `Scope:` tokens is the
+        cheap way to satisfy every assertion above, and it spends the entry's
+        whole character budget on ceremony -- an entry padded with labels is
+        refused by the length ceiling before it is ever read. The prompt must
+        ask for the semantics and say plainly that labels are not wanted.
+        """
+        prompt = llm.REFINE_SYSTEM_PROMPT.lower()
+        self.assertIn("not format", prompt)
+        self.assertIn("do not add literal labels", prompt)
+        # And rule 7a must not itself hand the model a labelled template.
+        # Scoped to 7a on purpose: rule 11's ordinary prose ends a clause with
+        # "delete action:", which a whole-prompt scan would flag forever.
+        rule_7a = prompt.split("7a.", 1)[1].split("\n8.", 1)[0]
+        for label in ("trigger:", "action:", "scope:"):
+            self.assertNotIn(
+                label, rule_7a,
+                f"rule 7a introduces the labelled form '{label}'")
+
+    def test_memory_guidance_does_not_loosen_the_length_contract(self):
+        """New guidance may not buy compliance with a bigger budget.
+
+        The ceiling is the blast-radius limit on a single entry; asking for
+        more content per entry without raising it produces refusals, and
+        raising it is a separate decision with its own evidence.
+        """
+        self.assertIn("do not exceed the length", llm.REFINE_SYSTEM_PROMPT.lower())
+        self.assertIn(
+            f"never more than {llm.MEMORY_ENTRY_HARD_LIMIT_CHARS}",
+            llm.REFINE_SYSTEM_PROMPT,
+        )
+
     def test_the_prompt_says_the_action_list_is_closed(self):
         """A closed list described as examples is what produced the live failures.
 
