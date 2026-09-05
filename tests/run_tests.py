@@ -854,6 +854,15 @@ def _resolve_crash_pending(root, decision):
     }))
 
 
+def _no_grounding_repair(_llm, _short, _instructions, parsed, _offered, **_kwargs):
+    """setUp stub: hand the proposal back untouched, making no repair call.
+
+    Signature mirrors ``llm._ground_parsed`` so a drift in that signature shows
+    up as a failure here rather than as a silently inert stub.
+    """
+    return parsed, None
+
+
 class RefineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -896,6 +905,28 @@ class RefineTests(unittest.TestCase):
         )
         self._application_gate_patch.start()
         self.addCleanup(self._application_gate_patch.stop)
+        # The post-proposal grounding repair belongs to the SAME policy layer:
+        # it exists to make a proposal groundable before that gate judges it.
+        # The fixtures in this class are ungrounded on purpose, so an active
+        # repair would fire on nearly every one of them and turn storage,
+        # rollback and concurrency mechanics tests into proposer tests. Stubbed
+        # for the same reason as the gate and lifted the same way -- the repair
+        # has its own dedicated tests, which lift both.
+        self._grounding_repair_patch = patch.object(
+            llm, "_ground_parsed", new=_no_grounding_repair
+        )
+        self._grounding_repair_patch.start()
+        self.addCleanup(self._grounding_repair_patch.stop)
+        # Same layer, same reason: the prompt-note repair fires when a note
+        # fails one deterministic format rule, and the fixtures here use
+        # non-conforming notes on purpose to exercise the GUARDRAIL. Returning
+        # "no error" from the repair validator removes the repair call and
+        # nothing else -- `_validate_proposal` still refuses the note itself.
+        self._note_repair_patch = patch.object(
+            core, "_prompt_note_repair_validator", return_value=None
+        )
+        self._note_repair_patch.start()
+        self.addCleanup(self._note_repair_patch.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -2583,6 +2614,390 @@ class RefineTests(unittest.TestCase):
         )
         self.assertEqual(result.get("failure"), "memory_entry_too_long")
         self.assertEqual(len(model.calls), 0)
+
+    # --- Task A: post-proposal grounding repair ---------------------------
+    #
+    # Measured on the 70-trial real-corpus census of 2026-09-05: 18 of 35
+    # non-control create proposals came back with an EMPTY pattern_fingerprint
+    # and 14 trials ended `unbacked_pattern`, so 0/35 real grounded lessons were
+    # applyable. The model wrote real corrections and then failed one mechanical
+    # field. These tests pin the repair that recovers that field, and -- more
+    # importantly -- pin every way it is NOT allowed to recover it.
+
+    OFFERED = ["aaaa1111bbbb", "cccc2222dddd"]
+
+    def _signal_proposal(self, fingerprint):
+        proposal = skill_proposal("grounding-target")
+        proposal["pattern_fingerprint"] = fingerprint
+        return proposal
+
+    def _finalize(self, model, proposal, *, offered=None, **kwargs):
+        # These tests are about the repair itself, so the setUp stub that keeps
+        # it out of the legacy mechanics fixtures is lifted here.
+        self._grounding_repair_patch.stop()
+        return llm.finalize_proposal(
+            model,
+            proposal,
+            short="short",
+            instructions="INSTRUCTIONS",
+            max_edits=3,
+            offered_fingerprints=self.OFFERED if offered is None else offered,
+            **kwargs
+        )
+
+    def test_an_empty_fingerprint_gets_exactly_one_grounding_repair(self):
+        """A1. A create on an opened gate with no fingerprint is one field short
+        of applyable, not one lesson short. It gets ONE narrow repair call that
+        sees the exact allowlist and the proposal it may not rewrite."""
+        model = MockLlm({
+            "pattern_fingerprint": "cccc2222dddd",
+            "evidence": "the same connect timeout this lesson is about",
+        })
+        result = self._finalize(model, self._signal_proposal(""))
+
+        self.assertEqual(result.get("pattern_fingerprint"), "cccc2222dddd")
+        self.assertEqual(result.get("action"), "create")
+        self.assertNotIn("failure", result)
+        self.assertEqual(len(model.calls), 1, "exactly one repair call")
+
+        call = model.calls[0]
+        self.assertEqual(call.get("schema_name"), "refine_fingerprint_repair")
+        # The narrow schema is the guarantee: the reply physically cannot carry
+        # an action, kind, name or content to rewrite the lesson with.
+        self.assertEqual(
+            set(call["json_schema"]["properties"]),
+            {"pattern_fingerprint", "evidence"},
+        )
+        prompt_text = call["input"][0].text
+        for fingerprint in self.OFFERED:
+            self.assertIn(fingerprint, prompt_text, "the exact allowlist")
+        self.assertIn("original_proposal", prompt_text)
+        self.assertIn("grounding-target", prompt_text, "the proposal, bounded")
+
+        meta = llm.last_call_meta()
+        self.assertTrue(meta.get("grounding_retry_attempted"))
+        self.assertIn("empty", str(meta.get("grounding_retry_reason", "")))
+        self.assertEqual(meta.get("grounding_retry_fingerprint"), "cccc2222dddd")
+
+    def test_a_fingerprint_that_was_never_offered_gets_the_same_repair(self):
+        """A2. Syntactically perfect and still ungrounded: 12 hex characters
+        nobody observed is a fabrication, and it fails the apply gate exactly
+        like an empty one. Same bounded repair, same allowlist."""
+        model = MockLlm({
+            "pattern_fingerprint": "aaaa1111bbbb",
+            "evidence": "the repeated 500 from the same endpoint",
+        })
+        result = self._finalize(model, self._signal_proposal("111111111111"))
+
+        self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
+        self.assertEqual(len(model.calls), 1)
+        self.assertIn(
+            "not one of the fingerprints",
+            str(llm.last_call_meta().get("grounding_retry_reason", "")),
+        )
+
+    def test_a_second_invalid_fingerprint_fails_closed_with_both_causes(self):
+        """A3. One repair, then stop. The refusal keeps its own result code and
+        names both failures: 'the model gave nothing' and 'the repair gave
+        nothing' are different diagnoses, and a generic no_op erases both."""
+        model = MockLlm({"pattern_fingerprint": "", "evidence": "none fit"})
+        result = self._finalize(model, self._signal_proposal(""))
+
+        self.assertEqual(result.get("failure"), "fingerprint_retry_failed")
+        self.assertNotEqual(result.get("failure"), "malformed")
+        reason = result.get("reason", "")
+        self.assertIn("empty or malformed", reason, "the original cause")
+        self.assertIn("one grounding repair was made", reason, "the repair cause")
+        self.assertIn("No edit was made", reason)
+        self.assertEqual(len(model.calls), 1, "no second repair attempt")
+
+    def test_the_repair_may_not_be_answered_with_an_unoffered_fingerprint(self):
+        """A3, other half: a repair that answers with a value outside the
+        allowlist is refused rather than trusted for being well-formed."""
+        model = MockLlm({
+            "pattern_fingerprint": "999999999999", "evidence": "looks plausible",
+        })
+        result = self._finalize(model, self._signal_proposal(""))
+        self.assertEqual(result.get("failure"), "fingerprint_retry_failed")
+        self.assertIn("never offered", result.get("reason", ""))
+
+    def test_nothing_is_auto_filled_when_the_repair_declines(self):
+        """A4. With two fingerprints offered, taking the first one would satisfy
+        the guard and mean nothing -- the guard exists to say WHICH observed
+        failure this lesson is about, and a value nobody chose answers that
+        question with noise. Refusing is the only honest outcome."""
+        model = MockLlm({"pattern_fingerprint": "", "evidence": ""})
+        result = self._finalize(model, self._signal_proposal(""))
+        self.assertEqual(result.get("failure"), "fingerprint_retry_failed")
+        for fingerprint in self.OFFERED:
+            self.assertNotEqual(result.get("pattern_fingerprint"), fingerprint)
+
+    def test_a_selection_without_evidence_is_refused(self):
+        """A4, the subtler half. A repair that names an allowlisted fingerprint
+        but cannot say why it is the same failure has not made a selection; it
+        has guessed. The evidence pointer is what separates the two."""
+        model = MockLlm({"pattern_fingerprint": "aaaa1111bbbb", "evidence": "   "})
+        result = self._finalize(model, self._signal_proposal(""))
+        self.assertEqual(result.get("failure"), "fingerprint_retry_failed")
+        self.assertIn("naming the evidence", result.get("reason", ""))
+        self.assertIsNone(result.get("pattern_fingerprint"))
+
+    def test_being_in_the_allowlist_is_not_the_same_as_being_grounded(self):
+        """A5. The repair restores a mechanical field. It does not confer
+        meaning, and nothing downstream may treat it as if it had.
+
+        Here the repaired proposal cites a real, offered, observed pattern whose
+        trajectory shows the agent STOPPED retrying and made progress another
+        way -- while the lesson says to retry. That is a semantic mismatch, and
+        the apply-evidence gate still catches it on the repaired proposal
+        exactly as it would on an unrepaired one."""
+        # setUp stubs the apply gate out for the whole class; this test is
+        # about the gate, so it runs unpatched like the other gate tests.
+        self._application_gate_patch.stop()
+        model = MockLlm({
+            "pattern_fingerprint": "aaaa1111bbbb",
+            "evidence": "the same failing call",
+        })
+        proposal = self._signal_proposal("")
+        proposal["content"] = skill_content(
+            "grounding-target", "# Guidance\n\nAlways retry the request once more."
+        )
+        repaired = self._finalize(model, proposal)
+        self.assertEqual(repaired.get("pattern_fingerprint"), "aaaa1111bbbb")
+
+        refusal = core._application_evidence_refusal(
+            repaired,
+            [{
+                "fingerprint": "aaaa1111bbbb", "count": 9, "sessions_seen": 5,
+                "resolution_status": "abandoned",
+            }],
+            signal_path="gate_opened",
+            explicit_session=False,
+        )
+        self.assertIsNotNone(refusal, "a repaired fingerprint is still judged")
+        self.assertEqual(refusal[0], "contradicted_by_trajectory")
+
+    def test_a_thin_pattern_stays_unapplyable_after_a_repair(self):
+        """A5, continued: the apply bar is untouched. A repaired proposal citing
+        an offered pattern that has not been seen often enough is still refused
+        -- the repair fixed the field, not the evidence behind it."""
+        # setUp stubs the apply gate out for the whole class; this test is
+        # about the gate, so it runs unpatched like the other gate tests.
+        self._application_gate_patch.stop()
+        model = MockLlm({
+            "pattern_fingerprint": "cccc2222dddd", "evidence": "the same error",
+        })
+        repaired = self._finalize(model, self._signal_proposal(""))
+        refusal = core._application_evidence_refusal(
+            repaired,
+            [{"fingerprint": "cccc2222dddd", "count": 1, "sessions_seen": 1}],
+            signal_path="gate_opened",
+            explicit_session=False,
+        )
+        self.assertIsNotNone(refusal)
+        self.assertEqual(refusal[0], "thin_evidence")
+
+    def test_the_reviewer_path_buys_no_repair_call(self):
+        """A6. Reviewer output is advisory: `_application_evidence_refusal`
+        returns `reviewer_only` before it ever looks at a fingerprint, so a
+        repair there would spend a model call to reach the identical refusal."""
+        # setUp stubs the apply gate out for the whole class; this test is
+        # about the gate, so it runs unpatched like the other gate tests.
+        self._application_gate_patch.stop()
+        model = MockLlm({"pattern_fingerprint": "aaaa1111bbbb", "evidence": "x"})
+        result = self._finalize(
+            model, self._signal_proposal(""), signal_path="reviewer_approved",
+        )
+        self.assertEqual(len(model.calls), 0)
+        self.assertEqual(result.get("pattern_fingerprint"), "")
+
+        refusal = core._application_evidence_refusal(
+            result,
+            [{"fingerprint": "aaaa1111bbbb", "count": 9, "sessions_seen": 5}],
+            signal_path="reviewer_approved",
+            explicit_session=False,
+        )
+        self.assertEqual(refusal[0], "reviewer_only")
+
+    def test_an_already_offered_fingerprint_costs_no_extra_call(self):
+        """A7. The path that already worked must be untouched -- same model
+        calls (none), same output as a run with no allowlist at all."""
+        proposal = self._signal_proposal("aaaa1111bbbb")
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        with_allowlist = self._finalize(model, dict(proposal))
+        self.assertEqual(len(model.calls), 0)
+
+        baseline_model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        baseline = self._finalize(baseline_model, dict(proposal), offered=None)
+        self.assertEqual(len(baseline_model.calls), 0)
+        self.assertEqual(with_allowlist, baseline)
+
+    def test_a_transaction_is_not_repaired_and_stays_fail_closed(self):
+        """One repair call cannot honestly choose N fingerprints for N edits, and
+        reusing one across them is the borrowing per-edit grounding exists to
+        prevent. A multi proposal keeps failing closed at the apply gate."""
+        model = MockLlm({"action": "no_op", "reason": "must not be called"})
+        result = self._finalize(model, {
+            "action": "create", "kind": "memory", "name": "",
+            "reason": "two lessons", "evidence": [], "pattern_fingerprint": "",
+            "summary": "two lessons",
+            "edits": [
+                {"action": "create", "kind": "memory", "name": "first",
+                 "content": "a short compliant lesson"},
+                {"action": "create", "kind": "memory", "name": "second",
+                 "content": "another short compliant lesson"},
+            ],
+        })
+        self.assertEqual(len(model.calls), 0, "no repair call for a transaction")
+        self.assertEqual(result.get("action"), "multi")
+        self.assertEqual(result.get("pattern_fingerprint"), "")
+
+    def test_a_repair_provider_failure_is_not_model_non_compliance(self):
+        """The route failing and the model declining are different facts. A
+        shared result code would make them one line in the journal, and the
+        journal is the only place the difference is ever recoverable."""
+        model = MockLlm({"failure": "llm_timeout", "reason": "timed out"})
+        result = self._finalize(model, self._signal_proposal(""))
+        self.assertEqual(result.get("failure"), "llm_timeout")
+        self.assertNotEqual(result.get("failure"), "fingerprint_retry_failed")
+        self.assertTrue(llm.last_call_meta().get("grounding_retry_attempted"))
+
+    def test_the_offered_allowlist_is_exactly_what_the_prompt_rendered(self):
+        """Offering one set and accepting another would let a repair select a
+        fingerprint the model was never shown. One helper answers both."""
+        patterns_list = [
+            {"fingerprint": f"{index:012x}", "count": 3, "sessions_seen": 2}
+            for index in range(patterns.FORMAT_PATTERNS_LIMIT + 3)
+        ]
+        allowlist = llm.offered_fingerprints(patterns_list)
+        self.assertEqual(len(allowlist), patterns.FORMAT_PATTERNS_LIMIT)
+        rendered = patterns.format_patterns(patterns_list)
+        for fingerprint in allowlist:
+            self.assertIn(f"fp:{fingerprint}", rendered)
+        self.assertNotIn(patterns_list[-1]["fingerprint"], allowlist)
+
+    # --- Task D: content-only repair for a grounded prompt note ------------
+    #
+    # Two real recurrent clusters lost a correctly grounded lesson to a format
+    # rule and nothing else: cluster-17-48ca17b56a07 at 221 characters carrying
+    # markup, cluster-18-fb25ce8f2797 at 265 characters not in the policy form.
+
+    GOOD_NOTE = "When retrying a changed note, verify its target."
+
+    def _note_validator(self):
+        """Lift the setUp stub: these tests are about the note repair itself."""
+        self._note_repair_patch.stop()
+        return core._prompt_note_repair_validator
+
+    def _grounded_note(self, content):
+        proposal = prompt_proposal(content, pattern_fingerprint="aaaa1111bbbb")
+        return proposal
+
+    def _finalize_note(self, model, content):
+        return self._finalize(
+            model,
+            self._grounded_note(content),
+            prompt_content_validator=self._note_validator(),
+        )
+
+    def test_a_grounded_note_that_fails_one_format_rule_is_repaired_once(self):
+        """D1. The fingerprint was right and the intent was right; only the
+        shape was wrong, and a shape is the one thing a model can be told
+        exactly how to fix."""
+        model = MockLlm({"content": self.GOOD_NOTE})
+        result = self._finalize_note(model, "* Always check the target first")
+
+        self.assertEqual(result.get("content"), self.GOOD_NOTE)
+        self.assertNotIn("failure", result)
+        self.assertEqual(len(model.calls), 1)
+
+        call = model.calls[0]
+        self.assertEqual(call.get("schema_name"), "refine_content_repair")
+        self.assertEqual(set(call["json_schema"]["properties"]), {"content"})
+        prompt_text = call["input"][0].text
+        self.assertIn("policy, not a list", prompt_text, "the exact validator error")
+        self.assertIn(str(llm.prompt_note_content_limit()), prompt_text)
+        self.assertIn("kind=memory or kind=skill", prompt_text)
+        self.assertIn("refused_prompt_note", prompt_text)
+
+    def test_only_the_note_text_changes(self):
+        """D3. Everything the retry is forbidden to touch is reconstructed from
+        the original proposal, and the narrow schema means the reply could not
+        have carried those fields even if it tried."""
+        original = self._grounded_note("* Always check the target first")
+        model = MockLlm({
+            "content": self.GOOD_NOTE,
+            # Ignored by construction: the schema has no such field.
+            "kind": "skill", "name": "hijacked", "pattern_fingerprint": "999999999999",
+        })
+        result = self._finalize(
+            model, dict(original),
+            prompt_content_validator=self._note_validator(),
+        )
+        self.assertEqual(result.get("kind"), "prompt")
+        self.assertEqual(result.get("action"), "create")
+        self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
+        self.assertEqual(result.get("reason"), original["reason"])
+        self.assertEqual(result.get("evidence"), original["evidence"])
+
+    def test_a_repair_that_is_still_invalid_refuses_without_changing_kind(self):
+        """D5. If the lesson cannot be said as a prompt policy, say so and name
+        where it could live. Silently rewriting it into kind=memory would be a
+        different edit, to a different store, decided by a retry."""
+        model = MockLlm({"content": "* still a list item"})
+        result = self._finalize_note(model, "* Always check the target first")
+
+        self.assertEqual(result.get("failure"), "prompt_note_repair_failed")
+        self.assertEqual(len(model.calls), 1, "no second repair")
+        reason = result.get("reason", "")
+        self.assertIn("policy, not a list", reason, "both causes are kept")
+        self.assertIn("kind=memory or kind=skill", reason)
+        self.assertNotEqual(result.get("kind"), "memory")
+
+    def test_a_repair_that_returns_nothing_refuses(self):
+        """D6. Empty content is the model saying the rewrite is impossible. That
+        is a usable answer, and it fails closed rather than writing an empty
+        policy line."""
+        model = MockLlm({"content": "   "})
+        result = self._finalize_note(model, "* Always check the target first")
+        self.assertEqual(result.get("failure"), "prompt_note_repair_failed")
+        self.assertIn("empty content", result.get("reason", ""))
+
+    def test_a_valid_prompt_note_costs_no_extra_call(self):
+        """D7."""
+        model = MockLlm({"content": "must not be called"})
+        result = self._finalize_note(model, self.GOOD_NOTE)
+        self.assertEqual(len(model.calls), 0)
+        self.assertEqual(result.get("content"), self.GOOD_NOTE)
+
+    def test_an_ungrounded_note_is_not_repaired(self):
+        """A note with no fingerprint is refused at the apply gate whatever it
+        says, so rewriting its wording spends a call to reach the same refusal."""
+        model = MockLlm({"content": self.GOOD_NOTE})
+        ungrounded = prompt_proposal(
+            "* Always check the target first", pattern_fingerprint="aaaa1111bbbb"
+        )
+        ungrounded["pattern_fingerprint"] = ""
+        # No allowlist: this isolates the prompt-note gate from the grounding
+        # repair, which would legitimately fire first on an empty fingerprint.
+        result = self._finalize(
+            model,
+            ungrounded,
+            offered=[],
+            prompt_content_validator=self._note_validator(),
+        )
+        self.assertEqual(len(model.calls), 0)
+        self.assertEqual(result.get("content"), "* Always check the target first")
+
+    def test_the_per_note_budget_has_one_definition(self):
+        """The repair tells the model a ceiling; core enforces one. Two copies
+        drift, and the model is then asked to fit a limit nobody enforces."""
+        rendered = llm.PROMPT_NOTE_RENDER_PREFIX + "x" * llm.prompt_note_content_limit()
+        self.assertLessEqual(len(rendered), llm.prompt_note_rendered_limit())
+        self.assertIsNone(
+            core._prompt_note_content_error(self.GOOD_NOTE),
+            "the shared limit still accepts a normal note",
+        )
 
     def test_the_shortening_retry_may_not_change_what_is_written(self):
         """The retry answers one question. A reply that switches kind (or
@@ -23672,6 +24087,28 @@ class NotifyCallSiteTests(unittest.TestCase):
         )
         self._application_gate_patch.start()
         self.addCleanup(self._application_gate_patch.stop)
+        # The post-proposal grounding repair belongs to the SAME policy layer:
+        # it exists to make a proposal groundable before that gate judges it.
+        # The fixtures in this class are ungrounded on purpose, so an active
+        # repair would fire on nearly every one of them and turn storage,
+        # rollback and concurrency mechanics tests into proposer tests. Stubbed
+        # for the same reason as the gate and lifted the same way -- the repair
+        # has its own dedicated tests, which lift both.
+        self._grounding_repair_patch = patch.object(
+            llm, "_ground_parsed", new=_no_grounding_repair
+        )
+        self._grounding_repair_patch.start()
+        self.addCleanup(self._grounding_repair_patch.stop)
+        # Same layer, same reason: the prompt-note repair fires when a note
+        # fails one deterministic format rule, and the fixtures here use
+        # non-conforming notes on purpose to exercise the GUARDRAIL. Returning
+        # "no error" from the repair validator removes the repair call and
+        # nothing else -- `_validate_proposal` still refuses the note itself.
+        self._note_repair_patch = patch.object(
+            core, "_prompt_note_repair_validator", return_value=None
+        )
+        self._note_repair_patch.start()
+        self.addCleanup(self._note_repair_patch.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -25723,20 +26160,78 @@ class Release0144ContractTests(unittest.TestCase):
         self.assertEqual(code, "reviewer_only")
         self.assertIn("advisory", message.lower())
 
-    def test_case_d_unbacked_fingerprint_previews_non_applyable(self):
-        """D: a fingerprint that was never observed in this evidence must refuse
-        in preview exactly as the apply gate refuses it."""
+    def test_case_d_unbacked_fingerprint_is_repaired_once_then_refused(self):
+        """D: a fingerprint that was never observed in this evidence must not
+        become an edit.
+
+        The route to that refusal changed and the destination did not. Before
+        the post-proposal grounding repair, an unbacked fingerprint reached the
+        apply gate and was refused there as `unbacked_pattern`. Now it first
+        gets ONE bounded repair, which is offered the fingerprints this pass
+        actually observed; the mock declines to choose one, and the pass is
+        classified `fingerprint_retry_failed` instead.
+
+        What the release contract cares about is unchanged and asserted here:
+        zero mutation, an explicit classification rather than a silent no_op,
+        and no second repair."""
         proposal = dict(skill_proposal("case-d"), pattern_fingerprint="ffffffffffff")
         # Evidence carries a DIFFERENT fingerprint, so the proposal is unbacked.
         pattern = {"fingerprint": "aaaaaaaaaaaa", "count": 5, "sessions_seen": 2,
                    "tool": "http", "sample": "request failed"}
         result = self._preview(proposal, self._grounded_evidence(pattern))
-        self.assertFalse(result["would_apply"])
-        self.assertEqual(result["llm_meta"]["result_code"], "unbacked_pattern")
-        self.assertIn("not observed", result["guardrail_error"].lower())
+        self.assertFalse(result.get("success"))
+        self.assertEqual(
+            result["llm_meta"]["result_code"], "fingerprint_retry_failed"
+        )
+        self.assertTrue(result["llm_meta"]["grounding_retry_attempted"])
+        self.assertEqual(result["llm_meta"]["grounding_retry_fingerprint"], "")
         self.assertEqual(FakeHost.actions, [])
-        entry = journal.get_entry(result["journal_id"])
-        self.assertEqual(entry["llm_meta"]["result_code"], "unbacked_pattern")
+        self.assertEqual(result.get("edits_applied", 0), 0)
+
+        # And the gate that used to catch this still catches it, unchanged: a
+        # fingerprint outside the observed evidence is refused on its own terms.
+        code, message = core._application_evidence_refusal(
+            proposal, [pattern], signal_path="gate_opened", explicit_session=False,
+        )
+        self.assertEqual(code, "unbacked_pattern")
+        self.assertIn("not observed", message.lower())
+
+    def test_case_d2_an_empty_fingerprint_is_repaired_into_an_offered_one(self):
+        """The positive half of D, and the reason the change exists.
+
+        Measured on the real corpus: 18 of 35 non-control create proposals came
+        back with an empty pattern_fingerprint, and every one of them was thrown
+        away as unbacked. The lesson was real; one mechanical field was missing.
+
+        Here the model is asked once, is shown only the fingerprints this pass
+        actually observed, chooses one and says why -- and the proposal reaches
+        the apply gate on its own evidence. Refine fills in nothing: the whole
+        path from core through both proposer arms into the finalizer is
+        exercised, unstubbed."""
+        proposal = dict(skill_proposal("case-d2"), pattern_fingerprint="")
+        pattern = {"fingerprint": "aaaaaaaaaaaa", "count": 5, "sessions_seen": 2,
+                   "tool": "http", "sample": "request failed"}
+        model = MockLlm(proposal, {
+            "pattern_fingerprint": "aaaaaaaaaaaa",
+            "evidence": "the same repeated request failure this skill is about",
+        })
+        with patch.object(
+            core, "collect_evidence",
+            return_value=self._grounded_evidence(pattern),
+        ), patch.object(core, "collect_cross_session_patterns", return_value=[]):
+            result = core.refine_run(
+                model, session_id="session", dry_run=True,
+            )
+        self.assertEqual(len(model.calls), 2, "one proposal, one repair")
+        self.assertTrue(result["would_apply"])
+        self.assertEqual(result["guardrail_error"], "")
+        self.assertTrue(result["llm_meta"]["grounded"])
+        self.assertTrue(result["llm_meta"]["grounding_retry_attempted"])
+        self.assertEqual(
+            result["llm_meta"]["grounding_retry_fingerprint"], "aaaaaaaaaaaa"
+        )
+        # Still a preview: the repair changes what CAN apply, never what does.
+        self.assertEqual(FakeHost.actions, [])
 
     def test_case_e_thin_explicit_session_previews_non_applyable(self):
         """E: a thin pattern reached through the explicit historical-session

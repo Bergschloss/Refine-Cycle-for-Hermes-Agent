@@ -2982,16 +2982,37 @@ def _prompt_note_content_error(
         # required fields." carries the same instruction one clause to the left.
         if _prompt_note_credential_field(line):
             return "Prompt note cannot name a credential field to supply"
-    rendered = "Refine notes:\n- " + content
-    per_note_limit = max(
-        1, config.prompt_notes_max_chars() // config.prompt_notes_max_count()
-    )
+    rendered = _llm.PROMPT_NOTE_RENDER_PREFIX + content
+    # One definition, in llm, because the prompt-note repair has to tell the
+    # model the ceiling it will be measured against. Two copies of a limit that
+    # one side enforces and the other side quotes is the drift AGENTS.md names.
+    per_note_limit = _llm.prompt_note_rendered_limit()
     if check_rendered_size and len(rendered) > per_note_limit:
         return (
             f"Prompt note is too large for its per-note rendered context budget ({len(rendered)} chars; max "
             f"{per_note_limit})"
         )
     return None
+
+
+def _prompt_note_repair_validator(content: Any) -> Optional[str]:
+    """The deterministic prompt-note rule, as a callable the finalizer can run.
+
+    Passed into ``llm.finalize_proposal`` so a grounded note that fails one
+    format rule can be repaired ONCE before the pass is thrown away. It is the
+    same function ``_validate_proposal`` calls, not a relaxed copy: a repair
+    that satisfied a weaker rule here and was refused there would be a model
+    call spent to reach the same refusal.
+
+    Store-dependent checks (duplicate content, an active note already covering
+    the fingerprint) are deliberately not part of this: they are not things a
+    rewrite can fix, and re-running them here would only ask the model to
+    rewrite its way out of a duplicate.
+    """
+    text = str(content or "")
+    if not text.strip():
+        return "Prompt note is empty"
+    return _prompt_note_content_error(text)
 
 
 def _stored_prompt_note_content_error(content: Any) -> Optional[str]:
@@ -4885,6 +4906,7 @@ def _propose_with_subagent(
     reviewer_context: str,
     target: Optional[Dict[str, str]],
     history_safe_fields_only: bool = False,
+    signal_path: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Produce a proposal via a read-only skills-verifying subagent.
 
@@ -5047,6 +5069,12 @@ def _propose_with_subagent(
             max_edits=config.max_edits_per_proposal(),
             skill_content_loader=journal.read_skill_content,
             target=target,
+            # The subagent arm was one of the three proposer sources the real
+            # corpus lost lessons on, so it gets the same repair, from the same
+            # offered set, as the structured path.
+            offered_fingerprints=_llm.offered_fingerprints(error_patterns),
+            prompt_content_validator=_prompt_note_repair_validator,
+            signal_path=signal_path,
         )
     except Exception as exc:
         logger.warning("Proposer subagent finalize failed: %s", scrub_text(str(exc)))
@@ -5591,6 +5619,7 @@ def _refine_once(
                 run_context=proposal_context,
                 reviewer_context=reviewer_context,
                 target=_run_target,
+                signal_path=_signal_path,
             )
             if isinstance(proposal, str) and proposal == _PROPose_STRICT_ERROR:
                 # Strict mode: the subagent arm failed; the pass is lost, not
@@ -5671,6 +5700,8 @@ def _refine_once(
                 target=_run_target,
                 active_notes=_active_prompt_notes_safe(),
                 history_safe_fields_only=explicit_session,
+                prompt_content_validator=_prompt_note_repair_validator,
+                signal_path=_signal_path,
             )
         # propose() resets its per-call metadata at the start of every outer
         # attempt. Snapshot immediately so retry costs remain attributable to
@@ -5683,6 +5714,17 @@ def _refine_once(
                     _primary_llm_meta[key] = int(_primary_llm_meta.get(key, 0) or 0) + int(value)
             for key in ("reported_provider", "reported_model", "output_mode"):
                 if call_meta.get(key):
+                    _primary_llm_meta[key] = call_meta[key]
+            # A repair that is not recorded is a repair nobody can audit: the
+            # measured baseline for this fix is "18 empty fingerprints", and
+            # the only way to say later whether that number moved is to count
+            # the repairs and their outcomes as they happen.
+            for key in (
+                "grounding_retry_attempted",
+                "grounding_retry_reason",
+                "grounding_retry_fingerprint",
+            ):
+                if key in call_meta:
                     _primary_llm_meta[key] = call_meta[key]
         _primary_failure = str(proposal.get("failure", "") or "")
         if (
@@ -5725,7 +5767,13 @@ def _refine_once(
         "signal_path": _signal_path,
         **{k: v for k, v in llm_meta.items() if k in (
             "reported_provider", "reported_model", "latency_ms",
-            "output_tokens", "output_mode"
+            "output_tokens", "output_mode",
+            # Whether a grounding repair ran, why, and what it chose. On the
+            # whitelist rather than merged wholesale: llm_meta is accumulated
+            # per sub-call and only the fields a reader can interpret belong in
+            # the durable record.
+            "grounding_retry_attempted", "grounding_retry_reason",
+            "grounding_retry_fingerprint",
         )},
         "primary_attempts": _primary_attempts,
         **_subagent_meta,
@@ -5760,11 +5808,9 @@ def _refine_once(
     # RENDERED to the model is kept separately, because a proposal citing a
     # fingerprint the model never saw is still worth knowing about even when
     # that fingerprint is real.
-    _offered_fps = {
-        str(pattern.get("fingerprint", ""))
-        for pattern in error_patterns[:patterns.FORMAT_PATTERNS_LIMIT]
-        if pattern.get("fingerprint")
-    }
+    # Same helper the proposer and the grounding repair use, so "offered",
+    # "selectable" and "reported as offered" cannot become three sets.
+    _offered_fps = set(_llm.offered_fingerprints(error_patterns))
     _observed_fps = {
         str(pattern.get("fingerprint", ""))
         for pattern in all_error_patterns

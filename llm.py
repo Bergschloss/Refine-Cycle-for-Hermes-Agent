@@ -5,7 +5,9 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import (
+    Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple,
+)
 
 from agent.plugin_llm import (
     PluginLlm,
@@ -445,6 +447,81 @@ REFINE_PROPOSAL_SCHEMA: Dict[str, Any] = {
     "required": ["action", "kind", "reason"],
 }
 
+# --- Bounded post-proposal repairs -------------------------------------------
+#
+# Measured on the 70-trial real-corpus census (2026-09-05): 18 of 35 non-control
+# create proposals came back with an EMPTY pattern_fingerprint and 14 trials
+# ended `unbacked_pattern`, so 0/35 real grounded lessons were applyable. The
+# lessons themselves were not the problem -- the model wrote a real correction
+# and then failed one mechanical field, or one deterministic format rule, and
+# the whole pass was thrown away.
+#
+# Each schema below is deliberately the SMALLEST object that answers one such
+# question. The narrowness is the safety property: a repair reply physically
+# cannot carry an action, kind, name or fingerprint it is not allowed to change,
+# so "the retry rewrote the lesson" is not a failure mode that has to be caught
+# after the fact. Everything else is reconstructed here, from the proposal that
+# was already parsed.
+GROUNDING_REPAIR_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "pattern_fingerprint": {
+            "type": "string",
+            "description": (
+                "Exactly one 12-character fp copied character-for-character from "
+                "the allowlist, or empty if none of them is this failure."
+            ),
+        },
+        "evidence": {
+            "type": "string",
+            "description": (
+                "One short pointer to the failure behind the chosen fp showing "
+                "it is the same failure this edit is about."
+            ),
+        },
+    },
+    "required": ["pattern_fingerprint", "evidence"],
+}
+
+CONTENT_REPAIR_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "content": {
+            "type": "string",
+            "description": (
+                "The rewritten text only. No other field of the proposal is read "
+                "from this reply; empty means the rewrite is impossible."
+            ),
+        },
+    },
+    "required": ["content"],
+}
+
+# A repair reply is a few dozen tokens, but the budget is not sized for the
+# reply -- it is sized for the reasoning that precedes it. A 300-token cap on
+# the reviewer call was measured returning `no_final_text` because the model
+# spent the whole budget thinking and never emitted its JSON; the same route
+# runs these calls. Reusing the single-edit proposal budget costs nothing when
+# the reply is short and removes a second number that would drift.
+REPAIR_MAX_TOKENS = PROPOSAL_MAX_TOKENS
+
+# The prompt-note render prefix and per-note budget live here, in one place,
+# because two consumers need them: core._prompt_note_content_error measures a
+# note against them, and the prompt-note repair below has to TELL the model
+# what it is being measured against. Written twice, they drift, and the model
+# is then asked to fit a limit that is not the one enforced.
+PROMPT_NOTE_RENDER_PREFIX = "Refine notes:\n- "
+
+
+def prompt_note_rendered_limit() -> int:
+    """Per-note rendered budget: what core enforces, in one definition."""
+    return max(1, config.prompt_notes_max_chars() // config.prompt_notes_max_count())
+
+
+def prompt_note_content_limit() -> int:
+    """How many characters of note TEXT fit inside the rendered budget."""
+    return max(1, prompt_note_rendered_limit() - len(PROMPT_NOTE_RENDER_PREFIX))
+
 PROMPT_NOTE_ACTION_EXAMPLES = (
     "retry the request",
     "log the error",
@@ -761,8 +838,17 @@ def _propose_structured(
     *,
     max_tokens: int = PROPOSAL_MAX_TOKENS,
     target: Optional[Dict[str, str]] = None,
+    schema_name: str = "refine_proposal",
+    json_schema: Optional[Dict[str, Any]] = None,
 ) -> Any:
-    """Invoke the model only with recursively sanitized text inputs."""
+    """Invoke the model only with recursively sanitized text inputs.
+
+    ``schema_name``/``json_schema`` default to the full proposal contract, so
+    every existing caller is byte-identical. A repair sub-call passes a narrow
+    schema instead: the model is then structurally unable to return the fields
+    the repair is forbidden to change, which is a stronger guarantee than
+    validating them away afterward.
+    """
     # A semantic create/patch retry is a new final structured sub-call. Keep
     # cumulative latency/token attribution, but never let its predecessor's
     # successful mode describe a failed final reply.
@@ -783,7 +869,7 @@ def _propose_structured(
     common = dict(
         instructions=scrub_text(str(instructions)),
         input=safe_blocks,
-        schema_name="refine_proposal",
+        schema_name=schema_name,
         purpose="refine",
         temperature=0.0,
         max_tokens=max_tokens,
@@ -825,7 +911,9 @@ def _propose_structured(
     try:
         result = llm.complete_structured(
             system_prompt=system_prompt,
-            json_schema=sanitize(REFINE_PROPOSAL_SCHEMA),
+            json_schema=sanitize(
+                REFINE_PROPOSAL_SCHEMA if json_schema is None else json_schema
+            ),
             **common,
         )
         _record_call_meta(result, call_started)
@@ -1240,6 +1328,33 @@ def _default_skill_loader(name: str) -> Optional[str]:
     return read_skill_content(name)
 
 
+def offered_fingerprints(error_patterns: Optional[Sequence[Any]]) -> List[str]:
+    """The fingerprints the proposer prompt actually rendered.
+
+    This is the allowlist a grounding repair may select from, and it has to be
+    the SAME set the model was shown -- offering one set and accepting another
+    would let a repair pick a fingerprint the model never saw. Three callers
+    need it (``propose``, core subagent arm, core run metadata), so it is
+    defined once here rather than as three matching list comprehensions.
+
+    Deliberately the rendered slice, not every observed pattern: a pattern that
+    ranked outside ``FORMAT_PATTERNS_LIMIT`` was never in the prompt, so nothing
+    in the reply can be a considered choice of it.
+    """
+    try:
+        from . import patterns as _p
+    except ImportError:
+        import patterns as _p  # type: ignore
+    selected: List[str] = []
+    for pattern in list(error_patterns or ())[:_p.FORMAT_PATTERNS_LIMIT]:
+        if not isinstance(pattern, dict):
+            continue
+        fingerprint = str(pattern.get("fingerprint", "") or "")
+        if fingerprint and fingerprint not in selected:
+            selected.append(fingerprint)
+    return selected
+
+
 def _valid_fingerprint(value: Any) -> str:
     candidate = str(value or "").strip().lower()
     return candidate if re.fullmatch(r"[0-9a-f]{12}", candidate) else ""
@@ -1438,6 +1553,204 @@ def _render_refinement_history(
     return "\n".join(lines)
 
 
+_REPAIR_ECHO_FIELDS = (
+    "action", "kind", "name", "category", "reason", "expected_outcome", "content",
+)
+MAX_REPAIR_ECHO_CHARS = 600
+
+
+def _repair_echo(parsed: Dict[str, Any]) -> str:
+    """Show a repair call the proposal it must not rewrite, bounded and scrubbed.
+
+    The model needs the original to choose sensibly -- a fingerprint cannot be
+    matched to "this edit" without seeing the edit -- but the original is model
+    output, so it re-enters the prompt as an untrusted JSON record like every
+    other untrusted block, never as free prose.
+    """
+    parts = []
+    for key in _REPAIR_ECHO_FIELDS:
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}: {scrub_text(value)[:MAX_REPAIR_ECHO_CHARS]}")
+    return _untrusted_json_record(
+        "original_proposal", "\n".join(parts), escape_tags=True
+    )
+
+
+def _record_grounding_retry(reason: str, selected: str = "") -> None:
+    """Make the repair countable in the journal, whichever way it ended."""
+    meta = getattr(_call_meta, "value", {})
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    meta["grounding_retry_attempted"] = True
+    meta["grounding_retry_reason"] = reason
+    meta["grounding_retry_fingerprint"] = selected
+    _call_meta.value = meta
+
+
+def _repair_content(
+    llm: PluginLlm,
+    short: str,
+    prompt_text: str,
+    *,
+    target: Optional[Dict[str, str]] = None,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """One narrow content-only sub-call, shared by every content repair.
+
+    Returns ``(content, provider_failure)``. A provider or transport failure
+    comes back as the second element and stays distinguishable from the model
+    declining to produce usable text, which returns an empty string -- the two
+    are different facts, and one shared result code would merge them into one
+    unreadable line in the journal.
+
+    The returned text is already scrubbed, so what gets validated here is
+    exactly the string that would reach the store.
+    """
+    reply = _ensure_dict(
+        _propose_structured(
+            llm,
+            short,
+            [PluginLlmTextInput(text=prompt_text)],
+            max_tokens=REPAIR_MAX_TOKENS,
+            target=target,
+            schema_name="refine_content_repair",
+            json_schema=CONTENT_REPAIR_SCHEMA,
+        )
+    )
+    if reply is None:
+        return "", None
+    if reply.get("failure"):
+        return "", sanitize(reply)
+    value = reply.get("content")
+    if not isinstance(value, str):
+        return "", None
+    return scrub_text(value).strip(), None
+
+
+def _ground_parsed(
+    llm: PluginLlm,
+    short: str,
+    instructions: str,
+    parsed: Dict[str, Any],
+    offered: Optional[Sequence[Any]],
+    *,
+    signal_path: str = "",
+    target: Optional[Dict[str, str]] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """One bounded repair for a proposal whose fingerprint is not an offered one.
+
+    Returns ``(proposal, failure)``. This runs BEFORE ``_finalize_edit``, and so
+    before ``core._validate_proposal`` and ``core._application_evidence_refusal``,
+    because the point is to hand those checks a complete proposal rather than to
+    stand in for them. Nothing here decides that an edit may be applied: the
+    apply bar, the contradiction check and the rest run afterward, unchanged, on
+    the repaired proposal. Being in the allowlist is not the same fact as being
+    semantically grounded, and only the first of those is checked here.
+
+    What it will not do:
+
+    * Choose for the model. With two fingerprints offered, taking the first
+      would satisfy the guard and mean nothing -- the guard exists to say "this
+      lesson is about THAT observed failure", and a value nobody chose says
+      nothing about which failure it was. The model selects, and must name the
+      evidence for its selection, or the pass fails closed.
+    * Run twice. One repair, then a durable refusal carrying both causes.
+    * Repair reviewer advice. A reviewer-fallback proposal is refused as
+      ``reviewer_only`` no matter what fingerprint it carries, so a repair
+      there would spend a model call to reach the identical refusal.
+    * Touch a transaction. One repair call cannot honestly select N distinct
+      fingerprints for N edits, and reusing one across them is exactly the
+      borrowing that per-edit grounding exists to prevent. A multi proposal with
+      an unbacked edit keeps failing closed at ``unbacked_pattern``.
+    """
+    if signal_path == "reviewer_approved":
+        return parsed, None
+    allowlist: List[str] = []
+    for value in offered or ():
+        fingerprint = _valid_fingerprint(value)
+        if fingerprint and fingerprint not in allowlist:
+            allowlist.append(fingerprint)
+    if not allowlist:
+        # No evidence was offered for this pass (or a unit caller passed none).
+        # There is nothing to repair a fingerprint against, and inventing one is
+        # the failure this whole function exists to avoid.
+        return parsed, None
+    raw_edits = parsed.get("edits")
+    if isinstance(raw_edits, list) and raw_edits:
+        return parsed, None
+    action = str(parsed.get("action", "") or "").strip().lower()
+    if action not in ("create", "patch"):
+        return parsed, None
+    current = _valid_fingerprint(parsed.get("pattern_fingerprint"))
+    if current and current in allowlist:
+        # A7: the path that already worked spends no extra model call and is
+        # returned untouched.
+        return parsed, None
+    cause = (
+        "empty or malformed"
+        if not current
+        else "not one of the fingerprints this pass observed"
+    )
+    prompt_text = (
+        instructions
+        + "\n\n=== FINGERPRINT REPAIR ===\n"
+        + "This proposal cannot be applied: its pattern_fingerprint was "
+        + cause
+        + ". Do not rewrite the proposal -- every other field is already fixed "
+        + "and will be reused unchanged. Choose the ONE fp below that names the "
+        + "failure this edit is about, and quote a short pointer from that "
+        + "failure showing it is the same failure. If none of them is that "
+        + "failure, return an empty pattern_fingerprint: an unrelated fp is "
+        + "worse than none.\n"
+        + "ALLOWLIST (copy one exactly): "
+        + ", ".join(allowlist)
+        + "\n=== THE PROPOSAL BEING REPAIRED (UNTRUSTED JSON) ===\n"
+        + _repair_echo(parsed)
+    )
+    reply = _ensure_dict(
+        _propose_structured(
+            llm,
+            short,
+            [PluginLlmTextInput(text=prompt_text)],
+            max_tokens=REPAIR_MAX_TOKENS,
+            target=target,
+            schema_name="refine_fingerprint_repair",
+            json_schema=GROUNDING_REPAIR_SCHEMA,
+        )
+    )
+    if reply is not None and reply.get("failure"):
+        # The repair never got an answer. That is the route failing, not the
+        # model declining to comply, and it keeps the route own result code.
+        _record_grounding_retry(cause)
+        return parsed, sanitize(reply)
+    selected = _valid_fingerprint((reply or {}).get("pattern_fingerprint"))
+    pointer = scrub_text(str((reply or {}).get("evidence", "") or "")).strip()
+    if reply is None:
+        detail = "the repair returned no object"
+    elif not selected:
+        detail = "the repair returned an empty or malformed fingerprint"
+    elif selected not in allowlist:
+        detail = "the repair returned a fingerprint that was never offered"
+    elif not pointer:
+        detail = "the repair chose a fingerprint without naming the evidence for it"
+    else:
+        detail = ""
+    if detail:
+        _record_grounding_retry(cause)
+        return parsed, _semantic_failure(
+            "Proposal fingerprint was "
+            + cause
+            + "; one grounding repair was made and "
+            + detail
+            + ". No edit was made.",
+            failure="fingerprint_retry_failed",
+        )
+    _record_grounding_retry(cause, selected)
+    # Reconstructed here, from the proposal that was already parsed plus the one
+    # field the repair was allowed to answer. The reply cannot carry anything
+    # else; its schema has no other field.
+    return dict(parsed, pattern_fingerprint=selected), None
+
+
 def _finalize_edit(
     llm: PluginLlm,
     short: str,
@@ -1447,6 +1760,7 @@ def _finalize_edit(
     skill_content_loader: Optional[Callable[[str], Optional[str]]] = None,
     allow_content_retry: bool = True,
     target: Optional[Dict[str, str]] = None,
+    prompt_content_validator: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """Normalize and complete exactly one edit, shared by single and multi proposals.
 
@@ -1473,6 +1787,14 @@ def _finalize_edit(
             ):
                 if not retry.get(key) and parsed.get(key):
                     retry[key] = parsed[key]
+            # This retry answers one question -- "the create had no content,
+            # write it" -- so it may not move what the edit is grounded in. The
+            # loop above only back-fills fields the retry left EMPTY, which
+            # leaves a retry free to return a different fingerprint, including
+            # one the grounding repair has already validated away. Pinning it
+            # here is the same rule the shortening and patch retries follow.
+            if _valid_fingerprint(parsed.get("pattern_fingerprint")):
+                retry["pattern_fingerprint"] = parsed["pattern_fingerprint"]
             parsed = retry
             action, kind, name, content, category = _normalize_fields(parsed)
 
@@ -1586,6 +1908,79 @@ def _finalize_edit(
                 failure="memory_entry_too_long",
             )
 
+    # D: a grounded prompt note that fails one deterministic format rule.
+    #
+    # Two real recurrent clusters were measured losing a correctly grounded
+    # lesson this way and nothing else: cluster-17 at 221 characters carrying
+    # markup, cluster-18 at 265 characters not in the policy form. The
+    # fingerprint was right, the intent was right, the shape was wrong -- and a
+    # shape is the one thing a model can be told exactly how to fix.
+    #
+    # Gated on a valid fingerprint because an ungrounded note is refused later
+    # regardless, so repairing its wording would spend a model call to reach
+    # the same refusal. Gated on ``allow_content_retry`` so a transaction does
+    # not spend one call per edit, the same way the memory ceiling is gated.
+    # ``_validate_prompt_note_content`` itself is untouched and still runs, in
+    # core, on whatever comes back.
+    if (
+        kind == "prompt"
+        and action == "create"
+        and content
+        and allow_content_retry
+        and prompt_content_validator is not None
+        and _valid_fingerprint(parsed.get("pattern_fingerprint"))
+    ):
+        note_error = prompt_content_validator(content)
+        if note_error:
+            note_limit = prompt_note_content_limit()
+            repair_prompt = (
+                instructions
+                + "\n\n=== PROMPT NOTE REPAIR ===\n"
+                + "The prompt note was refused: "
+                + scrub_text(str(note_error))
+                + "\nRewrite ONLY the note text. The action, kind, name, "
+                + "fingerprint, reason, evidence and scope are already fixed "
+                + "and will be reused unchanged; nothing you return can alter "
+                + "them.\nRequirements: one or two lines, each exactly in the "
+                + "form 'When <specific condition>, <one action>.'; no markup, "
+                + "lists, numbering, URLs, file paths, commands, shell syntax "
+                + "or control characters; at most "
+                + f"{note_limit} characters in total. Keep the same operation "
+                + "and the same corrective intent as the refused note, and do "
+                + "not widen it to a sibling operation that was not failing.\n"
+                + "If this lesson cannot be said in that policy form without "
+                + "losing its meaning, return empty content. It will then be "
+                + "refused and recommended as kind=memory or kind=skill "
+                + "instead -- do not change the kind yourself.\n"
+                + "=== THE REFUSED NOTE (UNTRUSTED JSON) ===\n"
+                + _untrusted_json_record(
+                    "refused_prompt_note", content, escape_tags=True
+                )
+            )
+            repaired, provider_failure = _repair_content(
+                llm, short, repair_prompt, target=target
+            )
+            if provider_failure is not None:
+                return provider_failure
+            second_error = (
+                prompt_content_validator(repaired) if repaired else "empty content"
+            )
+            if second_error:
+                # Fail closed with both causes, and say where the lesson could
+                # still live. The kind is NOT changed here: that would be a
+                # different edit to a different store, decided by a retry.
+                return _semantic_failure(
+                    "Prompt note was refused ("
+                    + scrub_text(str(note_error))
+                    + ") and one content repair was refused too ("
+                    + scrub_text(str(second_error))
+                    + "). Record this lesson as kind=memory or kind=skill "
+                    + "instead.",
+                    failure="prompt_note_repair_failed",
+                )
+            content = repaired
+            parsed = dict(parsed, content=repaired)
+
     initial_evidence = _ensure_list(parsed.get("evidence"))
     initial_fingerprint = _valid_fingerprint(parsed.get("pattern_fingerprint"))
     initial_reason = str(parsed.get("reason", ""))
@@ -1695,6 +2090,7 @@ def _finalize_edits(
     max_edits: int,
     skill_content_loader: Optional[Callable[[str], Optional[str]]] = None,
     target: Optional[Dict[str, str]] = None,
+    prompt_content_validator: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """Turn a proposed transaction into a bounded list of independent edits.
 
@@ -1734,6 +2130,7 @@ def _finalize_edits(
             # spending an extra model call per edit on a retry.
             allow_content_retry=False,
             target=target,
+            prompt_content_validator=prompt_content_validator,
         )
         if edit.get("failure"):
             return _semantic_failure(
@@ -1798,6 +2195,9 @@ def finalize_proposal(
     max_edits: int,
     skill_content_loader: Optional[Callable[[str], Optional[str]]] = None,
     target: Optional[Dict[str, str]] = None,
+    offered_fingerprints: Optional[Sequence[Any]] = None,
+    prompt_content_validator: Optional[Callable[[str], Optional[str]]] = None,
+    signal_path: str = "",
 ) -> Dict[str, Any]:
     """Normalize a parsed proposal dict into the shared downstream shape.
 
@@ -1811,6 +2211,16 @@ def finalize_proposal(
         return _semantic_failure("LLM returned non-object output")
     if parsed.get("failure"):
         return sanitize(parsed)
+    # The grounding repair lives HERE and nowhere else, for the same reason
+    # this function exists: both proposer arms and both transports converge on
+    # it. Putting the repair on the json_schema path alone would have fixed one
+    # of the three ways the measured corpus failures arrived.
+    parsed, grounding_failure = _ground_parsed(
+        llm, short, instructions, parsed, offered_fingerprints,
+        signal_path=signal_path, target=target,
+    )
+    if grounding_failure is not None:
+        return grounding_failure
     raw_edits = parsed.get("edits")
     if isinstance(raw_edits, list) and raw_edits:
         return _finalize_edits(
@@ -1822,6 +2232,7 @@ def finalize_proposal(
             max_edits=max_edits,
             skill_content_loader=skill_content_loader,
             target=target,
+            prompt_content_validator=prompt_content_validator,
         )
     return _finalize_edit(
         llm,
@@ -1830,6 +2241,7 @@ def finalize_proposal(
         parsed,
         skill_content_loader=skill_content_loader,
         target=target,
+        prompt_content_validator=prompt_content_validator,
     )
 
 
@@ -1850,6 +2262,8 @@ def propose(
     target: Optional[Dict[str, str]] = None,
     active_notes: Optional[List[Dict[str, str]]] = None,
     history_safe_fields_only: bool = False,
+    prompt_content_validator: Optional[Callable[[str], Optional[str]]] = None,
+    signal_path: str = "",
 ) -> Dict[str, Any]:
     """Propose one edit; skill patches are regenerated from safe full content."""
     _call_meta.value = {}
@@ -1979,6 +2393,10 @@ def propose(
             max_edits=max_edits,
             skill_content_loader=skill_content_loader,
             target=target,
+            # Exactly the set the prompt above rendered.
+            offered_fingerprints=offered_fingerprints(error_patterns),
+            prompt_content_validator=prompt_content_validator,
+            signal_path=signal_path,
         )
     except PluginLlmInvocationError as exc:
         logger.warning("Bound plugin LLM route failed: %s", exc.code)
