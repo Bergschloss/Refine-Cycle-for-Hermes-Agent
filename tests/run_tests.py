@@ -596,6 +596,22 @@ def grouped_entries():
     return [entry for entry in journal.entries() if entry.get("group")]
 
 
+def digest_of_memories():
+    """Exact bytes of every stored memory, so 'restored' means restored."""
+    return tuple(sorted(FakeHost.memory_entries))
+
+
+def memory_proposal_for_route(name="route-lesson"):
+    """The shape of the edit journal 59dbeacadaff actually applied."""
+    return {
+        "action": "create", "kind": "memory", "name": name,
+        "content": "When the same request fails repeatedly, report it instead of retrying.",
+        "category": "workflow", "reason": "Repeated failure",
+        "expected_outcome": "The agent stops repeating the failing request.",
+        "evidence": ["request failed"], "pattern_fingerprint": "abcdef123456",
+    }
+
+
 def prompt_proposal(content, *, pattern_fingerprint=None):
     # A note's fingerprint is derived from its content by default, so two
     # DISTINCT-content notes carry DISTINCT fingerprints -- matching the real
@@ -2798,6 +2814,337 @@ class RefineTests(unittest.TestCase):
         )
         self.assertIsNotNone(refusal)
         self.assertEqual(refusal[0], "thin_evidence")
+
+    # --- Route attribution: a lesson from a model we were not talking to ---
+    #
+    # Live journal 59dbeacadaff: target_source=invocation_bound, requested
+    # gpt-5.6-luna-900k, reported gpt-5.6-sol-900k, model_substituted=true, and
+    # outcomes prepared -> applied -> rollback_prepared -> rolled_back. The flag
+    # was right and nothing read it.
+
+    class BoundFacade(MockLlm):
+        """A host facade locked to one invocation route.
+
+        Shaped like the real `BoundPluginLlm`: `invocation_bound` is True and
+        the route lives on `_bound_route`, NOT on public provider/model
+        attributes. Reading the public ones is what made production fall back
+        to config.
+        """
+
+        def __init__(self, *responses, provider="", model="", expose_public=False):
+            super().__init__(*responses)
+            self.invocation_bound = True
+            if provider or model:
+                self._bound_route = types.SimpleNamespace(
+                    provider=provider, model=model,
+                )
+            if expose_public:
+                self.provider = provider
+                self.model = model
+
+    def _bound_run(self, *, bound_provider, bound_model,
+                   reported_provider, reported_model, dry_run=False,
+                   proposal=None, expose_public=False):
+        """One full refine pass on a bound facade whose reply reports a route."""
+        self._application_gate_patch.stop()
+        self._grounding_repair_patch.stop()
+        fingerprint = "abcdef123456"
+        proposal = proposal or dict(
+            memory_proposal_for_route(), pattern_fingerprint=fingerprint,
+        )
+        evidence = {
+            "messages": [
+                {"role": "user", "content": "one", "tool_name": ""},
+                {"role": "assistant", "content": "two", "tool_name": ""},
+                {"role": "tool", "content": "three", "tool_name": "http"},
+            ],
+            "error_count": 5,
+            "error_patterns": [{
+                "fingerprint": fingerprint, "count": 5, "sessions_seen": 1,
+                "tool": "http", "sample": "request failed",
+            }],
+            "user_corrections": [],
+            "collection_status": "ok",
+        }
+        model = self.BoundFacade(
+            MockResult(proposal, provider=reported_provider, model=reported_model),
+            provider=bound_provider, model=bound_model, expose_public=expose_public,
+        )
+        with patch.object(core, "collect_evidence", return_value=evidence), \
+             patch.object(core, "collect_cross_session_patterns", return_value=[]):
+            result = core.refine_run(model, session_id="session", dry_run=dry_run)
+        return result, model
+
+    def test_a_matching_bound_route_still_applies(self):
+        """RED 1, the positive control. The whole point of the fix is that a
+        user switching their session model keeps working: the bound route and
+        the reported route agree, so nothing is substituted."""
+        result, model = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-sol-900k",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertIs(result["llm_meta"]["model_substituted"], False)
+        self.assertEqual(result["llm_meta"]["requested_model"], "gpt-5.6-sol-900k")
+        self.assertEqual(result["outcome"], "applied")
+        self.assertEqual(result["edits_applied"], 1)
+        # And no override was sent: an invocation-bound facade refuses them.
+        for call in model.calls:
+            self.assertNotIn("provider", call)
+            self.assertNotIn("model", call)
+
+    def test_the_expected_route_comes_from_the_facade_not_from_config(self):
+        """The first defect, isolated.
+
+        `BoundPluginLlm` exposes no public provider/model, so the old code read
+        an empty string and fell back to `config.effective_llm_target()`. On the
+        live host that config named a model the session was not using, and every
+        pass was scored against it."""
+        FakeHost.entry_config().update({
+            "llm": {"provider": "stale-provider", "model": "stale-model"},
+        })
+        result, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-sol-900k",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertEqual(result["llm_meta"]["requested_model"], "gpt-5.6-sol-900k")
+        self.assertNotEqual(result["llm_meta"]["requested_model"], "stale-model")
+        self.assertIs(result["llm_meta"]["model_substituted"], False)
+
+    def test_a_substituted_model_cannot_mutate(self):
+        """RED 2, and the exact shape of journal 59dbeacadaff."""
+        before = journal.count_today_applied()
+        result, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-luna-900k",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertEqual(result.get("edits_applied", 0), 0)
+        self.assertIs(result.get("would_apply", False), False)
+        self.assertEqual(result["llm_meta"]["result_code"], "route_substituted")
+        self.assertEqual(FakeHost.actions, [], "a substituted model mutated the host")
+        self.assertEqual(journal.count_today_applied(), before)
+
+        entry = journal.get_entry(result["journal_id"])
+        self.assertNotIn(entry["outcome"], ("applied", "prepared"))
+        self.assertEqual(entry["outcome"], "route_substituted")
+        # Both identities are journaled, or the refusal cannot be audited.
+        self.assertEqual(entry["llm_meta"]["requested_model"], "gpt-5.6-luna-900k")
+        self.assertEqual(entry["llm_meta"]["reported_model"], "gpt-5.6-sol-900k")
+        self.assertIs(entry["llm_meta"]["model_substituted"], True)
+
+    def test_a_substituted_provider_also_refuses(self):
+        """RED 3."""
+        result, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-sol-900k",
+            reported_provider="some-other-host", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertEqual(result["llm_meta"]["result_code"], "route_substituted")
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_an_unreported_route_is_unverifiable_not_a_no_op(self):
+        """RED 4. A completed proposal that cannot say which model produced it
+        is not attributable, and 'not attributable' is its own fact -- collapsing
+        it into an ordinary no_op loses the only reason it was refused."""
+        result, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-sol-900k",
+            reported_provider="", reported_model="",
+        )
+        self.assertEqual(result["llm_meta"]["result_code"], "route_unverifiable")
+        self.assertNotEqual(result["llm_meta"]["result_code"], "no_op")
+        self.assertEqual(FakeHost.actions, [])
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "route_unverifiable")
+
+    def test_a_bound_facade_that_names_no_route_is_unverifiable(self):
+        """The other half of RED 4: the EXPECTED side missing. Falling back to
+        config here is what produced the false substitutions, so there is
+        nothing left to compare against and the pass fails closed."""
+        result, _ = self._bound_run(
+            bound_provider="", bound_model="",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertEqual(result["llm_meta"]["result_code"], "route_unverifiable")
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_dry_run_and_apply_give_the_same_route_verdict(self):
+        """RED 6. A preview that disagrees with the apply is how a census counts
+        proposals that could never land."""
+        preview, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-luna-900k",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+            dry_run=True,
+        )
+        applied, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-luna-900k",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertEqual(preview["llm_meta"]["result_code"], "route_substituted")
+        self.assertEqual(applied["llm_meta"]["result_code"], "route_substituted")
+        self.assertIs(preview.get("would_apply", False), False)
+        self.assertEqual(applied.get("edits_applied", 0), 0)
+        self.assertEqual(FakeHost.actions, [])
+
+    def test_two_sessions_on_two_models_are_both_matching_routes(self):
+        """RED 7. The feature this fix must not destroy: refine follows the
+        user's current model. Two invocations, two different bound routes, both
+        faithful -- neither is a substitution."""
+        for index, model_name in enumerate(("gpt-5.6-luna-900k", "gpt-5.6-sol-900k")):
+            with self.subTest(model=model_name):
+                FakeHost.reset(self.root)
+                # A distinct lesson per invocation: repeating the same memory
+                # would be refused as a duplicate, and this test is about the
+                # route, not about the dedup guard.
+                result, _ = self._bound_run(
+                    bound_provider="openai-codex", bound_model=model_name,
+                    reported_provider="openai-codex", reported_model=model_name,
+                    # Varied by index, not by model name: a model name
+                    # reads as a host to the memory resource guard, which is
+                    # the guard doing its job and not this test subject.
+                    proposal=dict(memory_proposal_for_route(f"route-lesson-{index}"),
+                                  content=f"When the same request fails twice in run {index}, report it."),
+                )
+                self.assertIs(result["llm_meta"]["model_substituted"], False)
+                self.assertEqual(result["outcome"], "applied")
+
+    def test_the_route_decision_is_one_helper_for_both_paths(self):
+        """Reviewer and proposer must not grow two definitions of 'is this call
+        attributable'. The reviewer arm is exercised in its own test below; this
+        pins that they share the decision."""
+        self.assertTrue(hasattr(core, "_route_refusal"))
+        self.assertIsNone(core._route_refusal(
+            invocation_bound=True, expected_provider="p", expected_model="m",
+            reported_provider="p", reported_model="m",
+        ))
+        for kwargs in (
+            {"expected_model": "m", "reported_model": "other"},
+            {"expected_provider": "p", "reported_provider": "other"},
+        ):
+            base = {"invocation_bound": True, "expected_provider": "p",
+                    "expected_model": "m", "reported_provider": "p",
+                    "reported_model": "m"}
+            base.update(kwargs)
+            code, _ = core._route_refusal(**base)
+            self.assertEqual(code, "route_substituted")
+        code, _ = core._route_refusal(
+            invocation_bound=True, expected_provider="p", expected_model="m",
+            reported_provider="", reported_model="",
+        )
+        self.assertEqual(code, "route_unverifiable")
+
+    def test_an_unbound_run_is_unaffected(self):
+        """Only an invocation-bound call has a bound route to be unfaithful to.
+        A configured, non-bound target keeps its existing behaviour."""
+        self.assertIsNone(core._route_refusal(
+            invocation_bound=False, expected_provider="p", expected_model="m",
+            reported_provider="", reported_model="",
+        ))
+
+    def test_a_substituted_reviewer_cannot_open_the_proposal_gate(self):
+        """RED 5. The reviewer already knew it had been substituted and used
+        the fact only when declining. An approval from the same untrusted model
+        went straight through to a proposer call and a mutation."""
+        self._application_gate_patch.stop()
+        self._grounding_repair_patch.stop()
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+        })
+        model = self.BoundFacade(
+            MockResult(
+                {"shouldRefine": True, "rationale": "durable",
+                 "instructions": "persist the retry lesson"},
+                provider="openai-codex", model="gpt-5.6-sol-900k",
+            ),
+            provider="openai-codex", model="gpt-5.6-luna-900k",
+        )
+        result = core.refine_run(model, session_id="session")
+
+        self.assertEqual(result["outcome"], "route_substituted")
+        self.assertEqual(len(model.calls), 1, "no second proposer call")
+        self.assertEqual(FakeHost.actions, [])
+        self.assertEqual(result.get("edits_applied", 0), 0)
+        self.assertIs(result.get("would_apply", False), False)
+
+    def test_an_approving_reviewer_on_the_bound_route_still_opens_the_gate(self):
+        """The positive control for RED 5: a faithful reviewer is unaffected."""
+        self._application_gate_patch.stop()
+        self._grounding_repair_patch.stop()
+        now = time.time()
+        FakeHost.make_db([
+            ("session", "user", f"Routine context {index}", "", now - index, 1)
+            for index in range(20)
+        ])
+        FakeHost.entry_config().update({
+            "min_signal_required": True,
+            "reviewer_fallback_enabled": True,
+            "reviewer_min_messages": 20,
+        })
+        model = self.BoundFacade(
+            MockResult(
+                {"shouldRefine": True, "rationale": "durable",
+                 "instructions": "persist the retry lesson"},
+                provider="openai-codex", model="gpt-5.6-sol-900k",
+            ),
+            MockResult(
+                skill_proposal("reviewer-on-route"),
+                provider="openai-codex", model="gpt-5.6-sol-900k",
+            ),
+            provider="openai-codex", model="gpt-5.6-sol-900k",
+        )
+        result = core.refine_run(model, session_id="session")
+        self.assertEqual(len(model.calls), 2, "the proposer was reached")
+        self.assertNotEqual(result.get("outcome"), "route_substituted")
+        self.assertNotEqual(result.get("outcome"), "route_unverifiable")
+
+    def test_the_frozen_replay_applies_and_rolls_back_on_a_matching_route(self):
+        """Replay 1 and 3: the shape of 59dbeacadaff, on the route it claimed."""
+        before = digest_of_memories()
+        result, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-sol-900k",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertEqual(result["outcome"], "applied")
+        self.assertEqual(result["edits_applied"], 1)
+        after_apply = digest_of_memories()
+        self.assertNotEqual(before, after_apply, "the edit was not written")
+
+        rollback = core.refine_rollback(result["journal_id"])
+        self.assertTrue(rollback.get("success"), rollback)
+        self.assertEqual(
+            digest_of_memories(), before,
+            "rollback did not restore the exact bytes",
+        )
+
+    def test_the_frozen_replay_has_nothing_to_roll_back_when_refused(self):
+        """Replay 2 and 4. The asymmetry is the assertion: rollback is
+        unavailable on the refused path because nothing was ever applied, not
+        because rollback happens to fail."""
+        before = digest_of_memories()
+        result, _ = self._bound_run(
+            bound_provider="openai-codex", bound_model="gpt-5.6-luna-900k",
+            reported_provider="openai-codex", reported_model="gpt-5.6-sol-900k",
+        )
+        self.assertEqual(result["llm_meta"]["result_code"], "route_substituted")
+        self.assertEqual(
+            digest_of_memories(), before, "the refused path still wrote bytes",
+        )
+        entry = journal.get_entry(result["journal_id"])
+        self.assertEqual(entry["outcome"], "route_substituted")
+        self.assertNotIn(entry["outcome"], ("applied", "prepared"))
+        # No backup was taken, because nothing reached the point that takes one.
+        self.assertFalse(entry.get("backup_path"), "a backup was taken for an edit that never happened")
+
+        rollback = core.refine_rollback(result["journal_id"])
+        self.assertFalse(
+            rollback.get("success"),
+            "a refused proposal must not present itself as rollbackable",
+        )
+        self.assertEqual(digest_of_memories(), before)
 
     def test_the_reviewer_path_buys_no_repair_call(self):
         """A6. Reviewer output is advisory: `_application_evidence_refusal`
@@ -5145,6 +5492,15 @@ class RefineTests(unittest.TestCase):
             intended_target={"provider": "p", "model": "m"},
         )
         kwargs.update(overrides)
+        # A real review_fallback records the route that served it; these tests
+        # patch it out, so the meta is seeded here instead. Without it the
+        # reviewer verdict is genuinely unattributable and is refused -- which
+        # is correct behaviour and not what these three tests are about.
+        llm._call_meta.value = dict(
+            getattr(llm._call_meta, "value", {}) or {},
+            reported_provider=kwargs["intended_target"].get("provider", ""),
+            reported_model=kwargs["intended_target"].get("model", ""),
+        )
         return core._handle_no_signal(**kwargs)
 
     def test_handle_no_signal_reviewer_declined_returns_response(self):
@@ -8448,6 +8804,20 @@ class RefineTests(unittest.TestCase):
         # before it can ever apply anything.
         route_bound = MockLlm()
         route_bound.invocation_bound = True
+        # A real BoundPluginLlm always carries a validated route whose provider
+        # and model are both non-empty, and a real propose() records the route
+        # that served. Without both, the pass is correctly unattributable and
+        # declines before it can apply -- so the fixture models both.
+        route_bound._bound_route = types.SimpleNamespace(
+            provider="test-provider", model="test-model",
+        )
+
+        def _propose_on_route(*_args, **_kwargs):
+            llm._call_meta.value = dict(
+                getattr(llm._call_meta, "value", {}) or {},
+                reported_provider="test-provider", reported_model="test-model",
+            )
+            return skill_proposal("auto-routed")
         plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=route_bound)
         chat = ("telegram", "6667956926", "")
         delivered = []
@@ -8461,7 +8831,7 @@ class RefineTests(unittest.TestCase):
         callback_thread = threading.current_thread().name
         with self._guarded_session_context({callback_thread: chat}) as breaches, \
                 patch.object(
-                    core._llm, "propose", return_value=skill_proposal("auto-routed")
+                    core._llm, "propose", side_effect=_propose_on_route
                 ), \
                 patch.object(core._notify, "notify", side_effect=spy):
             plugin_init._on_post_llm_call("session", [{"role": "assistant"}])

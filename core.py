@@ -4428,6 +4428,77 @@ def _model_substituted(
     return False
 
 
+def _bound_route_identity(llm: Any) -> Dict[str, str]:
+    """The provider/model of the invocation this call is locked to.
+
+    `BoundPluginLlm` exposes no public provider/model -- the route lives on its
+    `_bound_route`, a validated `PluginInvocationRoute` whose provider and model
+    are both guaranteed non-empty. Refine read only the public names, got two
+    empty strings, and fell back to `config.effective_llm_target()`. On the live
+    host that config named a model the session was not using, so every pass was
+    scored against a value nobody was talking to and journal 59dbeacadaff
+    recorded a "substitution" that was really a user changing their model.
+
+    Public attributes first, so a host that does expose them wins; the host's
+    own route object second, because the alternative to reading it is having no
+    attribution at all. Nothing here falls back to config: for a bound call,
+    config is not the route.
+    """
+    provider = str(getattr(llm, "provider", "") or "").strip()
+    model = str(getattr(llm, "model", "") or "").strip()
+    if provider and model:
+        return {"provider": provider, "model": model}
+    route = getattr(llm, "_bound_route", None)
+    if route is not None:
+        provider = provider or str(getattr(route, "provider", "") or "").strip()
+        model = model or str(getattr(route, "model", "") or "").strip()
+    return {"provider": provider, "model": model}
+
+
+def _route_refusal(
+    *,
+    invocation_bound: bool,
+    expected_provider: str,
+    expected_model: str,
+    reported_provider: str,
+    reported_model: str,
+) -> Optional[Tuple[str, str]]:
+    """Return ``(code, message)`` when a proposal is not attributable.
+
+    One definition, consumed by the proposer and reviewer paths alike, because
+    two definitions of "is this call attributable" would eventually disagree and
+    the disagreement would be invisible.
+
+    Only an invocation-bound call has a route it can be unfaithful to. An
+    unbound call sends its own target and the host's answer is judged by the
+    existing target machinery, which this does not touch.
+    """
+    if not invocation_bound:
+        return None
+    if not (expected_provider and expected_model):
+        return (
+            "route_unverifiable",
+            "The host did not identify the route this invocation is bound to, "
+            "so nothing can say which model produced this proposal.",
+        )
+    if not (reported_provider and reported_model):
+        return (
+            "route_unverifiable",
+            "The model call completed without reporting which provider and "
+            "model served it, so the proposal cannot be attributed.",
+        )
+    if (expected_provider, expected_model) != (reported_provider, reported_model):
+        return (
+            "route_substituted",
+            "The proposal was produced by "
+            f"{reported_provider}/{reported_model}, not by the route this "
+            f"invocation is bound to ({expected_provider}/{expected_model}); "
+            "a verdict from a model the plugin was not talking to is not "
+            "applied.",
+        )
+    return None
+
+
 def _handle_no_signal(
     llm: Any,
     evidence: Dict[str, Any],
@@ -4595,6 +4666,41 @@ def _handle_no_signal(
                 "journal_id": reviewer_entry_id,
                 "llm_called": True,
                 "reviewer": "failed",
+                "evidence": evidence,
+                "llm_meta": reviewer_llm_meta,
+                "reversible": False,
+            }
+        # The same question the proposer path asks, asked once here with the
+        # same helper, and asked for BOTH decisions. A decline from a model we
+        # were not talking to was already refused below; an APPROVAL from one
+        # opened the gate, which is the more expensive half of the same defect.
+        reviewer_route_problem = _route_refusal(
+            invocation_bound=run_target_source == "invocation_bound",
+            expected_provider=str(intended_target.get("provider", "") or ""),
+            expected_model=str(intended_target.get("model", "") or ""),
+            reported_provider=str(reviewer_call_meta.get("reported_provider", "") or ""),
+            reported_model=str(reviewer_call_meta.get("reported_model", "") or ""),
+        )
+        if reviewer_route_problem:
+            reviewer_route_code, reviewer_route_message = reviewer_route_problem
+            reviewer_llm_meta["result_code"] = reviewer_route_code
+            reviewer_llm_meta["would_apply"] = False
+            return {
+                "success": False,
+                "outcome": reviewer_route_code,
+                "failure": reviewer_route_code,
+                "message": reviewer_route_message,
+                "guardrail_error": reviewer_route_message,
+                "journal_id": reviewer_entry_id,
+                "proposal": {
+                    "action": "no_op",
+                    "reason": reviewer_reason,
+                    "expected_outcome": "",
+                },
+                "llm_called": True,
+                "would_apply": False,
+                "edits_applied": 0,
+                "reviewer": decision,
                 "evidence": evidence,
                 "llm_meta": reviewer_llm_meta,
                 "reversible": False,
@@ -5274,11 +5380,17 @@ def _refine_once(
                 config.llm_target_trust_denials(_effective).values()
             )
         # Current model is authoritative: prefer the live facade route.
-        _facade_provider = str(getattr(llm, "provider", "") or "")
-        _facade_model = str(getattr(llm, "model", "") or "")
-        if _facade_provider or _facade_model:
-            _intended_target["provider"] = _facade_provider
-            _intended_target["model"] = _facade_model
+        #
+        # For a BOUND call the facade route is the only correct answer, and
+        # config is not a fallback for it -- falling back is what scored live
+        # sessions against a stale pin and produced journal 59dbeacadaff.
+        _facade = _bound_route_identity(llm)
+        if _invocation_bound:
+            _intended_target["provider"] = _facade["provider"]
+            _intended_target["model"] = _facade["model"]
+        elif _facade["provider"] or _facade["model"]:
+            _intended_target["provider"] = _facade["provider"]
+            _intended_target["model"] = _facade["model"]
         elif isinstance(_effective, dict):
             _intended_target["provider"] = str(_effective.get("provider", "") or "")
             _intended_target["model"] = str(_effective.get("model", "") or "")
@@ -5871,6 +5983,58 @@ def _refine_once(
         # which already carries the field; this is the proceeded exit's copy.
         **_evidence_suppression,
     }
+    # The gate journal 59dbeacadaff needed. It sits after the final call
+    # metadata is known -- so the reported route is the FINAL attempt's, not a
+    # retried predecessor's -- and before proposal validation, preview and any
+    # backup or host mutation. Every path below this point can write; nothing
+    # above it can.
+    #
+    # A no_op has nothing to attribute and nothing to apply, so it is left to
+    # the ordinary reporting below rather than being relabelled a route failure.
+    _route_problem = (
+        None if proposal.get("action") == "no_op"
+        else _route_refusal(
+            invocation_bound=_invocation_bound,
+            expected_provider=str(_intended_target.get("provider", "") or ""),
+            expected_model=str(_intended_target.get("model", "") or ""),
+            reported_provider=str(_run_llm_meta.get("reported_provider", "") or ""),
+            reported_model=str(_run_llm_meta.get("reported_model", "") or ""),
+        )
+    )
+    if _route_problem:
+        _route_code, _route_message = _route_problem
+        _run_llm_meta["result_code"] = _route_code
+        # The preview and the apply reach the same verdict because they reach
+        # the same line: a dry run that disagreed with the apply is how a census
+        # counts proposals that could never land.
+        _run_llm_meta["would_apply"] = False
+        entry_id = _journal_nonmutation(
+            trigger=trigger,
+            reason=safe_reason or _route_message,
+            session_id=session,
+            proposal=proposal,
+            outcome=_route_code,
+            error=_route_message,
+            llm_meta=_run_llm_meta,
+        )
+        response = {
+            "success": False,
+            "outcome": _route_code,
+            "failure": _route_code,
+            "message": _route_message,
+            "guardrail_error": _route_message,
+            "llm_called": True,
+            "would_apply": False,
+            "edits_applied": 0,
+            "proposal": proposal,
+            "evidence": evidence_summary,
+            "llm_meta": _run_llm_meta,
+            "reversible": False,
+        }
+        if entry_id:
+            response["journal_id"] = entry_id
+        return response
+
     failure = scrub_text(str(proposal.get("failure", "")).strip())
     if failure:
         failure_messages = {
