@@ -26205,7 +26205,12 @@ class InstallerHermesHomeTests(unittest.TestCase):
             (checkout / "hermes_cli" / "plugins.py").write_text("x", encoding="utf-8")
             with patch.dict(os.environ, {"HERMES_HOME": str(data_home)}, clear=False):
                 os.environ.pop("HERMES_SRC", None)
-                found = install.find_hermes_src(None)
+                # A real Hermes host has a gateway unit naming a real checkout,
+                # and that candidate is consulted first -- correctly, since the
+                # running gateway is the active install. Without silencing it
+                # here this test passes only on machines with no Hermes on them.
+                with patch.object(install, "systemd_unit_dirs", lambda: ()):
+                    found = install.find_hermes_src(None)
         self.assertEqual(found, checkout.resolve())
 
     def test_the_host_helper_in_the_checkout_is_actually_consulted(self):

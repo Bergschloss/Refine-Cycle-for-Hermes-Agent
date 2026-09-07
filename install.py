@@ -359,6 +359,21 @@ def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def systemd_unit_dirs() -> tuple[Path, ...]:
+    """Where a gateway unit file may live.
+
+    A function rather than a module constant: the user-unit path derives from
+    Path.home(), which must be read when the search runs, not when this module
+    is imported. It is also the seam tests replace -- on a real Hermes host the
+    running gateway's unit names a real checkout, which would otherwise win over
+    any fixture a test builds.
+    """
+    return (
+        Path("/etc/systemd/system"),
+        Path.home() / ".config/systemd/user",
+    )
+
+
 def find_hermes_src(explicit: str | None) -> Path:
     """Locate the active Hermes checkout without POSIX-only tools."""
     candidates: list[Path] = []
@@ -368,10 +383,7 @@ def find_hermes_src(explicit: str | None) -> Path:
     if env:
         candidates.append(Path(env))
     # systemd ExecStart of the user's gateway service, parsed portably
-    for unit_dir in (
-        Path("/etc/systemd/system"),
-        Path.home() / ".config/systemd/user",
-    ):
+    for unit_dir in systemd_unit_dirs():
         unit = unit_dir / "hermes-gateway.service"
         try:
             text = unit.read_text(encoding="utf-8", errors="replace")
