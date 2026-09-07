@@ -4,7 +4,7 @@
 
 **Your agent keeps repeating one mistake. This makes it stop.**
 
-Refine Cycle looks across recent sessions, finds those repeating problems, and
+**Refine Cycle** looks across recent sessions, finds those repeating problems, and
 saves one small lesson when the evidence is strong enough. Later, it checks
 whether the same problem came back.
 
@@ -12,11 +12,18 @@ whether the same problem came back.
 it, but some problems return across different sessions: the same failed command,
 the same wrong assumption, the same workaround you have to explain twice.
 
+It reads the agent's own trajectory, normalizes errors into comparable shapes,
+counts how often each shape recurs **and in how many separate sessions**, then
+proposes the **smallest possible edit** — an agent-created skill, a memory entry,
+or a bounded, plugin-owned prompt note. Every mutation is prepared in a durable
+journal before it runs, carries conflict-aware recovery metadata, and is later
+graded on whether the failure it targeted actually stopped.
+
 **Refine Cycle** adapts the `/refine` concept from
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
 (Continual Harness) to the Hermes plugin system.
 
-[Install](#installation)
+[**Install on your Hermes host →**](#installation)
 
 ![Refine Cycle finds a repeated problem, saves one focused lesson, and checks whether it helped](assets/what-it-does.gif)
 
