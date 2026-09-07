@@ -29,6 +29,42 @@ when it is explicitly enabled; it does not modify Hermes itself.
 
 ---
 
+## What has actually been measured
+
+Numbers rather than adjectives. All of it from the release QA on this commit,
+against `opencode-go / gpt-5.6-luna` on a real Hermes host.
+
+**Safety.** Across 48 before/after pairs on the full scenario matrix: zero
+regressions among applied edits, zero edits on control sessions where writing
+nothing is the correct behaviour, 16 of 16 rollbacks byte-exact, live memory,
+journal and config untouched.
+
+**Usefulness.** Counted only where there was something to fix — that is, pairs
+the agent got wrong unaided: **14 of 23 fixed** in the larger sample (61%), and
+6 of 9 in the full twelve-scenario matrix. Half the matrix consists of tasks the
+model already performs correctly on its own; a lesson cannot improve what is
+already right, so those are excluded from the ratio rather than used to inflate
+it.
+
+**Causality.** A three-arm probe over 60 holdouts separated "the lesson helped"
+from "the model wobbled". With the lesson: 14 of 20. With nothing: 10 of 20.
+With a neutral memory of the same length: 8 of 20. The gain comes from what the
+lesson says, not from the fact that something was written.
+
+**Input budget.** Three configurations were compared. Showing the proposer every
+eligible failure pattern instead of the top eight made it measurably *worse*
+(40% against 61%); shifting prompt budget from stored-entry summaries toward the
+conversation changed nothing beyond noise. The defaults are where they are on
+evidence.
+
+**On real conversations.** 125 recorded sessions produced 1287 distinct failure
+shapes; 23 cleared the recurrence bar. That bar is the design — a lesson is
+written only for something seen in two separate sessions or five times — and it
+means most of what the plugin reads is deliberately discarded.
+
+**Not measured.** Whether an agent is better off after weeks of real use. That
+needs a live journal and time, not a benchmark, and nothing here claims it.
+
 ## How this differs from Hermes's built-in self-improvement
 
 Hermes ships its own background review: after a turn or a session it looks at the
@@ -148,7 +184,7 @@ failure a journaled error (`subagent_strict_error`) instead of a downgrade.
 
 ## Installation
 
-> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (777 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below).
+> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (1193 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below).
 
 The plugin lives in `<HERMES_HOME>/plugins/refine/` — `~/.hermes/plugins/refine/`
 on Linux and macOS, and `%LOCALAPPDATA%\hermes\plugins\refine\` on Windows.
@@ -212,7 +248,7 @@ Verify:
 
 ```
 hermes plugins list
-# refine  0.13.0  Measurement layer ...  enabled
+# refine  1.0.0  Measurement layer ...  enabled
 ```
 
 Then check that automatic refinement can actually run:
