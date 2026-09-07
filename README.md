@@ -239,10 +239,53 @@ Measured on a clean Windows checkout of Hermes 0.21.0 at
 - the plugin suite passes 1,203 tests, with 11 Windows-only skips for Bash-based
   `install.sh` coverage.
 
-The smoke uses synthetic input and does not start or restart the real gateway.
-No real session content is supplied to it. The exact commands and the distinction
+Since then the same host has been exercised with a live model rather than a
+smoke. On a Linux checkout of the same commit, in a disposable `HERMES_HOME`
+with its own journal, four `/refine-cycle` runs over real recorded sessions each
+reached the model and each recorded the same route facts:
+
+```
+target_source      : invocation_bound     ← the route came from the host, not config
+requested / reported: openai-codex/gpt-5.6-luna-900k  (identical)
+model_substituted  : false
+primary_attempts   : 1                    ← one physical request, no retry, no fallback
+```
+
+That is the whole contract the patch exists to provide, and it holds on 0.21.0.
+
+**What those runs did not show is an applied edit.** All four ended `no_op`:
+three because the reviewer judged the trajectory (benchmark output, exploratory
+searches) to carry no durable lesson, one because the signal gate never opened.
+That is the plugin declining on merit, not failing — but it means the apply path
+itself is still evidenced by the test suite and by 42 applied entries on 0.20.x,
+not by a fresh 0.21.0 run. The apply path is downstream of the route and no
+patched file takes part in it.
+
+The smoke uses synthetic input and does not start or restart the real gateway. The exact commands and the distinction
 between the original failed baseline and the corrected result are recorded in
 [`docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md`](docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md).
+
+### On 0.21.0 the command is `/refine-cycle`
+
+Hermes 0.21.0 ships its own built-in `/refine` (a background review fork), and
+`register_command` silently drops a plugin command that collides with a built-in.
+The plugin detects this at registration and takes `/refine-cycle` instead, so
+every subcommand stays reachable:
+
+```
+/refine-cycle status
+/refine-cycle audit
+/refine-cycle dry-run
+/refine-cycle session <session_id>
+/refine-cycle rollback <id>
+```
+
+This matters more than a renaming usually would: on 0.21.0, typing `/refine`
+does not fail — it reaches Hermes's own command and answers, so it is easy to
+believe you are talking to this plugin when you are not. Every `/refine …`
+example below is written for hosts without that built-in; substitute
+`/refine-cycle` on 0.21.0. `/refine-cycle status` names the command that
+answered, so it is the quickest way to confirm which one you have.
 
 ### Why patch selection remains strict
 
@@ -1181,9 +1224,10 @@ initiated.
   proposals additionally need the host route patch (see Installation); without it
   they fail loudly with `llm_invocation_unavailable`, which is the intended honest
   gate. The manifest format cannot express a host requirement, so this is enforced
-  at runtime rather than at install time. On **0.21.0** the plugin installs, loads
-  and registers, but no bundled route patch applies, so proposals are unavailable
-  there — see [Hermes version support](#hermes-version-support).
+  at runtime rather than at install time. On **0.21.0** the plugin installs, loads,
+  registers, and proposes: `assets/invocation-route-v0.21.0.patch` applies, and
+  four proposals on a real 0.21.0 host reached the session's own model — see
+  [Hermes version support](#hermes-version-support).
 
 ---
 
