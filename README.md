@@ -2,14 +2,16 @@
 
 ![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.gif)
 
-## Help Hermes stop repeating the same mistakes
+**Refine Cycle** adapts the `/refine` concept from
+[Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
+(Continual Harness) to the Hermes plugin system.
 
-Hermes can learn from the conversation in front of it. But some problems return
-again and again across different sessions: the same failed command, the same
-wrong assumption, the same workaround you have to explain twice.
+**Cross-session by design.** Hermes can learn from the conversation in front of
+it, but some problems return across different sessions: the same failed command,
+the same wrong assumption, the same workaround you have to explain twice.
 
-Refine Cycle looks across recent sessions, finds those repeating problems, and
-saves one small lesson when the evidence is strong enough. Later, it checks
+**Refine Cycle** looks across recent sessions, finds those repeating problems,
+and saves one small lesson when the evidence is strong enough. Later, it checks
 whether the same problem came back.
 
 [**Install Refine Cycle →**](#installation)
@@ -20,16 +22,16 @@ whether the same problem came back.
 
 1. **Notice what keeps going wrong.** One bad result may be noise. A problem seen
    in two sessions or five times is a pattern worth examining.
-2. **Save the smallest useful lesson.** Refine Cycle can add a short memory,
+2. **Save the smallest useful lesson.** **Refine Cycle** can add a short memory,
    create or improve a reusable skill, or add a focused note for future turns.
 3. **Check the result.** It watches later sessions and reports whether the lesson
    appears to be working, unused, unreliable, or too new to judge.
 
 ## You stay in control
 
-- Refine Cycle makes no more than three changes per day.
-- Every change is recorded. When it can be safely undone, Refine Cycle gives you
-  one command to reverse it.
+- **Refine Cycle** makes no more than three changes per day.
+- Every change is recorded. When it can be safely undone, **Refine Cycle**
+  gives you one command to reverse it.
 - It never rewrites Hermes's base instructions or deletes your skills.
 - API keys and other credentials are removed before conversation evidence is
   sent to the model.
@@ -38,11 +40,11 @@ whether the same problem came back.
 
 ## Before you install
 
-Refine Cycle does more than report problems: it can change what Hermes remembers.
-The full installer connects Refine Cycle to the AI model already serving your
-Hermes session and increases the space available for long-term memory. When the
-plugin starts, it also attempts to turn off Hermes's manual memory and skill
-approval queues so lessons do not remain pending forever.
+**Refine Cycle** does more than report problems: it can change what Hermes
+remembers. The full installer connects **Refine Cycle** to the AI model already
+serving your Hermes session and increases the space available for long-term
+memory. When the plugin starts, it also attempts to turn off Hermes's manual
+memory and skill approval queues so lessons do not remain pending forever.
 
 Those changes are disclosed, backed up where applicable, and reversible through
 `python install.py --rollback`. See [Installation](#installation) for the exact
@@ -52,9 +54,30 @@ files, commands, and host-version checks before you run it.
 
 **Technical documentation starts here.** The sections below describe the signal
 and application gates, journal states, host patch, privacy boundaries, rollback,
-and test evidence. Refine Cycle adapts the `/refine` concept from
-[Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
-(Continual Harness) to the Hermes plugin system.
+and test evidence.
+
+## How it works
+
+![How the Refine Cycle plugin works: a session ends, repeated failures are found across sessions, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](assets/refine-cycle.gif)
+
+```
+trajectory (state.db) → scrub → fingerprint + aggregate → signal gate
+                                                  ├→ reviewer decline → journaled no_op
+                                                  └→ proposal → guardrails + prepare
+                                                              → apply → finalized outcome
+                                                                      → usefulness ledger
+```
+
+| Stage | What happens |
+|---|---|
+| **1. Collect evidence** | Reads the last N messages of the selected session from `<HERMES_HOME>/state.db` with `mode=ro`. Credentials are redacted before downstream use. |
+| **2. Aggregate** | Normalizes errors to invariant shapes, records complete 12-character fingerprints, and counts recurrence within and across sessions. |
+| **3. Signal gate and reviewer** | Repeated patterns or explicit corrections reach the proposal model. If neither exists, a substantial session may receive one small, conservative reviewer call; a decline is a sanitized, journaled `no_op`. |
+| **4. LLM proposal** | Requests one structured `create`, `patch`, or `no_op` proposal with an optional one-sentence, falsifiable `expected_outcome`. Kinds are `skill`, `memory`, and `prompt`. A proposal may instead carry an `edits` array of inseparable edits under one shared reason, `expected_outcome`, and `summary`. Every model-bound field is sanitized. The proposal output budget is derived locally from the shared 15,000-character content limit and scales with `max_edits_per_proposal`; the reviewer remains separately capped at 2,400 tokens. A cut-off, malformed, or reasoning-only reply is journaled as `llm_incomplete` rather than presented as a normal `no_op`. Skill patches receive the current complete `SKILL.md` only when it is unchanged by scrubbing and no larger than 15,000 characters. |
+| **5. Guardrails** | Enforces agent-created patch targets, fresh create names, content/frontmatter, prompt-note policy shape, size limits, daily budget, and recent-duplicate rejection. Every check runs per edit, so a later edit of a transaction is measured against the edits already applied before it. |
+| **6. Prepare** | Captures a skill's pre-edit content as both a journal snapshot and a readable `.bak` file, or memory/prompt-note recovery metadata, then appends and `fsync`s a `prepared` journal record before mutation. |
+| **7. Apply and reconcile** | Runs the standard host API for skills/memory (`patch` maps to host `edit`) or atomically writes the plugin-owned prompt-note store. It proves target state and records `applied`, `pending_approval`, `conflict`, or `error`. A `conflict` occurs when a skill patch was planned against content that changed before apply, disappeared, or can no longer be read reliably; the budget is not consumed and the edit is not advertised as reversible. Host pending approvals reconcile lazily before later runs, audit, or rollback. |
+| **8. Rollback** | Journals `rollback_prepared` before a rollback side effect. A rollback is finalized only after target-state proof; staged host rollbacks remain `pending_rollback` until approval reconciliation. |
 
 ---
 
@@ -65,10 +88,10 @@ current conversation and saves what is worth keeping — a useful tactic, a user
 preference, a correction. It answers **"is there something here worth
 remembering?"**
 
-Refine Cycle answers a different question, over a different window, and then
+**Refine Cycle** answers a different question, over a different window, and then
 checks its own work:
 
-| | Hermes background review | Refine Cycle |
+| | Hermes background review | **Refine Cycle** |
 |---|---|---|
 | **Trigger** | anything worth keeping | proposal signal at 2 repeats; application only at 2 sessions **or** 5 occurrences |
 | **Window** | the current session | many sessions |
@@ -78,7 +101,7 @@ checks its own work:
 | **Blast radius** | host policy | 3 edits/day, dedup window, cooldown, per-edit journal, per-edit rollback |
 
 The two are complementary, not alternatives. Hermes captures fresh experience;
-Refine Cycle hunts chronic failures and measures whether its own fixes held.
+**Refine Cycle** hunts chronic failures and measures whether its own fixes held.
 
 Both can write to the same skills and memory, so the plugin is built to notice
 that: a skill patch is refused outright when the target changed after planning,
@@ -110,33 +133,12 @@ normal recurrence evidence.
 
 The base system prompt is never touched. Only **agent-created** skills and
 memory entries are editable; built-in, pinned, and hub-installed skills remain
-off-limits. Prompt notes live only in Refine Cycle's own store, never in host
+off-limits. Prompt notes live only in **Refine Cycle**'s own store, never in host
 memory or a skill.
 
 ---
 
-## How it works
-
-![How the Refine Cycle plugin works: a session ends, repeated failures are found, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](assets/refine-cycle.gif)
-
-```
-trajectory (state.db) → scrub → fingerprint + aggregate → signal gate
-                                                  ├→ reviewer decline → journaled no_op
-                                                  └→ proposal → guardrails + prepare
-                                                              → apply → finalized outcome
-                                                                      → usefulness ledger
-```
-
-| Stage | What happens |
-|---|---|
-| **1. Collect evidence** | Reads the last N messages of the selected session from `<HERMES_HOME>/state.db` with `mode=ro`. Credentials are redacted before downstream use. |
-| **2. Aggregate** | Normalizes errors to invariant shapes, records complete 12-character fingerprints, and counts recurrence within and across sessions. |
-| **3. Signal gate and reviewer** | Repeated patterns or explicit corrections reach the proposal model. If neither exists, a substantial session may receive one small, conservative reviewer call; a decline is a sanitized, journaled `no_op`. |
-| **4. LLM proposal** | Requests one structured `create`, `patch`, or `no_op` proposal with an optional one-sentence, falsifiable `expected_outcome`. Kinds are `skill`, `memory`, and `prompt`. A proposal may instead carry an `edits` array of inseparable edits under one shared reason, `expected_outcome`, and `summary`. Every model-bound field is sanitized. The proposal output budget is derived locally from the shared 15,000-character content limit and scales with `max_edits_per_proposal`; the reviewer remains separately capped at 2,400 tokens. A cut-off, malformed, or reasoning-only reply is journaled as `llm_incomplete` rather than presented as a normal `no_op`. Skill patches receive the current complete `SKILL.md` only when it is unchanged by scrubbing and no larger than 15,000 characters. |
-| **5. Guardrails** | Enforces agent-created patch targets, fresh create names, content/frontmatter, prompt-note policy shape, size limits, daily budget, and recent-duplicate rejection. Every check runs per edit, so a later edit of a transaction is measured against the edits already applied before it. |
-| **6. Prepare** | Captures a skill's pre-edit content as both a journal snapshot and a readable `.bak` file, or memory/prompt-note recovery metadata, then appends and `fsync`s a `prepared` journal record before mutation. |
-| **7. Apply and reconcile** | Runs the standard host API for skills/memory (`patch` maps to host `edit`) or atomically writes the plugin-owned prompt-note store. It proves target state and records `applied`, `pending_approval`, `conflict`, or `error`. A `conflict` occurs when a skill patch was planned against content that changed before apply, disappeared, or can no longer be read reliably; the budget is not consumed and the edit is not advertised as reversible. Host pending approvals reconcile lazily before later runs, audit, or rollback. |
-| **8. Rollback** | Journals `rollback_prepared` before a rollback side effect. A rollback is finalized only after target-state proof; staged host rollbacks remain `pending_rollback` until approval reconciliation. |
+## Implementation details
 
 ### Why fingerprinting
 
@@ -615,7 +617,7 @@ beginning with `When <specific condition>, <one action>.`; they are not skills,
 memories, procedures, or system-prompt replacements.
 
 `pre_llm_call` returns a self-labelled `Refine notes:` context block. Hermes
-adds that ephemeral context to the current turn; Refine Cycle never reads or
+adds that ephemeral context to the current turn; **Refine Cycle** never reads or
 writes the base system prompt. Injection is bounded by
 `prompt_notes_max_count` and `prompt_notes_max_chars`; when necessary it drops
 whole oldest notes, never partial text. Empty, unavailable, unsafe, or
@@ -963,7 +965,7 @@ llm:
   used to expire session-scoped notes, not as a claim that refinement runs after
   context compaction. The only plugin-side compaction registration,
   `register_context_engine`, replaces Hermes's built-in `ContextCompressor` and
-  permits only one engine per install. Taking it over would make Refine Cycle
+  permits only one engine per install. Taking it over would make **Refine Cycle**
   responsible for the agent's whole compaction strategy and conflict with any
   real context-engine plugin. A safe integration needs an observer-only
   `VALID_HOOKS` member fired at the compaction boundary.
