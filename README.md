@@ -17,7 +17,22 @@ graded on whether the failure it targeted actually stopped.
 This is a port of the `/refine` concept from
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
 (Continual Harness) built on the Hermes plugin system. The plugin only loads
-when it is explicitly enabled; it does not modify Hermes itself.
+when it is explicitly enabled.
+
+**Its installer does write to your Hermes install, and you should know what
+before you run it.** The plugin's own runtime never touches Hermes — but
+`install.py` and `install.sh` do two things to the host, both reversible with
+`--rollback` and both declined by `--plugin-only`:
+
+- **Raises `memory_char_limit` to a floor of 4400**, in `<HERMES_HOME>/config.yaml`
+  and in `hermes_cli/config_defaults.py` in the Hermes checkout. A floor, not an
+  override: a higher value you chose is never lowered. Refine's entire output
+  lives in that store and the stock 2200 fills up in a day. See "The memory
+  budget the install raises".
+- **Applies the invocation route patch** to nine files in the Hermes checkout,
+  which is what lets Refine call the exact model of the active session. Without
+  it, status, audit and rollback still work and new proposals fail closed. See
+  "Host route patch".
 
 ![What it does: a mistake happens twice or more, the plugin writes a fix, and the loop continues next session](assets/what-it-does.gif)
 
