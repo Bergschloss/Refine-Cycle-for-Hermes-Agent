@@ -246,6 +246,16 @@ Do **not** force either bundled patch and do not three-way merge them onto 0.21.
 A partially wired route would break the single-route guarantee silently, which is
 worse than the feature being unavailable.
 
+A rebased patch for this host **exists but is not installable yet**. It lives at
+`assets/pending/invocation-route-v0.21.0.patch`, deliberately outside the
+`assets/invocation-route-*.patch` glob the installer selects from: it applies
+cleanly to `693641aa8b` and carries 36 passing host tests with no regressions, but
+`install.py` still models the host as one shared eight-file topology, and 0.21.0
+moved two of those files. Until that metadata is per-patch, the installer would
+classify a correctly patched 0.21.0 host as `partial` and try to reverse it. The
+remaining work, with the marker tables, is written up in
+[`docs/SPEC-invocation-route-v0.21.0.md`](docs/SPEC-invocation-route-v0.21.0.md).
+
 ### A note on `plugins.scan_on_install`
 
 Setting `plugins.scan_on_install: false` makes a blocked install proceed. It is
