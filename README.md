@@ -2,88 +2,61 @@
 
 ![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.gif)
 
-**A measurement layer for Hermes Agent's self-improvement.** Hermes already
-learns from the conversation in front of it. Refine Cycle asks a different
-question: *what keeps breaking across many sessions, and did fixing it actually
-help?*
+## Help Hermes stop repeating the same mistakes
 
-It reads the agent's own trajectory, normalizes errors into comparable shapes,
-counts how often each shape recurs **and in how many separate sessions**, then
-proposes the **smallest possible edit** — an agent-created skill, a memory entry,
-or a bounded, plugin-owned prompt note. Every mutation is prepared in a durable
-journal before it runs, carries conflict-aware recovery metadata, and is later
-graded on whether the failure it targeted actually stopped.
+Hermes can learn from the conversation in front of it. But some problems return
+again and again across different sessions: the same failed command, the same
+wrong assumption, the same workaround you have to explain twice.
 
-This is a port of the `/refine` concept from
-[Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
-(Continual Harness) built on the Hermes plugin system. The plugin only loads
-when it is explicitly enabled.
+Refine Cycle looks across recent sessions, finds those repeating problems, and
+saves one small lesson when the evidence is strong enough. Later, it checks
+whether the same problem came back.
 
-**Its installer does write to your Hermes install, and you should know what
-before you run it.** The plugin's own runtime never touches Hermes — but
-`install.py` and `install.sh` do two things to the host, both reversible with
-`--rollback` and both declined by `--plugin-only`:
+[**Install Refine Cycle →**](#installation)
 
-- **Raises `memory_char_limit` to a floor of 4400**, in `<HERMES_HOME>/config.yaml`
-  and in `hermes_cli/config_defaults.py` in the Hermes checkout. A floor, not an
-  override: a higher value you chose is never lowered. Refine's entire output
-  lives in that store and the stock 2200 fills up in a day. See "The memory
-  budget the install raises".
-- **Applies the invocation route patch** to nine files in the Hermes checkout,
-  which is what lets Refine call the exact model of the active session. Without
-  it, status, audit and rollback still work and new proposals fail closed. See
-  "Host route patch".
+![Refine Cycle finds a repeated problem, saves one focused lesson, and checks whether it helped](assets/what-it-does.gif)
 
-![What it does: a mistake happens twice or more, the plugin writes a fix, and the loop continues next session](assets/what-it-does.gif)
+## A simple three-step loop
 
-> **One thing to know before you install.** Status, audit, rollback, and
-> journaling work on a stock Hermes host. **New proposals** additionally need
-> the host route patch that `install.sh` applies to the Hermes checkout (see
-> "Host route patch" under Installation). Without it, a proposal run fails
-> loudly with `llm_invocation_unavailable` — it never pretends to work.
->
-> Hermes 0.21.0 is supported by its own bundled route patch. A green plugin
-> suite or passing `hermes plugins doctor` still does **not** prove proposals
-> work: verify `install.py --status` and the invocation-bound smoke test too.
-> See [Hermes version support](#hermes-version-support).
+1. **Notice what keeps going wrong.** One bad result may be noise. A problem seen
+   in two sessions or five times is a pattern worth examining.
+2. **Save the smallest useful lesson.** Refine Cycle can add a short memory,
+   create or improve a reusable skill, or add a focused note for future turns.
+3. **Check the result.** It watches later sessions and reports whether the lesson
+   appears to be working, unused, unreliable, or too new to judge.
+
+## You stay in control
+
+- Refine Cycle makes no more than three changes per day.
+- Every change is recorded. When it can be safely undone, Refine Cycle gives you
+  one command to reverse it.
+- It never rewrites Hermes's base instructions or deletes your skills.
+- API keys and other credentials are removed before conversation evidence is
+  sent to the model.
+- If the evidence, model reply, or Hermes state is unclear, it stops instead of
+  pretending that a lesson was applied.
+
+## Before you install
+
+Refine Cycle does more than report problems: it can change what Hermes remembers.
+The full installer connects Refine Cycle to the AI model already serving your
+Hermes session and increases the space available for long-term memory. When the
+plugin starts, it also attempts to turn off Hermes's manual memory and skill
+approval queues so lessons do not remain pending forever.
+
+Those changes are disclosed, backed up where applicable, and reversible through
+`python install.py --rollback`. See [Installation](#installation) for the exact
+files, commands, and host-version checks before you run it.
 
 ---
 
-## What has actually been measured
+**Technical documentation starts here.** The sections below describe the signal
+and application gates, journal states, host patch, privacy boundaries, rollback,
+and test evidence. Refine Cycle adapts the `/refine` concept from
+[Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
+(Continual Harness) to the Hermes plugin system.
 
-Numbers rather than adjectives. All of it from the release QA on this commit,
-against `opencode-go / gpt-5.6-luna` on a real Hermes host.
-
-**Safety.** Across 48 before/after pairs on the full scenario matrix: zero
-regressions among applied edits, zero edits on control sessions where writing
-nothing is the correct behaviour, 16 of 16 rollbacks byte-exact, live memory,
-journal and config untouched.
-
-**Usefulness.** Counted only where there was something to fix — that is, pairs
-the agent got wrong unaided: **14 of 23 fixed** in the larger sample (61%), and
-6 of 9 in the full twelve-scenario matrix. Half the matrix consists of tasks the
-model already performs correctly on its own; a lesson cannot improve what is
-already right, so those are excluded from the ratio rather than used to inflate
-it.
-
-**Causality.** A three-arm probe over 60 holdouts separated "the lesson helped"
-from "the model wobbled". With the lesson: 14 of 20. With nothing: 10 of 20.
-With a neutral memory of the same length: 8 of 20. The gain comes from what the
-lesson says, not from the fact that something was written.
-
-**Input budget.** Three configurations were compared. Showing the proposer every
-eligible failure pattern instead of the top eight made it measurably *worse*
-(40% against 61%); shifting prompt budget from stored-entry summaries toward the
-conversation changed nothing beyond noise. The defaults are where they are on
-evidence.
-
-**On real conversations.** 125 recorded sessions produced 1287 distinct failure
-shapes; 23 cleared the recurrence bar. That bar is the design — a lesson is
-written only for something seen in two separate sessions or five times — and it
-means most of what the plugin reads is deliberately discarded.
-
-**Not measured.** Whether an agent is better off after weeks of real use. That
-needs a live journal and time, not a benchmark, and nothing here claims it.
+---
 
 ## How this differs from Hermes's built-in self-improvement
 
@@ -97,10 +70,10 @@ checks its own work:
 
 | | Hermes background review | Refine Cycle |
 |---|---|---|
-| **Trigger** | anything worth keeping | the same failure, at least twice |
+| **Trigger** | anything worth keeping | proposal signal at 2 repeats; application only at 2 sessions **or** 5 occurrences |
 | **Window** | the current session | many sessions |
 | **Evidence** | the conversation as written | errors normalized to invariant shapes and fingerprinted, so `HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` count as one failure |
-| **Threshold** | qualitative judgement | a mechanical signal gate: recurrence count *and* distinct-session count |
+| **Threshold** | qualitative judgement | a cheap proposal gate followed by an application bar: distinct-session count **or** occurrence count |
 | **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning` — or names honestly why no verdict exists yet (`too early`, `no recurrence window`, `unreliable`) |
 | **Blast radius** | host policy | 3 edits/day, dedup window, cooldown, per-edit journal, per-edit rollback |
 
@@ -130,9 +103,10 @@ far has been one of them winning too hard. An edit is then treated as a
 hypothesis with a falsifiable `expected_outcome`, which is what makes a verdict
 afterwards possible at all.
 
-Ambiguous trajectories still get one conservative reviewer pass rather than
-silently ending at the mechanical gate, so a real lesson with no repeat count is
-not lost.
+Ambiguous trajectories can still receive one conservative reviewer pass rather
+than silently ending at the mechanical gate. Reviewer-approved proposals are
+journaled as advisory `reviewer_only` outcomes and are never applied without the
+normal recurrence evidence.
 
 The base system prompt is never touched. Only **agent-created** skills and
 memory entries are editable; built-in, pinned, and hub-installed skills remain
@@ -194,11 +168,11 @@ which judges from bounded name+description overviews. The structured path is a
 documented fallback, not the primary route: on long sessions it does not keep
 up (in paired measurement it timed out twice out of five passes at the 4,000-row
 scan cap), so hosts whose integrations never bind a parent turn get materially
-worse proposals on long sessions. The 45-second timeout on the structured
-path and reviewer reads is deliberate and was not raised; the subagent
-wait is separately configurable via `proposer_subagent_timeout_seconds`
-(default 180). `proposer_subagent_strict` (default `false`) makes a subagent
-failure a journaled error (`subagent_strict_error`) instead of a downgrade.
+worse proposals on long sessions. Structured proposal and reviewer calls each
+have a 180-second timeout; the subagent wait is separately configurable via
+`proposer_subagent_timeout_seconds` (default 180).
+`proposer_subagent_strict` (default `false`) makes a subagent failure a
+journaled error (`subagent_strict_error`) instead of a downgrade.
 
 ---
 
@@ -337,18 +311,29 @@ through `hermes_constants.get_hermes_home()`.
 > store for that process and `/refine status` reports the fallback. An explicitly
 > configured non-empty `journal_dir` is never migrated automatically.
 
-Install and enable it from the public repository:
+Install the repository, run the disclosed full installer from the installed
+plugin directory, then enable and restart:
 
 ```bash
 hermes plugins install Bergschloss/Refine-Cycle-for-Hermes-Agent
+# Run the next command from <HERMES_HOME>/plugins/refine:
+python install.py
 hermes plugins enable refine
 hermes gateway restart
 ```
 
-`plugins install` clones the repository into `<HERMES_HOME>/plugins/refine/`,
-`plugins enable` registers it with Hermes, and the restart activates it in the
-running gateway. This exact sequence is verified end to end on Hermes 0.20.1
-and 0.20.2; see VERIFICATION.md.
+`hermes plugins install` clones the repository into
+`<HERMES_HOME>/plugins/refine/`. The following `python install.py` applies and
+verifies the matching invocation-route patch and raises the two memory-limit
+targets described below; when run from the installed directory, the plugin copy
+step is an idempotent no-op. `plugins enable` registers the plugin, and the
+restart activates both plugin and host changes.
+
+To keep Hermes source untouched, omit `python install.py` or use
+`python install.py --plugin-only` from a separate checkout. The plugin can then
+provide status, audit, rollback, and journaling, but proposal runs stop with
+`llm_invocation_unavailable`; the full two-target memory-floor change is not
+made.
 
 > **The plugin works inside the running gateway.** The LLM invocation route is
 > bound by the live gateway process, so in a bare command-line process
@@ -385,7 +370,7 @@ Verify:
 
 ```
 hermes plugins list
-# refine  1.0.0  Measurement layer ...  enabled
+# refine  1.2.0  Measurement layer ...  enabled
 ```
 
 Then check that automatic refinement can actually run:
@@ -522,6 +507,10 @@ to a `working` verdict.
 
 ### Manual
 
+The examples below use `/refine`. If the Hermes host already owns a built-in
+command with that name, the plugin registers as `/refine-cycle` instead; the
+registration warning and command help show which name is active.
+
 ```
 /refine
 /refine focus on Gmail API failures
@@ -608,14 +597,15 @@ then recheck the daily budget inside that lock.
 
 When `min_signal_required` is enabled but the mechanical gate finds neither a
 repeated pattern nor an explicit correction, a substantial session can receive
-one structured reviewer call (`max_tokens: 300`). It asks only whether there is
-a durable lesson worth persisting. The reviewer has its own cooldown.
+one structured reviewer call (`max_tokens: 2400`, timeout 180 seconds). It asks
+only whether there is a durable lesson worth persisting. The reviewer has its
+own cooldown.
 
 A reviewer decline, malformed verdict, or reviewer error never reaches the
 proposal call. Declines are recorded as sanitized `no_op` journal entries so
-they can be audited. An approval supplies its narrow instructions to the normal
-proposal flow; it does not bypass guardrails, budget, backups, approvals, or the
-journal.
+they can be audited. An approval supplies narrow instructions to the normal
+proposal flow but remains advisory: it is journaled as `reviewer_only` and is
+never applied without the ordinary recurrence evidence.
 
 ### Prompt notes and scope
 
@@ -924,6 +914,8 @@ All keys live under `plugins.entries.refine`:
 | `auto_min_messages` | int | `15` | Minimum messages for session-end auto-analysis. |
 | `auto_turn_interval` | int | `25` | Assistant messages added since this session's last automatic attempt; `0` disables only the turn trigger. |
 | `auto_cooldown_minutes` | int | `20` | Minimum durable journal-derived gap between automatic attempts. |
+| `notify_enabled` | bool | `true` | Notify the active chat after an edit is applied; notification failure never changes the refine outcome. |
+| `notify_target` | str | unset | Explicit Hermes delivery target used when no active chat is available. There is deliberately no implicit platform target. |
 | `max_edits_per_run` | int | `1` | Maximum proposal passes per run. |
 | `max_edits_per_proposal` | int | `3` | Maximum inseparable edits one proposal may apply as a single transaction. `1` disables transactions. |
 | `max_edits_per_day` | int | `3` | Maximum applied, pending, prepared, rollback-prepared, or pending-rollback **edits** per UTC day. This is the blast-radius limit and is re-checked before every edit. |
@@ -1133,9 +1125,12 @@ slot is consumed, and one ledger/skill record survives.
 
 ## Repository layout
 
+Runtime modules and installation assets live at the repository root; the
+installer copies the shipped plugin subset to `<HERMES_HOME>/plugins/refine/`.
+
 ```
-refine/
-├── plugin.yaml          # Hermes plugin manifest and registered hooks
+Refine-Cycle-for-Hermes-Agent/
+├── plugin.yaml          # Hermes plugin manifest
 ├── __init__.py          # command, tool, and hook registration
 ├── config.py            # plugins.entries.refine config reader
 ├── core.py              # evidence, guardrails, serialized apply orchestration
@@ -1143,7 +1138,12 @@ refine/
 ├── patterns.py          # normalization, fingerprints, aggregation, signal gate
 ├── ledger.py            # timestamp-aware usefulness ledger and audit report
 ├── llm.py               # structured proposal, reviewer, and patch regeneration
-├── journal.py           # atomic journal, lock, prompt notes, recovery, rollback
+├── journal.py           # append-only journal, lock, notes, recovery, rollback
+├── notify.py            # failure-isolated applied-edit notification delivery
+├── refine_trace.py      # synthetic trace helper shipped with the plugin
+├── install.py           # cross-platform full installer, status, and rollback
+├── install.sh           # Linux host-route patch helper only
+├── assets/              # bundled invocation-route patches and README media
 └── tests/
     └── run_tests.py     # hermetic regression and cross-process proof
 ```
@@ -1221,8 +1221,10 @@ initiated.
   are atomic.
 - **Conflict-aware rollback** preserves later skill, memory, and prompt-note
   changes.
-- **Approval gate respected** for host-managed staged forward and rollback
-  writes; plugin-owned prompt notes do not pretend to have a host approval.
+- **Host approval reconciliation** handles staged skill and memory writes when a
+  managed or re-enabled gate remains active. By default, registration attempts
+  to turn both host write-approval gates off; plugin-owned prompt notes never use
+  a host approval queue.
 - **Read-only trajectory** — `state.db` is opened with `mode=ro`.
 - **No system prompt access** — the base prompt stays immutable.
 - **Host support.** Uses the plugin API available since Hermes 0.17.0
@@ -1238,6 +1240,37 @@ initiated.
   [Hermes version support](#hermes-version-support).
 
 ---
+
+## What has actually been measured
+
+These are snapshot-scoped results, not claims that every later commit or model
+reproduces them.
+
+**Synthetic release QA.** On candidate
+`e1d798eac116ee72bbdfd8033691fc4b0fa7ea1e` with
+`openai-codex / gpt-5.6-luna-900k`, the full scenario matrix produced 48 of 48
+valid before/after pairs: 16 applied writes, 8 safe refusals, zero control
+mutations, zero regressions among applied edits, and 16 of 16 byte-exact
+rollbacks. Mean causal score delta was `+0.0417`.
+
+**Real-dialogue rerun.** The paired corpus contained 125 sessions and 38,286
+messages; 23 recurrent patterns cleared the apply bar, and 70 isolated trials
+were run. None of the 35 candidate real lessons was applicable because the model
+omitted the required `pattern_fingerprint`; all were rejected fail-closed. Clean
+controls had zero false-positive mutations. The real-dialogue usefulness verdict
+was therefore **inconclusive**, not a demonstrated improvement rate.
+
+**Fresh Hermes 0.21.0 install.** On clean host commit
+`693641aa8b4359c602283bdbbc14041e03bc47bc`, the installer selected the bundled
+0.21.0 route patch, found all eight route markers, passed the patch's 37 host
+tests, reached the installed proposer exactly once through a synthetic bound
+route, and rolled the host back to an empty tracked diff. A later Linux check on
+the same host commit ran four real-session `/refine-cycle` passes; each reached
+the session's exact model with one physical request and no substitution. All
+four correctly ended `no_op`, so they verify live routing rather than a fresh
+0.21.0 apply. The plugin suite in that snapshot passed 1,203 tests with 11
+Windows-only Bash skips. Commands and scope are recorded in
+[`docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md`](docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md).
 
 ## What is not yet proven in the field
 
