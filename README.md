@@ -2,8 +2,10 @@
 
 ![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.gif)
 
-**Refine Cycle** looks across recent sessions, finds those repeating problems,
-and saves one small lesson when the evidence is strong enough. Later, it checks
+**Your agent keeps repeating one mistake. This makes it stop.**
+
+Refine Cycle looks across recent sessions, finds those repeating problems, and
+saves one small lesson when the evidence is strong enough. Later, it checks
 whether the same problem came back.
 
 **Cross-session by design.** Hermes can learn from the conversation in front of
@@ -14,7 +16,7 @@ the same wrong assumption, the same workaround you have to explain twice.
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
 (Continual Harness) to the Hermes plugin system.
 
-[**Install Refine Cycle →**](#installation)
+[Install](#installation)
 
 ![Refine Cycle finds a repeated problem, saves one focused lesson, and checks whether it helped](assets/what-it-does.gif)
 
