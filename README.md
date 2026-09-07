@@ -26,6 +26,11 @@ when it is explicitly enabled; it does not modify Hermes itself.
 > the host route patch that `install.sh` applies to the Hermes checkout (see
 > "Host route patch" under Installation). Without it, a proposal run fails
 > loudly with `llm_invocation_unavailable` — it never pretends to work.
+>
+> **On Hermes 0.21.0 the route patch does not apply**, so proposals are
+> unavailable there whatever else works. The plugin installs, loads and registers
+> on 0.21.0, and its own suite is green — none of which means proposals run. See
+> [Hermes version support](#hermes-version-support) before you decide.
 
 ---
 
@@ -182,9 +187,78 @@ failure a journaled error (`subagent_strict_error`) instead of a downgrade.
 
 ---
 
+## Hermes version support
+
+Read this before installing. A green test suite and a passing `hermes plugins
+doctor` do **not** mean proposals are available: on 0.21.0 both were green while
+proposals were blocked, which is exactly the confusion this table exists to
+prevent.
+
+| Hermes | Installs | Loads, registers | status / audit / rollback | New proposals |
+|---|---|---|---|---|
+| 0.19.0 | yes | yes | yes | yes, with the route patch |
+| 0.20.1 | yes | yes | yes | yes, with the route patch |
+| 0.20.2 | yes | yes | yes | yes, with the route patch (subagent path verified end to end) |
+| 0.21.0 | yes, after confirming a `caution` scan | yes | yes | **no — no compatible route patch** |
+
+**0.20.1 and 0.20.2 are the last fully verified hosts.** They are the versions on
+which the whole chain, proposals included, has been exercised.
+
+### What is verified on 0.21.0
+
+Measured on a clean Windows install of 0.21.0 (upstream `693641aa8b`), in a
+disposable `HERMES_HOME`, with the install scanner left at its default:
+
+- `hermes plugins install` succeeds. The scanner returns `caution`, which asks for
+  confirmation (`--force` accepts it non-interactively). It is no longer
+  `dangerous`, which could not be overridden at all.
+- `hermes plugins enable refine` succeeds.
+- `hermes plugins doctor refine --ci` passes: manifest parsed, plugin imported and
+  registered, 1 tool and 7 hooks.
+- `hermes plugins compat --json` reports nothing: no imports removed by the
+  September 2026 decomposition.
+- The suite passes (1195 tests) under the host's own interpreter.
+
+### What does not work on 0.21.0
+
+`python install.py --status` reports **`incompatible`**: neither bundled route
+patch (`v2026.8.16`, `v2026.8.31`) applies to `693641aa8b`. Upstream Hermes has
+never carried the route contract itself — `invocation_bound` and
+`plugin_invocation_scope` do not exist in 0.21.0 — and 0.21.0 moved the code the
+patch targets, so this is a rebase, not a stale line offset.
+
+Without that route, `ctx.llm` is never invocation-bound, and every
+proposal-producing entry point stops before any trajectory data is sent to a
+model:
+
+```
+llm_invocation_unavailable
+```
+
+That covers `/refine`, `/refine dry-run`, `/refine session <id>`, the `refine_run`
+tool, and automatic refinement. `status`, `audit` and `rollback` are unaffected.
+This is fail-closed by construction: the plugin refuses a facade the host has not
+bound, rather than quietly borrowing a different route. Verified by reading the
+0.21.0 host source and by `install.py --status`; a live proposal was not attempted
+on 0.21.0, because there is no route for it to use.
+
+Do **not** force either bundled patch and do not three-way merge them onto 0.21.0.
+A partially wired route would break the single-route guarantee silently, which is
+worse than the feature being unavailable.
+
+### A note on `plugins.scan_on_install`
+
+Setting `plugins.scan_on_install: false` makes a blocked install proceed. It is
+**not** a user instruction here and it is not needed on a current checkout: it
+disables install scanning for the whole profile. It appears in this project's
+history only as a diagnostic used to prove a clone could be staged at all while
+the verdict was still `dangerous`.
+
+---
+
 ## Installation
 
-> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite (1193 tests), `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below).
+> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite, `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below), which **does not apply to 0.21.0** — see [Hermes version support](#hermes-version-support).
 
 The plugin lives in `<HERMES_HOME>/plugins/refine/` — `~/.hermes/plugins/refine/`
 on Linux and macOS, and `%LOCALAPPDATA%\hermes\plugins\refine\` on Windows.
@@ -1095,7 +1169,9 @@ initiated.
   proposals additionally need the host route patch (see Installation); without it
   they fail loudly with `llm_invocation_unavailable`, which is the intended honest
   gate. The manifest format cannot express a host requirement, so this is enforced
-  at runtime rather than at install time.
+  at runtime rather than at install time. On **0.21.0** the plugin installs, loads
+  and registers, but no bundled route patch applies, so proposals are unavailable
+  there — see [Hermes version support](#hermes-version-support).
 
 ---
 
