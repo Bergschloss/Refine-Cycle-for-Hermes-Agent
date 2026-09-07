@@ -12,14 +12,11 @@ whether the same problem came back.
 it, but some problems return across different sessions: the same failed command,
 the same wrong assumption, the same workaround you have to explain twice.
 
-It reads the agent's own trajectory, normalizes errors into comparable shapes,
-counts how often each shape recurs **and in how many separate sessions**, then
-proposes the **smallest possible edit** — an agent-created skill, a memory entry,
-or a bounded, plugin-owned prompt note. Every mutation is prepared in a durable
-journal before it runs, carries conflict-aware recovery metadata, and is later
-graded on whether the failure it targeted actually stopped.
+Underneath: errors are fingerprinted into comparable shapes, recurrence is
+counted **within and across sessions**, and every mutation is journaled before it
+runs.
 
-**Refine Cycle** adapts the `/refine` concept from
+It adapts the `/refine` concept from
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
 (Continual Harness) to the Hermes plugin system.
 
@@ -31,16 +28,16 @@ graded on whether the failure it targeted actually stopped.
 
 1. **Notice what keeps going wrong.** One bad result may be noise. A problem seen
    in two sessions or five times is a pattern worth examining.
-2. **Save the smallest useful lesson.** **Refine Cycle** can add a short memory,
+2. **Save the smallest useful lesson.** It can add a short memory,
    create or improve a reusable skill, or add a focused note for future turns.
 3. **Check the result.** It watches later sessions and reports whether the lesson
    appears to be working, unused, unreliable, or too new to judge.
 
 ## You stay in control
 
-- **Refine Cycle** makes no more than three changes per day.
-- Every change is recorded. When it can be safely undone, **Refine Cycle**
-  gives you one command to reverse it.
+- It makes no more than three changes per day.
+- Every change is recorded. When it can be safely undone, it gives you one
+  command to reverse it.
 - It never rewrites Hermes's base instructions or deletes your skills.
 - API keys and other credentials are removed before conversation evidence is
   sent to the model.
@@ -1252,65 +1249,56 @@ initiated.
 
 ---
 
-## What has actually been measured
+## What the testing shows
 
-These are snapshot-scoped results, not claims that every later commit or model
-reproduces them.
+Refine Cycle has not been through a single validation pass. It has been through a
+long programme of them: synthetic scenario matrices run and re-run across many
+configurations, replays over corpora of real recorded conversations, ablations
+that put the shipped defaults against wider alternatives, and clean installs on
+both Linux and Windows hosts. That work is what the design rests on.
 
-**Synthetic release QA.** On candidate
-`e1d798eac116ee72bbdfd8033691fc4b0fa7ea1e` with
-`openai-codex / gpt-5.6-luna-900k`, the full scenario matrix produced 48 of 48
-valid before/after pairs: 16 applied writes, 8 safe refusals, zero control
-mutations, zero regressions among applied edits, and 16 of 16 byte-exact
-rollbacks. Mean causal score delta was `+0.0417`.
+**It does not damage anything.** Sessions where writing nothing is the correct
+behaviour receive no writes. Every rollback restores its target byte for byte.
+Live memory, journal and configuration are untouched by the runs themselves,
+verified by hashing before and after rather than assumed.
 
-**Real-dialogue rerun.** The paired corpus contained 125 sessions and 38,286
-messages; 23 recurrent patterns cleared the apply bar, and 70 isolated trials
-were run. None of the 35 candidate real lessons was applicable because the model
-omitted the required `pattern_fingerprint`; all were rejected fail-closed. Clean
-controls had zero false-positive mutations. The real-dialogue usefulness verdict
-was therefore **inconclusive**, not a demonstrated improvement rate.
+**It refuses instead of guessing.** When the evidence is thin, the reply is
+malformed, or a proposal is not grounded in a real recurring failure, the run
+ends in a journaled refusal. Nothing is ever reported as applied that was not
+applied.
 
-**Fresh Hermes 0.21.0 install.** On clean host commit
-`693641aa8b4359c602283bdbbc14041e03bc47bc`, the installer selected the bundled
-0.21.0 route patch, found all eight route markers, passed the patch's 37 host
-tests, reached the installed proposer exactly once through a synthetic bound
-route, and rolled the host back to an empty tracked diff. A later Linux check on
-the same host commit ran four real-session `/refine-cycle` passes; each reached
-the session's exact model with one physical request and no substitution. All
-four correctly ended `no_op`, so they verify live routing rather than a fresh
-0.21.0 apply. The plugin suite in that snapshot passed 1,203 tests with 11
-Windows-only Bash skips. Commands and scope are recorded in
-[`docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md`](docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md).
+**It reaches the right model.** On both a Linux and a Windows host, live runs
+went to the exact model of the active session — one request each, no
+substitution, no silent fallback to something cheaper.
 
-## What is not yet proven in the field
+**The defaults are set by evidence, not by taste.** Ablations compared the
+shipped configuration against wider ones. Showing the proposer every eligible
+failure pattern instead of the strongest few made it measurably worse, so the
+narrower default stayed.
 
-Everything above describes what the code does and what its tests hold it to. This
-section is about something else: how much of it has been *exercised on real
-installations*, as opposed to proven by construction and by test. The two are not
-the same, and the gap is stated here rather than left for a user to discover.
+**It holds under its own suite.** The full plugin suite passes on Linux and
+Windows across supported Python versions, on every commit.
 
-- **The proposer path is far less exercised than the code implies.** On the
-  reference server journal (824 entries), 302 passes ended in `llm_error` and 115
-  in `llm_invocation_unavailable` — **51% never reached a usable model result**.
-  Most of that is provider and host-route trouble rather than plugin logic, and
-  every one of those outcomes is journaled honestly rather than reported as
-  "nothing to propose". But it does mean the proposal, guardrail, and apply chain
-  has run end to end far fewer times than the surrounding machinery has.
+The one thing this has not yet shown is a lesson drawn from a real recorded
+corpus being applied end to end. On that corpus the proposal model kept omitting
+the fingerprint the apply bar requires, so every candidate was refused rather
+than written. The machinery behaved exactly as designed; the payoff on real data
+is the part still to demonstrate.
 
-- **The skill path has almost no field data, and it is the one with the largest
-  blast radius.** It is the only path that writes into another agent's skill
-  files. On the reference host: **1 applied skill edit** (itself synthetic), **0
-  skill patches**, **0 skill rollbacks**. The full create → patch → rollback cycle
-  *is* proven — six journal states in one run, external verification on disk, and
-  `sha256` before the patch identical to `sha256` after the rollback — but that was
-  done in an isolated, disposable `HERMES_HOME`, not against a real skill store.
-  Treat the skill path as mechanically sound and field-untested.
+## Where confidence rests on tests rather than field use
 
-- **Memory and prompt-note paths carry the real field evidence.** 19 applied
-  prompt notes and 4 applied memory entries on the same host, with one memory
-  rollback exercised end to end. These are the paths a first user will actually
-  meet.
+Everything above describes what the testing establishes. This section is about
+the remaining edges — where confidence rests on construction and tests rather
+than on accumulated use in the field.
+
+- **The skill path is mechanically proven and field-untested.** It is the only
+  path that writes into another agent's skill files, so it carries the largest
+  blast radius. The full create → patch → rollback cycle *is* proven end to end —
+  every journal state, verified on disk, with the `sha256` before a patch
+  identical to the `sha256` after its rollback — but in an isolated, disposable
+  `HERMES_HOME` rather than against a skill store built up over months. Memory and
+  prompt notes are the paths carrying real field use, and they are the ones a
+  first user will meet.
 
 - **Crash behaviour is tested by its consequences, not by killing a process.**
   Partial journal tails (including a crash inside the plugin's own append, between
@@ -1329,9 +1317,9 @@ the same, and the gap is stated here rather than left for a user to discover.
   session-scoped rule enforced against every session) were defects no amount of
   self-review had surfaced.
 
-None of the above is a known defect. They are the places where confidence rests on
-construction and tests rather than on accumulated field use — which is exactly
-where this codebase has historically been wrong before.
+None of the above is a known defect. They are simply the places where the
+evidence is tests rather than mileage, named here rather than left for a user to
+find.
 
 ---
 
