@@ -265,9 +265,9 @@ The smoke uses synthetic input and does not start or restart the real gateway. T
 between the original failed baseline and the corrected result are recorded in
 [`docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md`](docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md).
 
-### On 0.21.0 the command is `/refine-cycle`
+### On many hosts the command is `/refine-cycle`, not `/refine`
 
-Hermes 0.21.0 ships its own built-in `/refine` (a background review fork), and
+Hermes ships its own built-in `/refine` (a background review fork), and
 `register_command` silently drops a plugin command that collides with a built-in.
 The plugin detects this at registration and takes `/refine-cycle` instead, so
 every subcommand stays reachable:
@@ -280,12 +280,20 @@ every subcommand stays reachable:
 /refine-cycle rollback <id>
 ```
 
-This matters more than a renaming usually would: on 0.21.0, typing `/refine`
-does not fail — it reaches Hermes's own command and answers, so it is easy to
-believe you are talking to this plugin when you are not. Every `/refine …`
-example below is written for hosts without that built-in; substitute
-`/refine-cycle` on 0.21.0. `/refine-cycle status` names the command that
-answered, so it is the quickest way to confirm which one you have.
+This matters more than a renaming usually would: typing `/refine` on such a
+host does not fail — it reaches Hermes's own command and answers, so it is easy
+to believe you are talking to this plugin when you are not.
+
+**Do not assume this is new.** Confirmed on Hermes 0.21.0 and on 0.20.x
+(`v2026.8.31`), so treat `/refine-cycle` as the likely name and check rather than
+guess. `/refine-cycle status` names the command that answered; so does:
+
+```
+python -c "import refine; print(refine._built_in_command_exists('refine'))"
+```
+
+`True` means this plugin answers to `/refine-cycle`. Every `/refine …` example
+below is written for hosts without the built-in.
 
 ### Why patch selection remains strict
 
