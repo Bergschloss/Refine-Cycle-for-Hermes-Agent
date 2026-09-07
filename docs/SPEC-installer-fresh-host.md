@@ -14,7 +14,7 @@ tests the file has ever had. The rest is this spec.
 
 ## Measured facts. Read, not reasoned.
 
-**The reference host runs v2026.8.31.** `git -C $HERMES rev-parse --short=8 HEAD` → `29112bef`,
+**The reference host, v2026.8.31.** `git -C $HERMES rev-parse --short=8 HEAD` → `29112bef`,
 `git describe --tags` → `v2026.8.31`.
 
 **`install.py` refuses to install on it.** A probe built two synthetic checkouts and called the
@@ -104,7 +104,7 @@ ssh oracle-imma
 plugin checkout : ~/.hermes/plugins/refine
 hermes source   : /home/ubuntu/releases/hermes-agent-v2026.8.31-clean   (PATCHED, live)
 interpreter     : $HERMES/.venv/bin/python
-suite on host   : cd ~/.hermes/plugins/refine && PYTHONIOENCODING=utf-8 $HERMES/.venv/bin/python -m tests.run_tests
+suite on host: cd ~/.hermes/plugins/refine && PYTHONIOENCODING=utf-8 $HERMES/.venv/bin/python -m tests.run_tests
 ```
 
 - **Never patch, unpatch, or `git checkout` inside the live Hermes checkout.** The gateway runs

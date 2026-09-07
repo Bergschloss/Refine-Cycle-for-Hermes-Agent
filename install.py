@@ -327,6 +327,25 @@ def find_hermes_src(explicit: str | None) -> Path:
                         candidates.append(parent)
                         break
                 break
+    # Desktop layout: a `git` install puts the checkout INSIDE the Hermes data
+    # directory (%LOCALAPPDATA%\hermes\hermes-agent on Windows), which is not
+    # reachable by the by-name scan of ~ below -- "AppData" does not contain
+    # "hermes". Measured on a stock Windows 0.21.0 install: every candidate above
+    # missed it and --status refused with "Cannot locate an active Hermes
+    # checkout" until --hermes-src was passed by hand. Resolve it through the one
+    # place this project resolves Hermes paths, never from Path.home().
+    try:
+        data_home = hermes_home_dir()
+    except Exception:
+        data_home = None
+    if data_home is not None:
+        candidates.append(data_home / "hermes-agent")
+        try:
+            entries = sorted(data_home.iterdir())
+        except OSError:
+            entries = []
+        candidates.extend(e for e in entries if "hermes" in e.name.lower())
+
     # Common locations
     home = Path.home()
     for base in (home / "releases", home):

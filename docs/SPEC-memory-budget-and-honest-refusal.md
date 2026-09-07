@@ -72,7 +72,7 @@ plugin checkout : ~/.hermes/plugins/refine        (git pull'ed; bare modules)
 hermes source   : /home/ubuntu/releases/hermes-agent-v2026.8.31-clean
 interpreter     : $HERMES/.venv/bin/python
 journal         : ~/.hermes/refine-data/refine_journal.jsonl
-suite on host   : cd ~/.hermes/plugins/refine && PYTHONIOENCODING=utf-8 $HERMES/.venv/bin/python -m tests.run_tests
+suite on host: cd ~/.hermes/plugins/refine && PYTHONIOENCODING=utf-8 $HERMES/.venv/bin/python -m tests.run_tests
 ```
 
 - **Never edit `~/.hermes/config.yaml`**, the memory store, or any host configuration. Provider

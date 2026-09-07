@@ -163,7 +163,7 @@ if ! select_patch \
         "$REPO_DIR/assets/invocation-route-v2026.8.31.patch" \
         "$REPO_DIR/assets/invocation-route-v2026.8.16.patch"; then
     fail "every bundled route patch does not apply to this Hermes checkout.
-  Host HEAD   : $HOST_DESC
+  Hermes HEAD : $HOST_DESC
   Patch base  : $PATCH_BASE_LONG (v2026.8.16) and v2026.8.31
   Tried       : invocation-route-v2026.8.31.patch, invocation-route-v2026.8.16.patch
   Nothing was modified. The patch needs rebasing onto this host's version."
@@ -302,7 +302,7 @@ elif apply_attempt "-3" "-C0"; then
     APPLIED_FROM="git apply -3 -C0 (three-way, minimal context)"
 else
     fail "patch does not apply to this host (nothing was modified).
-  host HEAD:   $HOST_DESC
+  Hermes HEAD: $HOST_DESC
   patch base:  $PATCH_BASE_LONG (built against stock v2026.8.16)
   attempts:
 $APPLY_FAILURES
@@ -379,7 +379,7 @@ else
     say "import check skipped (no venv interpreter under $HERMES_SRC/{.venv,venv}; symbol + compile checks passed)."
 fi
 
-say "core patch applied + verified (host HEAD $HOST_DESC)."
+say "core patch applied + verified (Hermes HEAD $HOST_DESC)."
 
 cat <<EOF
 
