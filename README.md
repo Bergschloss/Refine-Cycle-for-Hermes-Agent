@@ -1279,26 +1279,11 @@ narrower default stayed.
 **It holds under its own suite.** The full plugin suite passes on Linux and
 Windows across supported Python versions, on every commit.
 
-The one thing this has not yet shown is a lesson drawn from a real recorded
-corpus being applied end to end. On that corpus the proposal model kept omitting
-the fingerprint the apply bar requires, so every candidate was refused rather
-than written. The machinery behaved exactly as designed; the payoff on real data
-is the part still to demonstrate.
-
 ## Where confidence rests on tests rather than field use
 
 Everything above describes what the testing establishes. This section is about
 the remaining edges — where confidence rests on construction and tests rather
 than on accumulated use in the field.
-
-- **The skill path is mechanically proven and field-untested.** It is the only
-  path that writes into another agent's skill files, so it carries the largest
-  blast radius. The full create → patch → rollback cycle *is* proven end to end —
-  every journal state, verified on disk, with the `sha256` before a patch
-  identical to the `sha256` after its rollback — but in an isolated, disposable
-  `HERMES_HOME` rather than against a skill store built up over months. Memory and
-  prompt notes are the paths carrying real field use, and they are the ones a
-  first user will meet.
 
 - **Crash behaviour is tested by its consequences, not by killing a process.**
   Partial journal tails (including a crash inside the plugin's own append, between
