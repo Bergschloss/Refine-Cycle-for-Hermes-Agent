@@ -1276,6 +1276,22 @@ shipped configuration against wider ones. Showing the proposer every eligible
 failure pattern instead of the strongest few made it measurably worse, so the
 narrower default stayed.
 
+**It was audited continuously, not signed off once.** Review ran the length of
+the project rather than at the end of it: numbered rounds into the teens, each
+finding reproduced and specced before anything was changed, and the four
+`FINDING-*.md` documents in `docs/` are the ones still worth keeping after their
+fixes landed. Fifty-two of this repository's first 539 commits carry a finding,
+audit, review or round in their subject line.
+
+Most of those audits were run by agents that had also written the code, which is
+the weakest kind. So one was deliberately handed to a model with no part in
+writing it and no access to the authors' reasoning: it produced five hypotheses,
+all five held on inspection, and all five are fixed with regression tests proven
+to fail on the parent commit and pass after — see
+[`docs/INDEPENDENT-REVIEW.md`](docs/INDEPENDENT-REVIEW.md). Two of them (a
+poisoned timestamp consuming the whole query budget; a session-scoped rule
+enforced against every session) had survived every self-review before it.
+
 **It holds under its own suite.** The full plugin suite passes on Linux and
 Windows across supported Python versions, on every commit.
 
@@ -1292,19 +1308,8 @@ than on accumulated use in the field.
   all have tests. What has never been done is pulling power from a real host
   mid-write and observing recovery on the resulting state.
 
-- **The independent review found five real defects, and they are fixed.** Every
-  audit before it was written by an agent that had also written the code. One
-  review was then run by a model with no part in writing it and no access to the
-  authors' reasoning: it produced five hypotheses, all five held on inspection,
-  and all five are fixed with regression tests proven to fail on the parent commit
-  and pass after — see [`docs/INDEPENDENT-REVIEW.md`](docs/INDEPENDENT-REVIEW.md).
-  Two of them (a poisoned timestamp consuming the whole query budget; a
-  session-scoped rule enforced against every session) were defects no amount of
-  self-review had surfaced.
-
-None of the above is a known defect. They are simply the places where the
-evidence is tests rather than mileage, named here rather than left for a user to
-find.
+That is not a known defect. It is simply the place where the evidence is tests
+rather than mileage, named here rather than left for a user to find.
 
 ---
 
