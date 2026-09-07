@@ -2,7 +2,7 @@ diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
 index 8d28c9feb..8214b82a9 100644
 --- a/agent/auxiliary_client.py
 +++ b/agent/auxiliary_client.py
-@@ -6970,6 +6970,125 @@ def call_llm(
+@@ -6970,6 +6970,131 @@ def call_llm(
              semaphore.release()
  
  
@@ -40,34 +40,37 @@ index 8d28c9feb..8214b82a9 100644
 +# fails closed with ``unsupported_api_mode`` rather than being coerced: the point
 +# of a locked route is that the request goes exactly where it was captured from,
 +# and a silent transport substitution is the failure this path is built to avoid.
-+_ROUTE_LOCKED_API_MODES = frozenset({"", "chat_completions", "openai", "openai_chat"})
++_ROUTE_LOCKED_API_MODES = frozenset({"", "chat_completions", "openai", "openai_chat", "anthropic_messages", "codex_responses"})
 +
 +
 +def _route_locked_request(
-+    *, provider: str, model: str, base_url: str, api_mode: str, client: Any,
++    *, provider: str, model: str, base_url: str, api_key: Any, api_mode: str, client: Any,
 +    messages: list, temperature: Optional[float], max_tokens: Optional[int],
 +    timeout: Optional[float], extra_body: Optional[dict],
-+) -> Dict[str, Any]:
-+    """Validate a locked route and build its request kwargs.
-+
-+    Raises :class:`RouteLockedCallError` -- never falls back to ambient config.
-+    """
++) -> tuple[Any, Dict[str, Any]]:
++    """Validate one exact route and build its transport plus request kwargs."""
++    mode = (api_mode or "").strip().lower()
 +    if client is None:
 +        raise RouteLockedCallError("incomplete_route")
 +    if not provider or not model or not base_url:
 +        raise RouteLockedCallError("incomplete_route")
-+    if (api_mode or "").strip().lower() not in _ROUTE_LOCKED_API_MODES:
++    if mode not in _ROUTE_LOCKED_API_MODES:
 +        raise RouteLockedCallError("unsupported_api_mode")
 +    if not messages:
 +        raise RouteLockedCallError("empty_request")
-+    # Built by the same helper the ordinary path uses, so provider quirks (the
-+    # max_tokens parameter name, endpoint-specific temperature handling) apply
-+    # identically -- a locked route must not become a subtly different request.
-+    return _build_call_kwargs(
++    request_client = client
++    if mode == "anthropic_messages":
++        is_oauth = isinstance(api_key, str) and api_key.startswith("sk-ant-oat")
++        request_client = AnthropicAuxiliaryClient(
++            client, model, api_key, base_url, is_oauth=is_oauth)
++    elif mode == "codex_responses":
++        request_client = CodexAuxiliaryClient(client, model)
++    kwargs = _build_call_kwargs(
 +        provider, model, messages, temperature=temperature, max_tokens=max_tokens,
 +        tools=None, timeout=timeout, extra_body=dict(extra_body or {}),
 +        reasoning_config=None, base_url=base_url, task=None,
 +    )
++    return request_client, kwargs
 +
 +
 +def call_llm_route_locked(
@@ -85,19 +88,19 @@ index 8d28c9feb..8214b82a9 100644
 +    "do not recover" flag through the ladder would leave that guarantee one
 +    refactor away from silently lapsing.
 +
-+    ``api_key`` is accepted for signature symmetry and deliberately unused: the
-+    bound ``client`` already carries the invocation's credentials, and re-deriving
-+    auth here would be a second code path for the same secret.
++    Native Anthropic and Codex modes wrap that same captured client with the
++    host's existing protocol adapter; credentials and transport are not rebuilt.
 +    """
-+    del api_key  # carried by ``client``; see docstring
-+    kwargs = _route_locked_request(
-+        provider=provider, model=model, base_url=base_url, api_mode=api_mode, client=client,
++    request_client, kwargs = _route_locked_request(
++        provider=provider, model=model, base_url=base_url, api_key=api_key,
++        api_mode=api_mode, client=client,
 +        messages=messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
 +        extra_body=extra_body)
 +    _set_relay_auxiliary_route(provider, model, api_mode)
 +    try:
 +        return _validate_llm_response(
-+            _relay_sync_completion(client, kwargs, provider=provider, api_mode=api_mode), None)
++            _relay_sync_completion(
++                request_client, kwargs, provider=provider, api_mode=api_mode), None)
 +    except RouteLockedCallError:
 +        raise
 +    except Exception as exc:
@@ -110,15 +113,18 @@ index 8d28c9feb..8214b82a9 100644
 +    timeout: Optional[float] = None, extra_body: Optional[dict] = None,
 +) -> Any:
 +    """Async sibling of :func:`call_llm_route_locked`, with the same guarantees."""
-+    del api_key  # carried by ``client``; see call_llm_route_locked
-+    kwargs = _route_locked_request(
-+        provider=provider, model=model, base_url=base_url, api_mode=api_mode, client=client,
++    import asyncio
++    request_client, kwargs = _route_locked_request(
++        provider=provider, model=model, base_url=base_url, api_key=api_key,
++        api_mode=api_mode, client=client,
 +        messages=messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
 +        extra_body=extra_body)
 +    _set_relay_auxiliary_route(provider, model, api_mode)
 +    try:
 +        return _validate_llm_response(
-+            await _relay_async_completion(client, kwargs, provider=provider, api_mode=api_mode), None)
++            await asyncio.to_thread(
++                _relay_sync_completion, request_client, kwargs,
++                provider=provider, api_mode=api_mode), None)
 +    except RouteLockedCallError:
 +        raise
 +    except Exception as exc:
@@ -666,7 +672,7 @@ new file mode 100644
 index 000000000..d85d59c7a
 --- /dev/null
 +++ b/tests/agent/test_plugin_invocation_route.py
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,422 @@
 +"""Regression coverage for invocation-bound plugin LLM routing.
 +
 +A plugin that reasons about the user's private conversation must reach the model
@@ -970,14 +976,32 @@ index 000000000..d85d59c7a
 +    assert secret not in excinfo.value.code
 +
 +
-+def test_an_unsupported_api_mode_fails_closed_rather_than_being_coerced():
-+    client = _RecordingClient()
++@pytest.mark.parametrize(
++    ("api_mode", "adapter_name"),
++    [
++        ("anthropic_messages", "AnthropicAuxiliaryClient"),
++        ("codex_responses", "CodexAuxiliaryClient"),
++    ],
++)
++def test_native_modes_use_the_captured_client_once(monkeypatch, api_mode, adapter_name):
++    """Protocol adaptation may wrap the exact client, never rebuild its route."""
++    import agent.auxiliary_client as ac
++
++    bound_client = SimpleNamespace()
++    recording = _RecordingClient()
++    captured: dict = {}
++
++    def _adapter(client, *_args, **_kwargs):
++        captured["client"] = client
++        return recording
++
++    monkeypatch.setattr(ac, adapter_name, _adapter)
 +    llm = PluginLlm(plugin_id="p").bind_invocation(
-+        _route(client=client, api_mode="anthropic_messages"))
-+    with pytest.raises(PluginLlmInvocationError) as excinfo:
-+        llm.complete(messages=[{"role": "user", "content": "hi"}])
-+    assert excinfo.value.code == "unsupported_api_mode"
-+    assert client.calls == [], "an unsupported transport must not be attempted"
++        _route(client=bound_client, api_mode=api_mode))
++    result = llm.complete(messages=[{"role": "user", "content": "hi"}])
++    assert captured["client"] is bound_client
++    assert len(recording.calls) == 1
++    assert result.text == "ok"
 +
 +
 +def test_a_route_with_no_client_is_incomplete_not_rebuilt():
@@ -1026,7 +1050,7 @@ index 000000000..d85d59c7a
 +
 +
 +def test_the_async_locked_path_holds_the_same_guarantees():
-+    client = _AsyncRecordingClient()
++    client = _RecordingClient()
 +    llm = PluginLlm(plugin_id="p").bind_invocation(_route(client=client))
 +
 +    async def _go():
@@ -1038,7 +1062,7 @@ index 000000000..d85d59c7a
 +
 +
 +def test_the_async_locked_path_does_not_retry_either():
-+    client = _AsyncRecordingClient(raises=ConnectionError("boom"))
++    client = _RecordingClient(raises=ConnectionError("boom"))
 +    llm = PluginLlm(plugin_id="p").bind_invocation(_route(client=client))
 +
 +    async def _go():

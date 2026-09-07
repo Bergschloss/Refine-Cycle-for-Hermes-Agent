@@ -60,19 +60,90 @@ PATCHED_MARKER = "plugin_invocation_scope"
 PATCH_DIR = PLUGIN_DIR / "assets"
 PATCH_GLOB = "invocation-route-*.patch"
 
-# The nine files the patch touches (relative to the Hermes checkout root).
-PATCH_FILES = [
-    "agent/auxiliary_client.py",
-    "agent/plugin_llm.py",
-    "agent/turn_context.py",
-    "cli.py",
-    "gateway/run.py",
-    "hermes_cli/plugins.py",
-    "run_agent.py",
-    "tui_gateway/methods_tools.py",
-]
+# Each route patch owns its target topology and marker contract. Hermes 0.21
+# moved two call paths and changed the auxiliary-client marker; treating all
+# patches as one shared eight-file shape makes a correctly patched 0.21 host
+# look partial and can trigger an unsafe reverse.
+_LEGACY_MARKERS = {
+    "agent/auxiliary_client.py": "_call_route_locked_once",
+    "agent/plugin_llm.py": "bind_invocation",
+    "agent/turn_context.py": "set_plugin_invocation_agent",
+    "cli.py": "plugin_invocation_scope_for_agent",
+    "gateway/run.py": "plugin_invocation_scope",
+    "hermes_cli/plugins.py": "plugin_invocation_scope",
+    "run_agent.py": "plugin_invocation_scope",
+    "tui_gateway/methods_tools.py": "plugin_invocation_scope_for_agent",
+}
+_V021_MARKERS = {
+    "agent/auxiliary_client.py": "call_llm_route_locked",
+    "agent/plugin_llm.py": "bind_invocation",
+    "agent/turn_context.py": "set_plugin_invocation_agent",
+    "agent/turn_facade.py": "plugin_invocation_scope",
+    "cli.py": "plugin_invocation_scope_for_agent",
+    "gateway/run_inbound.py": "plugin_invocation_scope_for_agent",
+    "hermes_cli/plugins.py": "plugin_invocation_scope",
+    "tui_gateway/methods_tools.py": "plugin_invocation_scope_for_agent",
+}
+PATCH_MARKERS = {
+    "invocation-route-v2026.8.16.patch": _LEGACY_MARKERS,
+    "invocation-route-v2026.8.31.patch": _LEGACY_MARKERS,
+    "invocation-route-v0.21.0.patch": _V021_MARKERS,
+}
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
-ALL_PATCH_CONTENT = PATCH_FILES + [PATCH_TEST_FILE]
+
+# Compatibility aliases for existing fixture builders. Shipped behavior below
+# always resolves the topology from the selected patch.
+PATCH_FILES = list(_LEGACY_MARKERS)
+FILE_MARKERS = dict(_LEGACY_MARKERS)
+
+
+def patch_markers(patch: Path | None) -> dict[str, str]:
+    """Marker table for ``patch``; generated test patches use the legacy shape."""
+    if patch is None:
+        return FILE_MARKERS
+    return PATCH_MARKERS.get(patch.name, FILE_MARKERS)
+
+
+def patch_files(patch: Path | None) -> list[str]:
+    return list(patch_markers(patch))
+
+
+def patch_by_name(name: str | None) -> Path | None:
+    if not name:
+        return None
+    candidate = PATCH_DIR / Path(name).name
+    return candidate if candidate.is_file() else None
+
+
+def patch_content_files(patch: Path | None) -> list[str]:
+    """Every host path touched by ``patch``, parsed from its diff headers."""
+    if patch is None or not patch.is_file():
+        return patch_files(patch)
+    touched: list[str] = []
+    minus = ""
+    for line in patch.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("--- "):
+            minus = line[4:].split("\t", 1)[0].strip()
+            continue
+        if not line.startswith("+++ "):
+            continue
+        value = line[4:].split("\t", 1)[0].strip()
+        path = minus if value == "/dev/null" else value
+        if path.startswith(("a/", "b/")):
+            path = path[2:]
+        if path and path != "/dev/null" and path not in touched:
+            touched.append(path)
+    return touched or patch_files(patch)
+
+
+def all_patch_target_files() -> list[str]:
+    return sorted(
+        {rel for markers in PATCH_MARKERS.values() for rel in markers}
+        | {PATCH_TEST_FILE}
+    )
+
+
+ALL_PATCH_CONTENT = all_patch_target_files()
 
 
 def _patch_sort_key(path: Path) -> tuple[int, ...]:
@@ -133,17 +204,8 @@ HOST_IMPORT_ROOTS = (
     "agent", "gateway", "hermes_cli", "tui_gateway", "hermes_constants",
 )
 
-# Per-file applied-markers: each file gets a symbol only the patched version defines.
-FILE_MARKERS = {
-    "agent/auxiliary_client.py": "_call_route_locked_once",
-    "agent/plugin_llm.py": "bind_invocation",
-    "agent/turn_context.py": "set_plugin_invocation_agent",
-    "cli.py": "plugin_invocation_scope_for_agent",
-    "gateway/run.py": "plugin_invocation_scope",
-    "hermes_cli/plugins.py": "plugin_invocation_scope",
-    "run_agent.py": "plugin_invocation_scope",
-    "tui_gateway/methods_tools.py": "plugin_invocation_scope_for_agent",
-}
+# Marker tables are patch-specific above. The legacy FILE_MARKERS alias remains
+# only for generated test fixtures and backward-compatible imports.
 
 # What gets installed is read from the checkout, not listed here. This list used
 # to be hardcoded and it drifted: notify.py and refine_trace.py joined the plugin
@@ -372,60 +434,76 @@ def git_head_short(repo: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def applied_patch_files(src: Path) -> list[str]:
-    """Patch targets that carry their own applied-marker, read off disk.
+def applied_patch_files(src: Path, patch: Path | None = None) -> list[str]:
+    """Targets carrying the markers for one patch topology.
 
-    The single source of truth for "is the host capability there", shared by
-    classify_host and by the paths that report host state without classifying.
-    Checking only hermes_cli/plugins.py answers a narrower question and calls a
-    partially patched host healthy.
+    When ``patch`` is omitted, return the strongest detected topology. A complete
+    topology always wins over a partial one; otherwise the topology with the most
+    markers is the most useful diagnosis.
     """
-    applied = []
-    for rel in PATCH_FILES:
-        f = src / rel
-        if not f.is_file():
-            continue
-        body = f.read_text(encoding="utf-8", errors="replace")
-        if FILE_MARKERS.get(rel, PATCHED_MARKER) in body:
-            applied.append(rel)
+    if patch is not None:
+        markers = patch_markers(patch)
+        return [
+            rel for rel, marker in markers.items()
+            if (src / rel).is_file()
+            and marker in (src / rel).read_text(encoding="utf-8", errors="replace")
+        ]
+    _patch, applied, _total = detected_patch_topology(src)
     return applied
+
+
+def detected_patch_topology(src: Path) -> tuple[Path | None, list[str], int]:
+    """Return the best matching patch, marked targets, and that topology's size."""
+    states: list[tuple[Path, list[str], int]] = []
+    candidates = patch_candidates()
+    if not candidates:
+        candidates = [PATCH_DIR / "invocation-route-v2026.8.31.patch"]
+    for patch in candidates:
+        markers = patch_markers(patch)
+        applied = [
+            rel for rel, marker in markers.items()
+            if (src / rel).is_file()
+            and marker in (src / rel).read_text(encoding="utf-8", errors="replace")
+        ]
+        states.append((patch, applied, len(markers)))
+    complete = next((state for state in states if len(state[1]) == state[2]), None)
+    if complete is not None:
+        return complete
+    return max(states, key=lambda state: len(state[1]))
 
 
 def classify_host(src: Path) -> tuple[str, str]:
     """Return (state_class, detail). States: stock, patched, partial, dirty, incompatible.
 
-    "stock" no longer means "the base commit we pinned"; it means "a clean tree
-    that some bundled patch applies to". The commit id is not a gate -- a version
-    test refuses hosts the patch fits (fresh v2026.8.31 was impossible) and
-    accepts hosts it does not. Applicability is decided by trying each bundled
-    patch with `git apply --check`.
-
-    Order matters. The dirty check runs BEFORE applicability: a user's
-    uncommitted edit to a patch target can itself make `git apply --check` fail,
-    and reporting that as "no patch fits this host" sends them chasing a version
-    problem they do not have. So: not-a-checkout -> patched -> partial ->
-    marker-outside-expected-files -> dirty -> select_patch -> refuse.
+    Each bundled patch owns its topology. A host is patched when any one topology
+    is complete, partial when the strongest topology has some but not all markers,
+    and stock when a patch applies cleanly. Dirty checks cover the union so no
+    candidate can overwrite user work.
     """
     head = git_head_short(src)
-    plugins_py = src / "hermes_cli" / "plugins.py"
-    text = plugins_py.read_text(encoding="utf-8", errors="replace")
-    has_marker = PATCHED_MARKER in text
-    applied_count = len(applied_patch_files(src))
     if head is None:
         return ("incompatible", "not a git checkout; refusing to patch blind")
-    if has_marker and applied_count == len(PATCH_FILES):
-        return ("patched", f"all {len(PATCH_FILES)} files carry the marker at {head}")
-    if 0 < applied_count < len(PATCH_FILES):
-        return ("partial", f"{applied_count}/{len(PATCH_FILES)} files patched at {head}")
-    if has_marker and applied_count == 0:
-        return ("incompatible", f"marker found only outside expected files at {head}")
-    # Unpatched base. Is the tree clean enough to patch? This runs
-    # unconditionally now -- there is no base to gate it on.
-    st = run_git(src, "status", "--short", "--", *PATCH_FILES)
+
+    detected, applied, total = detected_patch_topology(src)
+    if total and len(applied) == total:
+        return (
+            "patched",
+            f"all {total} files carry {detected.name if detected else 'a bundled patch'} "
+            f"markers at {head}",
+        )
+    if applied:
+        return (
+            "partial",
+            f"{len(applied)}/{total} files carry {detected.name if detected else 'route'} "
+            f"markers at {head}",
+        )
+
+    targets = all_patch_target_files()
+    st = run_git(src, "status", "--short", "--", *targets)
     if st.returncode == 0 and st.stdout.strip():
-        touched = [l.split()[-1] for l in st.stdout.splitlines()]
+        touched = [line.split()[-1] for line in st.stdout.splitlines()]
         return ("dirty", f"user-modified patch targets before install: {touched}")
-    # Clean and unpatched: installable only if some bundled patch actually fits.
+
     chosen = select_patch(src)
     if chosen is not None:
         return ("stock", f"clean base {head}; {chosen.name} applies")
@@ -438,27 +516,44 @@ def classify_host(src: Path) -> tuple[str, str]:
 
 
 def backup_host(src: Path, meta_dir: Path) -> Path:
-    """Zip the nine patch-target files (pre-mutation) into the metadata dir."""
+    """Back up the union of every bundled patch topology before host mutation."""
     meta_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_path = meta_dir / f"host-backup-{stamp}.zip"
-    # The stamp has one-second resolution and ZipFile("w") truncates, so two
-    # backups inside the same second silently became one -- measured: a second
-    # run's backup overwrote the first, and rollback then restored the
-    # installer's own intermediate state instead of the user's.
     counter = 1
     while backup_path.exists():
         backup_path = meta_dir / f"host-backup-{stamp}-{counter}.zip"
         counter += 1
     with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        for rel in PATCH_FILES:
-            f = src / rel
-            if f.is_file():
-                z.write(f, arcname=rel)
+        for rel in all_patch_target_files():
+            target = src / rel
+            if target.is_file():
+                z.write(target, arcname=rel)
     return backup_path
 
 
-def record_host_backup(src: Path, meta_dir: Path, meta: dict) -> None:
+def ensure_patch_transaction(meta: dict, patch: Path | None) -> None:
+    """Refuse to bind an existing rollback backup to a different topology."""
+    if patch is None:
+        return
+    host = meta.get("host") or {}
+    backup = host.get("backup")
+    if not backup or not Path(backup).is_file():
+        return
+    recorded_name = host.get("patch")
+    recorded_markers = patch_markers(Path(recorded_name)) if recorded_name else FILE_MARKERS
+    if recorded_markers == patch_markers(patch):
+        return
+    fail(
+        f"rollback metadata belongs to {recorded_name or 'a legacy patch'}, but "
+        f"{patch.name} uses a different host topology. Run --rollback against "
+        "the recorded install (or archive its metadata) before patching this host."
+    )
+
+
+def record_host_backup(
+    src: Path, meta_dir: Path, meta: dict, patch: Path | None = None,
+) -> None:
     """Back up the patch targets and persist the pointer BEFORE mutating the host.
 
     Every failure between a host mutation and the end of the run used to leave a
@@ -475,7 +570,8 @@ def record_host_backup(src: Path, meta_dir: Path, meta: dict) -> None:
     # earlier run recorded, or a second run would drop the file the first one
     # created and rollback would leave it on the host.
     created = set(previous.get("created_files") or [])
-    created |= {rel for rel in ALL_PATCH_CONTENT if not (src / rel).is_file()}
+    patch_content = patch_content_files(patch) if patch else ALL_PATCH_CONTENT
+    created |= {rel for rel in patch_content if not (src / rel).is_file()}
 
     keep = previous.get("backup") if previous.get("backup") and Path(previous["backup"]).is_file() else None
     host = {
@@ -485,6 +581,7 @@ def record_host_backup(src: Path, meta_dir: Path, meta: dict) -> None:
         # reinstate an intermediate state while claiming a faithful undo.
         "backup": keep or fresh,
         "created_files": sorted(created),
+        "patch": previous.get("patch") or (patch.name if patch else None),
         # Stamped when the backup is taken, not refreshed per run: the top-level
         # base_head moves with every invocation, so a --plugin-only run on an
         # upgraded host used to make an old backup look current and silence the
@@ -532,33 +629,27 @@ def apply_patch(src: Path, meta_dir: Path, patch: Path) -> None:
             f"Restore it with `python install.py --rollback` (backup recorded in "
             f"{meta_dir / METADATA_NAME}).\n{r.stderr}"
         )
-    missing = [rel for rel in PATCH_FILES if rel not in applied_patch_files(src)]
+    expected_files = patch_files(patch)
+    missing = [rel for rel in expected_files if rel not in applied_patch_files(src, patch)]
     if missing:
         rb = run_git(src, "apply", "-R", str(patch))
-        left = applied_patch_files(src)
+        left = applied_patch_files(src, patch)
         # Read the markers back rather than reporting git's exit code as if it
         # were the outcome: "patch reversed rc=0" was a claim about the host that
         # nothing had checked.
         fail(
             f"verification failed ({missing}); attempted reverse rc={rb.returncode}, "
-            f"{len(left)}/{len(PATCH_FILES)} files still carry the marker. "
+            f"{len(left)}/{len(expected_files)} files still carry the marker. "
             f"`python install.py --rollback` restores the recorded backup."
         )
 
 
-def compile_all(src: Path) -> None:
-    """Byte-compile the patched host files to prove they parse.
-
-    Into a temp directory, not beside the sources: the host tree is the user's,
-    and __pycache__ entries left in it that --rollback does not remove contradict
-    "host restored byte-for-byte from backup". Measured after --patch-only plus
-    --rollback on a throwaway host: 8 .pyc across 5 __pycache__ directories still
-    there, with the run reporting a faithful restore.
-    """
+def compile_all(src: Path, patch: Path | None = None) -> None:
+    """Byte-compile the selected patch targets without writing into the host."""
     import py_compile
 
     with tempfile.TemporaryDirectory(prefix="refine-compile-") as td:
-        for index, rel in enumerate(PATCH_FILES):
+        for index, rel in enumerate(patch_content_files(patch)):
             py_compile.compile(
                 str(src / rel), cfile=str(Path(td) / f"{index}.pyc"), doraise=True
             )
@@ -1149,6 +1240,8 @@ def do_rollback(args) -> None:
         fail("No rollback metadata found; nothing to roll back.")
 
     host = meta.get("host") or {}
+    recorded_patch = patch_by_name(host.get("patch"))
+    restore_targets = patch_content_files(recorded_patch) if recorded_patch else PATCH_FILES
     backup_value = host.get("backup")
     moved_on = False
     recorded_head = current_head = None
@@ -1169,14 +1262,14 @@ def do_rollback(args) -> None:
             say(
                 f"WARNING: this backup was taken at {recorded_head} but the checkout is "
                 f"now at {current_head}. Restoring it overwrites the current versions of "
-                f"{len(PATCH_FILES)} host files with pre-install content. If the host was "
+                f"{len(restore_targets)} host files with pre-install content. If the host was "
                 "upgraded since, `git apply -R` against the route patch is the safer undo."
             )
         with tempfile.TemporaryDirectory(prefix="refine-rollback-") as td:
             with zipfile.ZipFile(backup) as z:
                 z.extractall(td)
             td_root = Path(td)
-            for rel in PATCH_FILES:
+            for rel in restore_targets:
                 restored = td_root / rel
                 target = src / rel
                 if restored.is_file():
@@ -1200,10 +1293,10 @@ def do_rollback(args) -> None:
                 "come from a run whose patch never applied. `git apply -R` against "
                 "the route patch, or `git checkout`, reverts a known-good base."
             )
-        marked = applied_patch_files(src)
+        _detected, marked, total = detected_patch_topology(src)
         if marked:
             say(
-                f"Note: {len(marked)}/{len(PATCH_FILES)} host files still carry the "
+                f"Note: {len(marked)}/{total} host files still carry the "
                 f"route marker (recorded install mode: {meta.get('mode') or 'unknown'}). "
                 "The host is left exactly as it is."
             )
@@ -1341,12 +1434,15 @@ def do_install(args) -> None:
         # Report the host across every patch target, not just plugins.py: a
         # partially patched host has the marker there and still cannot route,
         # and staying silent about it is the bug this flag work set out to end.
-        applied = applied_patch_files(src)
-        if len(applied) == len(PATCH_FILES):
-            say(f"Host capability present on all {len(PATCH_FILES)} patch targets; left untouched.")
+        detected, applied, total = detected_patch_topology(src)
+        if total and len(applied) == total:
+            say(
+                f"Host capability present on all {total} targets for "
+                f"{detected.name if detected else 'the detected patch'}; left untouched."
+            )
         else:
             say(
-                f"Host capability is incomplete ({len(applied)}/{len(PATCH_FILES)} patch "
+                f"Host capability is incomplete ({len(applied)}/{total} patch "
                 "targets carry the marker): refine_run will return "
                 "llm_invocation_unavailable until --patch-only is run."
             )
@@ -1379,14 +1475,14 @@ def do_install(args) -> None:
     host_backup_recorded = False
 
     if state == "partial":
-        # Record before reversing: this reverse is a host mutation like any
-        # other, and "backup before edit" has no exception for the tidy-up path.
-        record_host_backup(src, mdir, meta)
+        # Record before any reverse attempt: even an unreverseable partial host
+        # gets a durable snapshot for manual recovery. The strongest detected
+        # topology gives metadata a patch identity without mutating the host.
+        detected, _marked, _total = detected_patch_topology(src)
+        ensure_patch_transaction(meta, detected)
+        record_host_backup(src, mdir, meta, detected)
         host_backup_recorded = True
         say(f"Pre-reverse backup recorded: {meta['host']['backup']}")
-        # Which bundled patch was half-applied is not known here, so reverse the
-        # one that reverse-checks clean. A stale global would reverse a patch the
-        # host does not carry.
         reverse = select_reverse_patch(src)
         if reverse is None:
             fail(
@@ -1419,19 +1515,19 @@ def do_install(args) -> None:
             fail(f"no bundled route patch applies to this host: {detail}")
         say(f"Applying host patch {chosen.name} (with pre-mutation backup)…")
         # Ahead of the backup: a refusal should leave nothing behind at all.
+        ensure_patch_transaction(meta, chosen)
         check_patch_applies(src, chosen)
         if not host_backup_recorded:
             # The partial branch already recorded the true pre-run state; keep
             # that one. A second backup here would capture the reversed tree and
             # rollback would restore the installer's own intermediate state.
-            record_host_backup(src, mdir, meta)
-        # Record which patch was chosen: the rollback path restores from the
-        # backup zip and does not need it, but a metadata file that cannot say
-        # which patch was applied makes the next diagnosis guesswork.
-        meta.setdefault("host", {})["patch"] = chosen.name
+            record_host_backup(src, mdir, meta, chosen)
+        # Persisted by record_host_backup before mutation; keep the explicit write
+        # for the partial-then-stock path whose first backup already exists.
+        meta.setdefault("host", {}).setdefault("patch", chosen.name)
         write_metadata(mdir, meta)
         apply_patch(src, mdir, chosen)
-        compile_all(src)
+        compile_all(src, chosen)
         say("Host patch applied and compiled.")
     elif state == "patched":
         say("Host capability already present; leaving host untouched.")
@@ -1453,18 +1549,47 @@ def do_install(args) -> None:
     say(f"Metadata → {mdir / METADATA_NAME}")
     verified = verify_plugin_imports(Path(dest), python_of(src), src)
 
-    # Capability verification: inside a fresh interpreter, ctx.llm must be bound
-    # when a scope is active, and fail-closed when not.
+    # Synthetic end-to-end smoke: a real invocation-bound host facade must make
+    # exactly one request and the installed Refine proposer must parse its reply.
+    # The subprocess gets an empty disposable HERMES_HOME, so no real trajectory,
+    # credentials, journal, or memory can enter the probe.
     ver = (
         "import sys; sys.path.insert(0, r'%s')\n"
-        "sys.path.insert(0, r'%s')\n" % (str(PLUGIN_DIR.parent), str(src))
+        "sys.path.insert(0, r'%s')\n" % (str(src), str(dest))
     ) + r'''
-import hermes_cli.plugins as hp
-assert hasattr(hp, "plugin_invocation_scope"), "host marker missing"
-import agent.auxiliary_client as ac
-assert hasattr(ac, "RouteLockedCallError"), "route-locked call path missing"
-with hp.plugin_invocation_scope_for_agent(type("A", (), {})()):
-    pass  # scope machinery functional (fail-closed binding exercised in route tests)
+import json
+from types import SimpleNamespace
+from agent.plugin_llm import PluginInvocationRoute, PluginLlm
+import llm as refine_llm
+
+class RecordingClient:
+    def __init__(self):
+        self.calls = []
+        outer = self
+        class Completions:
+            def create(self, **kwargs):
+                outer.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                        "action": "no_op", "kind": "memory",
+                        "reason": "synthetic route smoke"
+                    })))],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                    model="refine-smoke-model",
+                )
+        self.chat = SimpleNamespace(completions=Completions())
+
+client = RecordingClient()
+route = PluginInvocationRoute(
+    provider="custom", model="refine-smoke-model",
+    base_url="https://synthetic.invalid/v1", api_key="synthetic",
+    api_mode="chat_completions", client=client,
+).validated()
+facade = PluginLlm(plugin_id="refine").bind_invocation(route)
+proposal = refine_llm.propose(facade, "synthetic evidence only", [], [])
+assert proposal.get("action") == "no_op", proposal
+assert not proposal.get("failure"), proposal
+assert len(client.calls) == 1, f"expected one physical request, got {len(client.calls)}"
 print("CAPABILITY_OK")
 '''
     import tempfile as _tf
@@ -1472,24 +1597,23 @@ print("CAPABILITY_OK")
         tf.write(ver)
         cap_script = tf.name
     try:
-        r = subprocess.run(
-            [python_of(src), cap_script], capture_output=True, text=True, timeout=120,
-            # Pass through what the user set; do not invent a home. Forcing
-            # ~/.hermes here told the subprocess a different home than the one
-            # the plugin was just installed into, and created that directory on
-            # a Windows box whose real home is %LOCALAPPDATA%\hermes.
-            # No bytecode: this imports host modules and would litter the
-            # checkout with __pycache__ entries the user did not ask for.
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-        )
+        with _tf.TemporaryDirectory(prefix="refine-capability-home-") as cap_home:
+            r = subprocess.run(
+                [python_of(src), cap_script], capture_output=True, text=True, timeout=120,
+                env={
+                    **os.environ,
+                    "HERMES_HOME": cap_home,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+            )
         if "CAPABILITY_OK" not in (r.stdout or ""):
             fail(f"capability verification failed:\n{r.stdout}\n{r.stderr}")
     finally:
         os.unlink(cap_script)
-    # Says what the probe checked, not what the feature does: the probe asserts
-    # the host markers are importable and that entering the scope works. The
-    # fail-closed binding itself is exercised by the host route tests.
-    say("Capability verified: host markers importable and the invocation scope entered.")
+    say(
+        "Capability verified: invocation-bound facade reached the installed "
+        "proposer once in a disposable HERMES_HOME."
+    )
 
     say("Memory budget:")
     raise_memory_limit(src, meta, include_host=True)

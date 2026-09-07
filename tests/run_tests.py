@@ -25188,16 +25188,30 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.head = self._git("rev-parse", "--short=10", "HEAD").stdout.decode().strip()
         self.patch_file = self._generate_patch("generated-route.patch")
 
-    def _generate_patch(self, name: str, rels=None) -> Path:
+    def _generate_patch(self, name: str, rels=None, *, include_test=False) -> Path:
         """A patch guaranteed to apply: diff the checkout against itself.
 
         Written OUTSIDE the checkout, or it reads as untracked work. ``rels``
         limits it to a subset, which is what makes a reverse of a partially
-        patched host succeed.
+        patched host succeed. ``include_test`` models shipped route patches,
+        which create their host regression file.
         """
         self._write_markers(rels)
-        diff = self._git("diff").stdout.decode("utf-8")
+        if include_test:
+            target = self.src / "tests" / "agent" / "test_plugin_invocation_route.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("ROUTE_TESTS = True\n", encoding="utf-8")
+        test_diff = (
+            "diff --git a/tests/agent/test_plugin_invocation_route.py "
+            "b/tests/agent/test_plugin_invocation_route.py\n"
+            "new file mode 100644\n--- /dev/null\n"
+            "+++ b/tests/agent/test_plugin_invocation_route.py\n"
+            "@@ -0,0 +1 @@\n+ROUTE_TESTS = True\n"
+        ) if include_test else ""
+        diff = self._git("diff").stdout.decode("utf-8") + test_diff
         self._git("checkout", "-q", "--", ".")
+        if include_test:
+            target.unlink(missing_ok=True)
         path = self.root / name
         path.write_text(diff, encoding="utf-8")
         return path
@@ -25323,6 +25337,86 @@ class InstallerPluginOnlyTests(unittest.TestCase):
             install.do_install(self._args())
         self.assertTrue(any("1/8 patch targets" in message for message in messages))
         self.assertTrue(any("llm_invocation_unavailable" in message for message in messages))
+
+    def test_a_complete_v021_topology_is_patched_not_partial(self):
+        """The moved 0.21 targets and marker table must classify as one route."""
+        import install
+
+        name = "invocation-route-v0.21.0.patch"
+        for rel, marker in install.PATCH_MARKERS[name].items():
+            (self.src / rel).write_text(
+                f"BASE = True\n{marker} = True\n", encoding="utf-8"
+            )
+        state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "patched", detail)
+        self.assertIn(name, detail)
+        detected, applied, total = install.detected_patch_topology(self.src)
+        self.assertEqual(detected.name, name)
+        self.assertEqual(len(applied), total)
+        self.assertEqual(total, 8)
+
+    def test_rollback_restores_only_the_recorded_patch_topology(self):
+        """A 0.21 rollback must not overwrite untouched legacy-only host files."""
+        import install
+
+        selected = install.patch_by_name("invocation-route-v0.21.0.patch")
+        self.assertIsNotNone(selected)
+        before = {
+            rel: (self.src / rel).read_bytes()
+            for rel in install.patch_content_files(selected)
+        }
+        unrelated = self.src / "gateway" / "run.py"
+        mdir = install.metadata_dir(self.src)
+        meta = install.new_metadata(self.src, {}, mode="patch-only")
+        install.record_host_backup(self.src, mdir, meta, selected)
+
+        for rel, marker in install.patch_markers(selected).items():
+            (self.src / rel).write_text(f"{marker} = True\n", encoding="utf-8")
+        (self.src / install.PATCH_TEST_FILE).write_text(
+            "CHANGED_TEST = True\n", encoding="utf-8"
+        )
+        unrelated.write_text("USER_CHANGE = True\n", encoding="utf-8")
+
+        with patch.object(install, "say", lambda *_: None):
+            install.do_rollback(self._args(plugin_only=False))
+        self.assertEqual(
+            {
+                rel: (self.src / rel).read_bytes()
+                for rel in install.patch_content_files(selected)
+            },
+            before,
+        )
+        self.assertEqual(
+            unrelated.read_text(encoding="utf-8"), "USER_CHANGE = True\n",
+            "rollback overwrote a file the recorded patch never touched",
+        )
+
+    def test_a_modified_patch_test_is_dirty_before_selection(self):
+        """The patch-created host test is a touched path, not installer metadata."""
+        import install
+
+        target = self.src / install.PATCH_TEST_FILE
+        target.write_text("USER_TEST_CHANGE = True\n", encoding="utf-8")
+        with self._as_stock_host():
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "dirty", detail)
+        self.assertIn(install.PATCH_TEST_FILE, detail)
+
+    def test_an_existing_backup_cannot_change_patch_topology(self):
+        """Backup bytes and their restore scope are one immutable transaction."""
+        import install
+
+        meta = install.new_metadata(self.src, {}, mode="patch-only")
+        install.record_host_backup(
+            self.src, install.metadata_dir(self.src), meta, self.patch_file
+        )
+        v021 = install.patch_by_name("invocation-route-v0.21.0.patch")
+        self.assertIsNotNone(v021)
+        with patch.object(install, "fail", side_effect=SystemExit(1)) as fail:
+            with self.assertRaises(SystemExit):
+                install.ensure_patch_transaction(meta, v021)
+        self.assertIn("different host topology", fail.call_args.args[0])
+        self.assertEqual(meta["host"]["patch"], self.patch_file.name)
 
     def test_patch_only_and_plugin_only_are_rejected_together(self):
         import install
@@ -25754,6 +25848,9 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         # first or created_files is empty and the union has nothing to preserve.
         self._git("rm", "-q", install.PATCH_TEST_FILE)
         self._git("commit", "-qm", "without the route test file")
+        self.patch_file = self._generate_patch(
+            "generated-route-with-test.patch", include_test=True
+        )
         stock = self._target_snapshot()
         mdir = install.metadata_dir(self.src)
         with self._as_stock_host(), \

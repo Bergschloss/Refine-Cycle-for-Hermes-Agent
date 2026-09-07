@@ -39,8 +39,8 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_FILE="$REPO_DIR/assets/invocation-route-v2026.8.16.patch"
-PATCH_BASE_LONG="df4b65147d"   # informational; the pin is on the OUTCOME now
+PATCH_FILE="$REPO_DIR/assets/invocation-route-v0.21.0.patch"
+PATCH_BASE_LONG="693641aa8b"   # informational; selection is by applicability
 ROUTE_SYMBOL="plugin_invocation_scope"
 
 say()  { printf '%s\n' "$*"; }
@@ -161,12 +161,13 @@ select_patch() {
 
 if ! select_patch \
         "$REPO_DIR/assets/invocation-route-v2026.8.31.patch" \
-        "$REPO_DIR/assets/invocation-route-v2026.8.16.patch"; then
+        "$REPO_DIR/assets/invocation-route-v2026.8.16.patch" \
+        "$REPO_DIR/assets/invocation-route-v0.21.0.patch"; then
     fail "every bundled route patch does not apply to this Hermes checkout.
   Hermes HEAD : $HOST_DESC
-  Patch base  : $PATCH_BASE_LONG (v2026.8.16) and v2026.8.31
-  Tried       : invocation-route-v2026.8.31.patch, invocation-route-v2026.8.16.patch
-  Nothing was modified. The patch needs rebasing onto this host's version."
+  Tried       : invocation-route-v2026.8.31.patch, invocation-route-v2026.8.16.patch,
+                invocation-route-v0.21.0.patch
+  Nothing was modified. This host needs a new route patch."
 fi
 
 [ -f "$PATCH_FILE" ] || fail "patch file missing: $PATCH_FILE"
@@ -294,30 +295,17 @@ apply_attempt() {
 APPLIED_FROM=""
 if apply_attempt "--check" && apply_attempt; then
     APPLIED_FROM="git apply (clean)"
-elif apply_attempt "-3"; then
-    APPLIED_FROM="git apply -3 (three-way merge)"
-elif apply_attempt "-3" "-C1"; then
-    APPLIED_FROM="git apply -3 -C1 (three-way, reduced context)"
-elif apply_attempt "-3" "-C0"; then
-    APPLIED_FROM="git apply -3 -C0 (three-way, minimal context)"
 else
-    fail "patch does not apply to this host (nothing was modified).
+    fail "patch no longer applies cleanly to this host (nothing was modified).
   Hermes HEAD: $HOST_DESC
-  patch base:  $PATCH_BASE_LONG (built against stock v2026.8.16)
+  selected patch: $(basename "$PATCH_FILE")
   attempts:
 $APPLY_FAILURES
 
-  WHAT YOU GET WITHOUT THE PATCH (be clear about this):
-  - refine_run falls back to the DEFAULT structured proposer for every
-    proposal, ignoring the invocation-bound route: a run inside a session
-    bound to provider X can still bill a provider Y configured gateway-wide.
-  - every such run ends in outcome=llm_invocation_unavailable with
-    'target_source: invocation_bound, primary_attempts: 0' in its llm_meta —
-    that is the honest signal the route is missing, not a silent no_op.
-  - the plugin's own features (detection, journal, audit, rollback) all work;
-    only the route binding is absent.
-  Options: upgrade the host checkout to v2026.8.16+, or apply the patch
-  manually after resolving the drift (see assets/ header for the hunks)."
+  The patch passed selection but the tree changed before apply. Refusing rather
+  than three-way merging an invocation route: a partial semantic merge can keep
+  markers and compile while breaking the single-route guarantee. Re-run from a
+  clean, stable checkout."
 fi
 say "core patch applied ($APPLIED_FROM)."
 
