@@ -26484,11 +26484,12 @@ class PluginGuardInstallabilityTests(unittest.TestCase):
             )
 
         if proc.returncode != 0:
-            # Cannot measure is not the same as measured clean, and it is not a
-            # failure of this repository either. Carry the reason so a skip that
-            # hides a broken probe is still readable.
-            self.skipTest(
-                "the host scanner could not be run here: "
+            # Once a checkout and scanner were found, a broken probe is a broken
+            # release gate, not an absent capability. Import/API drift must turn
+            # this test red instead of silently disabling the guard on the host
+            # upgrade where it matters most.
+            self.fail(
+                "the discovered host scanner could not be run: "
                 + ((proc.stderr or "").strip()[-300:] or "no stderr")
             )
         lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]

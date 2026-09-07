@@ -1,7 +1,7 @@
 # Refine Cycle fresh-install verification on Hermes 0.21.0
 
-**Date:** 2026-09-07  
-**Platform:** Windows  
+**Date:** 2026-09-07
+**Platform:** Windows
 **Result:** **FAIL for an ordinary clean install; FAIL for full runtime usability.**
 
 ## Executive verdict
