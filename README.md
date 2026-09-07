@@ -42,10 +42,10 @@ before you run it.** The plugin's own runtime never touches Hermes — but
 > "Host route patch" under Installation). Without it, a proposal run fails
 > loudly with `llm_invocation_unavailable` — it never pretends to work.
 >
-> **On Hermes 0.21.0 the route patch does not apply**, so proposals are
-> unavailable there whatever else works. The plugin installs, loads and registers
-> on 0.21.0, and its own suite is green — none of which means proposals run. See
-> [Hermes version support](#hermes-version-support) before you decide.
+> Hermes 0.21.0 is supported by its own bundled route patch. A green plugin
+> suite or passing `hermes plugins doctor` still does **not** prove proposals
+> work: verify `install.py --status` and the invocation-bound smoke test too.
+> See [Hermes version support](#hermes-version-support).
 
 ---
 
@@ -205,85 +205,72 @@ failure a journaled error (`subagent_strict_error`) instead of a downgrade.
 ## Hermes version support
 
 Read this before installing. A green test suite and a passing `hermes plugins
-doctor` do **not** mean proposals are available: on 0.21.0 both were green while
-proposals were blocked, which is exactly the confusion this table exists to
-prevent.
+doctor` do **not** prove that proposals are available. Proposal support also
+requires `install.py --status` to recognize a compatible invocation-route patch
+and an invocation-bound smoke test to reach the proposer.
 
 | Hermes | Installs | Loads, registers | status / audit / rollback | New proposals |
 |---|---|---|---|---|
 | 0.19.0 | yes | yes | yes | yes, with the route patch |
 | 0.20.1 | yes | yes | yes | yes, with the route patch |
 | 0.20.2 | yes | yes | yes | yes, with the route patch (subagent path verified end to end) |
-| 0.21.0 | yes, after confirming a `caution` scan | yes | yes | **no — no compatible route patch** |
-
-**0.20.1 and 0.20.2 are the last fully verified hosts.** They are the versions on
-which the whole chain, proposals included, has been exercised.
+| 0.21.0 | yes, after confirming a `caution` scan | yes | yes | yes, with `invocation-route-v0.21.0.patch` |
 
 ### What is verified on 0.21.0
 
-Measured on a clean Windows install of 0.21.0 (upstream `693641aa8b`), in a
-disposable `HERMES_HOME`, with the install scanner left at its default:
+Measured on a clean Windows checkout of Hermes 0.21.0 at
+`693641aa8b4359c602283bdbbc14041e03bc47bc`, using disposable clones and
+`HERMES_HOME` directories rather than the real profile:
 
-- `hermes plugins install` succeeds. The scanner returns `caution`, which asks for
-  confirmation (`--force` accepts it non-interactively). It is no longer
-  `dangerous`, which could not be overridden at all.
-- `hermes plugins enable refine` succeeds.
-- `hermes plugins doctor refine --ci` passes: manifest parsed, plugin imported and
-  registered, 1 tool and 7 hooks.
-- `hermes plugins compat --json` reports nothing: no imports removed by the
-  September 2026 decomposition.
-- The suite passes (1195 tests) under the host's own interpreter.
+- the real Hermes scanner reports `caution` with 153 findings and zero critical
+  findings on the tracked plugin tree; `--force` may confirm this verdict;
+- `install.py --status` reports
+  `stock — clean base 693641aa8b; invocation-route-v0.21.0.patch applies`;
+- the installer transitions the disposable host from `stock` to `patched`, and
+  status then finds all eight route markers;
+- the patch's host test file passes all 37 tests;
+- an invocation-bound synthetic proposer smoke reaches the installed proposer
+  exactly once through the captured active client;
+- OpenAI-shaped chat, `anthropic_messages`, and `codex_responses` transports are
+  route-locked without rebuilding the active client; async calls use that same
+  captured client and still issue one physical request;
+- rollback removes the patch-created host test and restores an empty tracked host
+  diff;
+- the plugin suite passes 1,203 tests, with 11 Windows-only skips for Bash-based
+  `install.sh` coverage.
 
-### What does not work on 0.21.0
+The smoke uses synthetic input and does not start or restart the real gateway.
+No real session content is supplied to it. The exact commands and the distinction
+between the original failed baseline and the corrected result are recorded in
+[`docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md`](docs/FRESH-INSTALL-HERMES-0.21.0-2026-09-07.md).
 
-`python install.py --status` reports **`incompatible`**: neither bundled route
-patch (`v2026.8.16`, `v2026.8.31`) applies to `693641aa8b`. Upstream Hermes has
-never carried the route contract itself — `invocation_bound` and
-`plugin_invocation_scope` do not exist in 0.21.0 — and 0.21.0 moved the code the
-patch targets, so this is a rebase, not a stale line offset.
+### Why patch selection remains strict
 
-Without that route, `ctx.llm` is never invocation-bound, and every
-proposal-producing entry point stops before any trajectory data is sent to a
-model:
+Each bundled patch owns its marker table and target topology. Hermes 0.21.0 moved
+`gateway/run.py` to `gateway/run_inbound.py` and `run_agent.py` to
+`agent/turn_facade.py`; treating every host as the old topology would call a
+correctly patched host `partial`. Backup, compilation, and rollback scope are
+therefore derived from the selected patch headers, and an existing backup cannot
+be rebound to another topology.
 
-```
-llm_invocation_unavailable
-```
-
-That covers `/refine`, `/refine dry-run`, `/refine session <id>`, the `refine_run`
-tool, and automatic refinement. `status`, `audit` and `rollback` are unaffected.
-This is fail-closed by construction: the plugin refuses a facade the host has not
-bound, rather than quietly borrowing a different route. Verified by reading the
-0.21.0 host source and by `install.py --status`; a live proposal was not attempted
-on 0.21.0, because there is no route for it to use.
-
-Do **not** force either bundled patch and do not three-way merge them onto 0.21.0.
-A partially wired route would break the single-route guarantee silently, which is
-worse than the feature being unavailable.
-
-A rebased patch for this host **exists but is not installable yet**. It lives at
-`assets/pending/invocation-route-v0.21.0.patch`, deliberately outside the
-`assets/invocation-route-*.patch` glob the installer selects from: it applies
-cleanly to `693641aa8b` and carries 36 passing host tests with no regressions, but
-`install.py` still models the host as one shared eight-file topology, and 0.21.0
-moved two of those files. Until that metadata is per-patch, the installer would
-classify a correctly patched 0.21.0 host as `partial` and try to reverse it. The
-remaining work, with the marker tables, is written up in
-[`docs/SPEC-invocation-route-v0.21.0.md`](docs/SPEC-invocation-route-v0.21.0.md).
+The installer uses clean `git apply` only. It does **not** use `git apply -3` or
+reduce context to make a patch land: a semantic merge can compile while silently
+breaking exact-client, one-request, or no-fallback guarantees. An unsupported
+host fails closed with `llm_invocation_unavailable` rather than borrowing an
+ambient route.
 
 ### A note on `plugins.scan_on_install`
 
-Setting `plugins.scan_on_install: false` makes a blocked install proceed. It is
-**not** a user instruction here and it is not needed on a current checkout: it
-disables install scanning for the whole profile. It appears in this project's
-history only as a diagnostic used to prove a clone could be staged at all while
-the verdict was still `dangerous`.
+Do not disable install scanning for this plugin. The tracked release tree now
+receives a confirmable `caution` verdict rather than an unoverrideable
+`dangerous` verdict. `plugins.scan_on_install: false` remains documented only as
+an earlier diagnostic; it disables scanning for the whole profile.
 
 ---
 
 ## Installation
 
-> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite, `/refine status`, and `/refine audit` are verified on Hermes 0.20.1; the subagent proposal path (launch, fallback, strict) is additionally verified end to end on 0.20.2. Only **new proposals** additionally require the host route patch (see below), which **does not apply to 0.21.0** — see [Hermes version support](#hermes-version-support).
+> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite, `/refine status`, and `/refine audit` are verified on Hermes 0.20.1 through 0.21.0. Only **new proposals** additionally require the matching host route patch; Hermes 0.21.0 uses `assets/invocation-route-v0.21.0.patch`. See [Hermes version support](#hermes-version-support).
 
 The plugin lives in `<HERMES_HOME>/plugins/refine/` — `~/.hermes/plugins/refine/`
 on Linux and macOS, and `%LOCALAPPDATA%\hermes\plugins\refine\` on Windows.
@@ -378,45 +365,45 @@ toward the budget it reports.
 The plugin asks the LLM through Hermes's *active invocation route*: the same
 model binding that the user's live session uses, so that a proposal costs the
 host's own provider creds and never a hardcoded key. Stock Hermes does not
-expose that binding to plugins. The installer ships one patch per Hermes base —
-currently `assets/invocation-route-v2026.8.16.patch` and
-`assets/invocation-route-v2026.8.31.patch` — each touching nine files including
-`agent/plugin_llm.py`, `agent/auxiliary_client.py`, `gateway/run.py`, and
-`hermes_cli/plugins.py` in the Hermes checkout.
+expose that binding to plugins. The installer ships one patch per Hermes base:
 
-Which patch fits a host is decided by **trying** it with `git apply --check`,
-newest base first, not by comparing version strings. Hermes moved 72 commits
-across these files between v2026.8.16 and v2026.8.31, and the 8.16 patch still
-lands 39 of its 40 hunks on 8.31 — so a version test would refuse hosts a patch
-fits and accept hosts it does not.
+- `assets/invocation-route-v2026.8.16.patch`
+- `assets/invocation-route-v2026.8.31.patch`
+- `assets/invocation-route-v0.21.0.patch`
+
+Each patch carries its own marker table and target topology. The 0.21.0 topology
+uses `gateway/run_inbound.py` and `agent/turn_facade.py` where the older hosts
+used `gateway/run.py` and `run_agent.py`.
+
+Which patch fits a host is decided by trying each candidate with
+`git apply --check`, not by trusting a version string. This avoids accepting a
+partially matching patch after upstream moves code while preserving hosts where
+a patch still applies exactly.
 
 - **Without the patch:** `/refine status`, `/refine audit`, `/refine rollback`,
   journaling, and the test suite all work. A proposal run stops honestly with
   `llm_invocation_unavailable` and journals the record.
-- **With the patch:** proposal runs reach the model (subject to the configured
-  trust policy).
+- **With the patch:** proposal runs reach the exact active route (subject to the
+  configured trust policy).
 
-`install.sh` pins the **result**, not the input. It first checks whether the
-route is already present — in which case it does nothing at all — then tries
-the patch with `git apply`, falling back to three-way merge with decreasing
-context (`-3`, `-3 -C1`, `-3 -C0`), and refuses **only** when it cannot produce
-a working route. After applying it verifies by outcome: route symbol present,
-no conflict markers, every touched file compiles, and the core module still
-imports. If any check fails, the pre-patch state is restored byte-for-byte. A
-refusal names the host HEAD and the patch base (the patch was built against
-stock v2026.8.16, commit `df4b65147d`) and lists the failed attempts — it
-never refuses without trying. A host whose core version has drifted slightly
-will often still get a working patch; one that genuinely cannot is told so.
+Both installers require a clean patch and never weaken context or use a
+three-way merge after `git apply --check` fails. `install.sh` then verifies route
+symbols, rejects conflict markers, compiles every touched Python file, and
+imports the core module. `install.py` performs those checks and additionally runs
+a synthetic invocation-bound proposer smoke in a disposable `HERMES_HOME`. If a
+check fails, the pre-patch state is restored. Backups are bound to the selected
+patch and topology so a later run cannot reuse them for a different host
+transaction.
 
 ```bash
 # from the plugin directory
-./install.sh            # apply core patch (with backup)
-./install.sh --patch-only
+./install.sh            # apply and verify the host route patch, with backup
 ```
 
-On hosts that already carry the route (patched earlier, or upstream), the
-script detects it and does nothing. See the script's header for the exact
-behaviour and the one-command undo (`git apply -R`).
+`install.sh` has no command-line mode flags; use `install.py --patch-only` when
+installing through the Python entry point. On hosts that already carry a complete
+known route, the installer reports `patched` and makes no route change. Use
+`install.py --rollback` to restore the recorded pre-install state.
 
 ### The memory budget the install raises
 

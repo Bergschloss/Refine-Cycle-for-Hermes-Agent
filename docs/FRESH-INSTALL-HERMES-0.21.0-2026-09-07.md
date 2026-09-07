@@ -349,3 +349,118 @@ Do not apply either old bundled patch with force. Do not restart the real gatewa
 **Release compatibility with Hermes 0.21.0: BLOCKED.**
 
 The plugin itself is internally consistent: all 1,193 tests pass, Hermes imports it, all declared registrations are valid, and the new decomposition scanner finds no removed imports. The release nevertheless fails the two checks that matter to a new user: default installation is rejected, and the core proposal path has no compatible invocation route. Both blockers must be fixed before the README's three-command installation can be called supported on Hermes 0.21.0.
+
+---
+
+## Post-fix verification — release blockers resolved
+
+The report above is retained as the baseline failure at `fdee1e3`. Subsequent
+work removed both blockers. This section supersedes its operational verdict for
+the corrected release.
+
+**Corrected implementation commits:**
+
+- `ddb479e` — the scanner regression guard now fails closed if the discovered
+  Hermes scanner crashes instead of silently skipping the release gate;
+- `057fa94` — Hermes 0.21.0 route patch selection, patch-specific topology,
+  exact active-client transport support, transactional backup/rollback, and
+  synthetic proposer smoke.
+
+### Scanner result
+
+The real Hermes 0.21 scanner was run against a clean tracked clone of the plugin:
+
+```text
+Verdict: caution
+Findings: 153
+Critical: 0
+```
+
+A `caution` verdict is confirmable with `--force`; unlike the original
+`dangerous` result, it is not an unconditional installation block. The untracked
+`.server-sync/` development copy in the working directory still contains old
+fixtures and makes a raw workspace scan dangerous, but it is neither committed
+nor shipped. It was not deleted or used as release evidence.
+
+### Route applicability and installation
+
+Read-only status against the clean local Hermes checkout at
+`693641aa8b4359c602283bdbbc14041e03bc47bc` now reports:
+
+```text
+State: stock — clean base 693641aa8b; invocation-route-v0.21.0.patch applies
+```
+
+A full install in a disposable clone and disposable `HERMES_HOME` produced:
+
+```text
+stock → patched
+State: patched — all 8 files carry invocation-route-v0.21.0.patch markers
+Capability verified: invocation-bound facade reached the installed proposer once in a disposable HERMES_HOME.
+```
+
+The smoke used synthetic evidence and the exact client captured from the active
+invocation. OpenAI-shaped chat, `anthropic_messages`, and `codex_responses` modes
+are supported. Async dispatch uses the same captured client through
+`asyncio.to_thread`; each attempt issues one physical request and does not enter
+the normal retry/failover ladder.
+
+### Host and plugin tests
+
+The patch-created Hermes route suite passed in the disposable host:
+
+```text
+37 passed in 3.44s
+```
+
+The complete plugin suite, using the Hermes virtualenv interpreter, passed:
+
+```text
+Ran 1203 tests in 105.181s
+OK (skipped=11)
+```
+
+The 11 skips are the expected Windows skips for Bash-based `install.sh` tests.
+They require Linux CI verification; they are not route or Python-installer
+failures.
+
+### Rollback and host integrity
+
+`install.py --rollback` removed the patch-created host test and restored the
+disposable clone to an empty tracked diff. The real Hermes checkout was never
+modified, no real gateway was restarted, no real session database was supplied,
+and no real trajectory content was sent to a model or external service.
+
+### Corrected verdict
+
+The two original blockers are resolved in the tracked release tree:
+
+1. the scanner verdict is confirmable `caution` with zero critical findings;
+2. Hermes 0.21.0 has a selectable route patch with patch-specific metadata,
+   exact-client transport support, proposer smoke coverage, and verified
+   rollback.
+
+A green Doctor result or plugin suite remains insufficient evidence on its own.
+Release acceptance additionally requires the public install with scanning left
+enabled and all four exact-SHA Linux/Windows CI jobs; those checks are recorded
+against the final documentation commit rather than inferred from this local run.
+
+### Public repository install confirmation
+
+The corrected public commit `057fa94` was then installed through Hermes itself
+in a fresh temporary `HERMES_HOME`. Install scanning remained at its default; no
+`plugins.scan_on_install` override was written. `--force` only confirmed the
+scanner's permitted `caution` verdict.
+
+```text
+hermes plugins install Bergschloss/Refine-Cycle-for-Hermes-Agent --no-enable --force  → success
+hermes plugins enable refine --no-allow-tool-override                                → success
+hermes plugins doctor refine --ci                                                    → success, refine 1.1.0, 1 tool, 7 hooks
+hermes plugins compat <isolated-plugin-dir> --json                                   → exit 0, no flagged imports
+python install.py --status --hermes-src <clean-0.21-checkout>                         → stock; v0.21 patch applies
+```
+
+This check cloned the public repository rather than copying the working tree. It
+did not patch the real checkout, start a gateway, open a real `state.db`, or send
+trajectory content anywhere. The remaining release gate is the four-job
+exact-SHA GitHub Actions result for the final documentation commit.

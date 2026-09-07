@@ -10,18 +10,18 @@
 # cannot see the invocation-bound LLM route and every proposal run stops with
 # llm_invocation_unavailable.
 #
-# Behaviour (v2 — verify the RESULT, not the INPUT):
+# Behaviour (v3 — clean application, verified outcome):
 #   1. DETECT.   If the route is already present, exit success and change
 #                nothing (repeated runs are a no-op, never a double apply).
-#   2. APPLY     `git apply --check`, then `-3` (three-way merge), then
-#      TOLERANTLY `-3 -C1`, then `-3 -C0` — decreasing context — before giving
-#                up. A hunk that still matches on a nearby commit applies.
+#   2. APPLY     Require `git apply --check`, then apply once without three-way
+#      CLEANLY   merge or reduced context. If the tree changes between selection
+#                and apply, refuse rather than risk a semantically mixed route.
 #   3. VERIFY    The route symbol exists, no conflict markers, every touched
 #      BY OUTCOME file compiles, and the core module still imports. If any
 #                check fails, the pre-patch state is restored byte-for-byte.
-#   4. REFUSE    On genuine failure, name the host version, the patch base,
-#      HONESTLY  and every attempt that failed. "Cannot patch this core" is a
-#                fine outcome; "refused without trying" is not.
+#   4. REFUSE    On genuine failure, name the host version and selected patch.
+#      HONESTLY  "Cannot patch this core" is a safe outcome; approximating the
+#                exact-client route is not.
 #
 # Usage:
 #   ./install.sh                       # apply/verify the core patch (with backup)
