@@ -23305,7 +23305,9 @@ class InstallScriptTests(unittest.TestCase):
 
     def test_cannot_apply_refuses_honestly(self):
         # A patch with no index lines and a guard line that does not match
-        # anything: every attempt fails and the refusal names the facts.
+        # anything: selection fails and the refusal names the host, every
+        # candidate, and the no-mutation result. There is no single patch base
+        # to report once selection spans patch-specific host topologies.
         patch = self.repo_dir / "assets"
         patch.mkdir()
         (patch / "invocation-route-v2026.8.16.patch").write_text(
@@ -23330,7 +23332,14 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("does not apply", done.stderr)
         self.assertIn(head, done.stderr, "refusal must name the host HEAD")
-        self.assertIn("df4b65147d", done.stderr, "refusal must name the patch base")
+        self.assertIn("Tried", done.stderr)
+        for candidate in (
+            "invocation-route-v2026.8.31.patch",
+            "invocation-route-v2026.8.16.patch",
+            "invocation-route-v0.21.0.patch",
+        ):
+            self.assertIn(candidate, done.stderr)
+        self.assertIn("Nothing was modified", done.stderr)
         self.assertEqual(self._snapshot(), before, "refusal must not modify files")
 
     # -- restore fidelity: created files, the index, and the recovery copy ---
