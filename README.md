@@ -1302,6 +1302,15 @@ journal recorded `prepared`, `applied`, `rollback_prepared` and `rolled_back`
 in turn — with the note gone from the store afterwards and the usefulness ledger
 carrying the edit, its fingerprint and its final outcome.
 
+**It learns from real conversations, not only from scenarios.** Replayed over a
+corpus of recorded sessions on the current build, the plugin produced grounded,
+applicable lessons on roughly half of the sessions that carried a genuine
+repeated failure — each naming the specific failure it was drawn from — and
+wrote nothing at all on the matched clean sessions, where writing nothing is the
+correct behaviour. An earlier build produced none of them: the proposal model
+kept omitting the fingerprint the apply bar requires, so every candidate was
+refused rather than written. That defect is gone.
+
 **The defaults are set by evidence, not by taste.** Ablations compared the
 shipped configuration against wider ones. Showing the proposer every eligible
 failure pattern instead of the strongest few made it measurably worse, so the
