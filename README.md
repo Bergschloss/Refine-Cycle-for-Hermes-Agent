@@ -2,7 +2,7 @@
 
 ![Refine Cycle — a self-improvement plugin for Hermes Agent](assets/banner.gif)
 
-**Your agent keeps repeating one mistake. This makes it stop.**
+**Your agent keeps repeating the same mistake. This makes it stop.**
 
 **Refine Cycle** looks across recent sessions, finds those repeating problems, and
 saves one small lesson when the evidence is strong enough. Later, it checks
