@@ -26213,6 +26213,77 @@ class InstallerHermesHomeTests(unittest.TestCase):
                     found = install.find_hermes_src(None)
         self.assertEqual(found, checkout.resolve())
 
+    def test_a_release_drop_in_beats_the_base_unit(self):
+        """Switching release by drop-in is how a host moves between checkouts.
+
+        `systemctl cat` on the reference server shows the base unit still naming
+        the retired tree, a drop-in resetting ExecStart, and the live tree named
+        after it -- which is what the running process uses. Reading only the base
+        unit reported the retired checkout, and `--patch-only` would then have
+        patched it while the real Hermes stayed unpatched and `--status` called
+        it `patched`.
+        """
+        import install
+
+        with tempfile.TemporaryDirectory(prefix="refine-dropin-") as td:
+            root = Path(td)
+            retired = root / "release-old"
+            live = root / "release-new"
+            for tree in (retired, live):
+                (tree / "hermes_cli").mkdir(parents=True)
+                (tree / "hermes_cli" / "plugins.py").write_text("x", encoding="utf-8")
+
+            unit_dir = root / "systemd"
+            unit_dir.mkdir()
+            (unit_dir / "hermes-gateway.service").write_text(
+                "[Service]\nExecStart={}/.venv/bin/hermes gateway run\n".format(retired),
+                encoding="utf-8",
+            )
+            drop_in = unit_dir / "hermes-gateway.service.d"
+            drop_in.mkdir()
+            # Named to sort last, as systemd applies them, and carrying the bare
+            # `ExecStart=` reset that precedes any override.
+            (drop_in / "zz-normalized-release.conf").write_text(
+                "[Service]\nExecStart=\nExecStart={}/.venv/bin/hermes gateway run\n".format(live),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("HERMES_SRC", None)
+                os.environ.pop("HERMES_HOME", None)
+                with patch.object(install, "systemd_unit_dirs", lambda: (unit_dir,)):
+                    found = install.find_hermes_src(None)
+
+        self.assertEqual(found, live.resolve())
+
+    def test_a_bare_exec_start_reset_names_no_binary(self):
+        """`ExecStart=` on its own clears the list; it is not a path.
+
+        Splitting it and taking [0] raises IndexError, which would abort
+        discovery on every host whose drop-in resets before overriding -- the
+        normal shape.
+        """
+        import install
+
+        with tempfile.TemporaryDirectory(prefix="refine-reset-") as td:
+            root = Path(td)
+            live = root / "release"
+            (live / "hermes_cli").mkdir(parents=True)
+            (live / "hermes_cli" / "plugins.py").write_text("x", encoding="utf-8")
+            unit_dir = root / "systemd"
+            unit_dir.mkdir()
+            (unit_dir / "hermes-gateway.service").write_text(
+                "[Service]\nExecStart={}/.venv/bin/hermes gateway run\nExecStart=\n".format(live),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("HERMES_SRC", None)
+                os.environ.pop("HERMES_HOME", None)
+                with patch.object(install, "systemd_unit_dirs", lambda: (unit_dir,)):
+                    found = install.find_hermes_src(None)
+
+        self.assertEqual(found, live.resolve())
+
     def test_the_host_helper_in_the_checkout_is_actually_consulted(self):
         """config.hermes_home() asks hermes_constants first; it must be reachable.
 

@@ -385,14 +385,26 @@ def find_hermes_src(explicit: str | None) -> Path:
     # systemd ExecStart of the user's gateway service, parsed portably
     for unit_dir in systemd_unit_dirs():
         unit = unit_dir / "hermes-gateway.service"
-        try:
-            text = unit.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        # Drop-ins are where a host switches release: the base unit keeps naming
+        # the retired tree while `<unit>.d/zz-*.conf` resets ExecStart and names
+        # the live one. Reading only the base file reports the checkout nobody is
+        # running -- and --patch-only would then patch it, leaving the real
+        # Hermes unpatched while --status called it `patched`.
+        sources = [unit] + sorted((unit_dir / "hermes-gateway.service.d").glob("*.conf"))
+        text = ""
+        for source in sources:
+            try:
+                text += source.read_text(encoding="utf-8", errors="replace") + "\n"
+            except OSError:
+                continue
+        if not text.strip():
             continue
-        # last ExecStart= line wins (drop-ins append overrides)
+        # Last ExecStart= wins, across the base unit and its drop-ins in order.
+        # A bare `ExecStart=` is systemd's reset directive and names no binary;
+        # skip it rather than index into an empty split.
         for line in reversed(text.splitlines()):
             s = line.strip()
-            if s.startswith("ExecStart=") and "=" in s:
+            if s.startswith("ExecStart=") and s.split("=", 1)[1].split():
                 first = s.split("=", 1)[1].split()[0]
                 # .../venv/bin/python|hermes -> walk up to the checkout root
                 p = Path(first)
