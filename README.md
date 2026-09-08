@@ -1296,10 +1296,11 @@ applied.
 **It reaches the right model, and the loop closes.** On both a Linux and a
 Windows host, live runs went to the exact model of the active session — one
 request each, no substitution, no silent fallback to something cheaper. On a
-current desktop host the whole cycle then ran end to end: the recurrence gate
-opened on a real session, the model proposed one grounded edit, and the journal
-recorded `prepared` and then `applied` with the recovery metadata a rollback
-needs.
+current desktop host the whole cycle then ran end to end on a real session: the
+recurrence gate opened, the model returned one grounded proposal, and the
+journal recorded `prepared`, `applied`, `rollback_prepared` and `rolled_back`
+in turn — with the note gone from the store afterwards and the usefulness ledger
+carrying the edit, its fingerprint and its final outcome.
 
 **The defaults are set by evidence, not by taste.** Ablations compared the
 shipped configuration against wider ones. Showing the proposer every eligible
