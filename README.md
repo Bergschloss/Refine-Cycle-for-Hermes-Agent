@@ -197,6 +197,32 @@ and an invocation-bound smoke test to reach the proposer.
 | 0.20.1 | yes | yes | yes | yes, with the route patch |
 | 0.20.2 | yes | yes | yes | yes, with the route patch (subagent path verified end to end) |
 | 0.21.0 | yes, after confirming a `caution` scan | yes | yes | yes, with `invocation-route-v0.21.0.patch` |
+| 0.21.1 | yes, after confirming a `caution` scan | yes | yes | yes, with the same `invocation-route-v0.21.0.patch` |
+
+
+### A Hermes update removes the route patch
+
+Updating Hermes rewrites its checkout, and that puts every patched file back to
+stock and takes `.refine-install` with it. Nothing warns you, and `hermes plugins
+doctor` still passes, because the plugin itself is untouched — only the host
+capability it depends on is gone. New proposals then fail closed with
+`llm_invocation_unavailable` until the patch is reapplied.
+
+This is not specific to any one release. Expect it after every Hermes update:
+
+```bash
+python install.py --status      # says `stock` again if the patch was removed
+python install.py --patch-only  # reapplies it
+```
+
+`--status` is also what tells you the bundled patch no longer fits a new host: it
+reports `incompatible` and names the patch bases it tried, rather than forcing a
+patch onto a topology it was not built for.
+
+Measured on the 0.21.0 → 0.21.1 update: the checkout came back clean, the marker
+directory was gone, and the bundled 0.21.0 patch then applied unchanged to the
+new base — same eight files, its 37 host tests passing, and a proposal run
+afterwards reaching the session's own model in one request with no substitution.
 
 ### What is verified on 0.21.0
 
@@ -1267,9 +1293,13 @@ malformed, or a proposal is not grounded in a real recurring failure, the run
 ends in a journaled refusal. Nothing is ever reported as applied that was not
 applied.
 
-**It reaches the right model.** On both a Linux and a Windows host, live runs
-went to the exact model of the active session — one request each, no
-substitution, no silent fallback to something cheaper.
+**It reaches the right model, and the loop closes.** On both a Linux and a
+Windows host, live runs went to the exact model of the active session — one
+request each, no substitution, no silent fallback to something cheaper. On a
+current desktop host the whole cycle then ran end to end: the recurrence gate
+opened on a real session, the model proposed one grounded edit, and the journal
+recorded `prepared` and then `applied` with the recovery metadata a rollback
+needs.
 
 **The defaults are set by evidence, not by taste.** Ablations compared the
 shipped configuration against wider ones. Showing the proposer every eligible
