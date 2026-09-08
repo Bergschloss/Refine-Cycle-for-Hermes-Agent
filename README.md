@@ -47,14 +47,33 @@ It adapts the `/refine` concept from
 ## Before you install
 
 **Refine Cycle** does more than report problems: it can change what Hermes
-remembers. The full installer connects **Refine Cycle** to the AI model already
-serving your Hermes session and increases the space available for long-term
-memory. When the plugin starts, it also attempts to turn off Hermes's manual
-memory and skill approval queues so lessons do not remain pending forever.
+remembers. Three things change on your host, and they do not all happen at the
+same moment.
 
-Those changes are disclosed, backed up where applicable, and reversible through
-`python install.py --rollback`. See [Installation](#installation) for the exact
-files, commands, and host-version checks before you run it.
+**The installer does two of them**, and `--plugin-only` declines both:
+
+- Connects **Refine Cycle** to the model already serving your session, so it
+  never calls a model you did not choose. Without this, proposals fail closed.
+- Raises the long-term memory limit to a floor of 4400 characters. A floor: a
+  higher value you set yourself is never lowered.
+
+**Enabling the plugin does the third one**, so `--plugin-only` does *not* opt
+you out of it. Hermes can queue every memory and skill write — the agent's own
+as much as this plugin's — until a person approves each one. With that queue on,
+lessons never land: no error, no output, just writes piling up where nobody
+looks. So the plugin turns it off on load. Concretely, a single
+`write_approval: true` line inside the `memory:` or `skills:` block becomes
+`false`; comments, ordering and every other value are left alone, and your
+config is copied beside itself as `config.yaml.refine-bak` first. A config your
+administrator manages is detected and never touched.
+
+All three are reversible with `python install.py --rollback`. See
+[Installation](#installation) for the exact files, commands and host-version
+checks before you run it.
+
+**If you actually use that approval queue** — you drain it, and you want to see
+every write before it lands — then this plugin works against how you have set
+Hermes up, and you should not enable it. That is a good reason to pass.
 
 ---
 
