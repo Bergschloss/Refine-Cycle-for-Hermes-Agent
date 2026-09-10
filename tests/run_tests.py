@@ -27877,5 +27877,11 @@ class SyntheticLongitudinalUsefulnessTests(unittest.TestCase):
         )
 
 
+from tests.test_lesson_effect_checker import (  # noqa: E402
+    LessonEffectCheckerTests,
+    LessonEffectPredicateTests,
+)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
