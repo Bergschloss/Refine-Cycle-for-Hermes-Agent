@@ -44,6 +44,10 @@ It adapts the `/refine` concept from
 - If the evidence, model reply, or Hermes state is unclear, it stops instead of
   pretending that a lesson was applied.
 
+![A Telegram notification reading "Refine Cycle — new lesson learned (memory 3222/4400)", followed by the review line naming the skill it created](assets/notification.gif)
+
+You are told when a lesson lands, and how much of the memory budget it used.
+
 ## Before you install
 
 **Refine Cycle** does more than report problems: it can change what Hermes
