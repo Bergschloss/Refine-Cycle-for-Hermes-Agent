@@ -60,8 +60,8 @@ same moment.
   higher value you set yourself is never lowered.
 
 **Enabling the plugin does the third one**, so `--plugin-only` does *not* opt
-you out of it. Hermes can queue every memory and skill write — the agent's own
-as much as this plugin's — until a person approves each one. With that queue on,
+you out of it. Hermes can queue every memory and skill write, the agent's own
+as much as this plugin's, until a person approves each one. With that queue on,
 lessons never land: no error, no output, just writes piling up where nobody
 looks. So the plugin turns it off on load. Concretely, a single
 `write_approval: true` line inside the `memory:` or `skills:` block becomes
@@ -73,8 +73,8 @@ All three are reversible with `python install.py --rollback`. See
 [Installation](#installation) for the exact files, commands and host-version
 checks before you run it.
 
-**If you actually use that approval queue** — you drain it, and you want to see
-every write before it lands — then this plugin works against how you have set
+**If you actually use that approval queue** (you drain it, and you want to see
+every write before it lands), then this plugin works against how you have set
 Hermes up, and you should not enable it. That is a good reason to pass.
 
 ---
@@ -124,7 +124,7 @@ checks its own work:
 | **Window** | the current session | many sessions |
 | **Evidence** | the conversation as written | errors normalized to invariant shapes and fingerprinted, so `HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` count as one failure |
 | **Threshold** | qualitative judgement | a cheap proposal gate followed by an application bar: distinct-session count **or** occurrence count |
-| **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning` — or names honestly why no verdict exists yet (`too early`, `no recurrence window`, `unreliable`) |
+| **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning`, or names honestly why no verdict exists yet (`too early`, `no recurrence window`, `unreliable`) |
 | **Blast radius** | host policy | 3 edits/day, dedup window, cooldown, per-edit journal, per-edit rollback |
 
 The two are complementary, not alternatives. Hermes captures fresh experience;
@@ -133,7 +133,7 @@ The two are complementary, not alternatives. Hermes captures fresh experience;
 Both can write to the same skills and memory, so the plugin is built to notice
 that: a skill patch is refused outright when the target changed after planning,
 and `/refine audit` reports when an entry it created was modified by something
-else — because an effectiveness verdict on a file someone else edited is not a
+else, because an effectiveness verdict on a file someone else edited is not a
 verdict worth trusting.
 
 ---
@@ -141,7 +141,7 @@ verdict worth trusting.
 ## Why
 
 An agent that fixes the same problem every week is not learning. The hard part is
-not noticing a failure — it is knowing which failures are *chronic*, and knowing
+not noticing a failure; it is knowing which failures are *chronic*, and knowing
 whether a fix worked.
 
 The table above says what the difference is; the part worth spelling out is why
@@ -169,10 +169,10 @@ memory or a skill.
 
 ### Why fingerprinting
 
-"The same failure happened again" is a question about shapes, not strings.
-`HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` are one failure, not
-two. Normalizing volatile parts and hashing the result turns a flat list of
-error text into countable patterns.
+"The same failure happened again" is a question about shapes.
+`HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` are one failure.
+Normalizing volatile parts and hashing the result turns a flat list of error
+text into countable patterns.
 
 A pattern that appears in several **different** sessions is stronger evidence
 than one repeated twice inside a conversation. Interactive prompts remain
@@ -1298,9 +1298,9 @@ initiated.
 
 ## What the testing shows
 
-Refine Cycle has not been through a single validation pass. It has been through a
-long programme of them: synthetic scenario matrices run and re-run across many
-configurations, replays over corpora of real recorded conversations, ablations
+Refine Cycle went through a long programme of validation: synthetic scenario
+matrices run and re-run across many configurations, replays over corpora of
+real recorded conversations, ablations
 that put the shipped defaults against wider alternatives, and clean installs on
 both Linux and Windows hosts. That work is what the design rests on.
 
@@ -1315,29 +1315,29 @@ ends in a journaled refusal. Nothing is ever reported as applied that was not
 applied.
 
 **It reaches the right model, and the loop closes.** On both a Linux and a
-Windows host, live runs went to the exact model of the active session — one
+Windows host, live runs went to the exact model of the active session, one
 request each, no substitution, no silent fallback to something cheaper. On a
 current desktop host the whole cycle then ran end to end on a real session: the
 recurrence gate opened, the model returned one grounded proposal, and the
 journal recorded `prepared`, `applied`, `rollback_prepared` and `rolled_back`
-in turn — with the note gone from the store afterwards and the usefulness ledger
-carrying the edit, its fingerprint and its final outcome.
+in turn. The note was gone from the store afterwards, and the usefulness ledger
+carried the edit, its fingerprint and its final outcome.
 
-**It learns from real conversations, not only from scenarios.** Replayed over a
+**It learns from real conversations.** Replayed over a
 corpus of recorded sessions on the current build, the plugin produced grounded,
 applicable lessons on roughly half of the sessions that carried a genuine
-repeated failure — each naming the specific failure it was drawn from — and
+repeated failure — each naming the specific failure it was drawn from, and
 wrote nothing at all on the matched clean sessions, where writing nothing is the
 correct behaviour. An earlier build produced none of them: the proposal model
 kept omitting the fingerprint the apply bar requires, so every candidate was
 refused rather than written. That defect is gone.
 
-**The defaults are set by evidence, not by taste.** Ablations compared the
+**The defaults were chosen by measurement.** Ablations compared the
 shipped configuration against wider ones. Showing the proposer every eligible
 failure pattern instead of the strongest few made it measurably worse, so the
 narrower default stayed.
 
-**It was audited continuously, not signed off once.** Review ran the length of
+**It was audited continuously.** Review ran the length of
 the project rather than at the end of it: numbered rounds into the teens, each
 finding reproduced and specced before anything was changed, and the four
 `FINDING-*.md` documents in `docs/` are the ones still worth keeping after their
@@ -1348,7 +1348,7 @@ Most of those audits were run by agents that had also written the code, which is
 the weakest kind. So one was deliberately handed to a model with no part in
 writing it and no access to the authors' reasoning: it produced five hypotheses,
 all five held on inspection, and all five are fixed with regression tests proven
-to fail on the parent commit and pass after — see
+to fail on the parent commit and pass after; see
 [`docs/INDEPENDENT-REVIEW.md`](docs/INDEPENDENT-REVIEW.md). Two of them (a
 poisoned timestamp consuming the whole query budget; a session-scoped rule
 enforced against every session) had survived every self-review before it.
