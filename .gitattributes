@@ -1,2 +1,9 @@
 lesson_effect_checker.py text eol=lf
 lesson_effect_checker.py.sha256 text eol=lf
+
+# Route patches are applied with `git apply` against a Hermes checkout whose
+# sources are LF. A Windows clone with core.autocrlf=true would otherwise write
+# them out CRLF, every hunk would stop matching, and the installer would report
+# `incompatible` on a host the patch actually fits -- the silent-on-Windows
+# failure mode this project has already paid for once.
+*.patch text eol=lf
