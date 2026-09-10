@@ -25348,11 +25348,23 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertTrue(any("llm_invocation_unavailable" in message for message in messages))
 
     def test_a_complete_v021_topology_is_patched_not_partial(self):
-        """The moved 0.21 targets and marker table must classify as one route."""
+        """The moved 0.21 targets and marker table must classify as one route.
+
+        More than one bundled patch carries this topology -- v0.21.0 fits the 0.21.1
+        release tag, the 2026.9.10 rebase fits main after it -- and they are
+        indistinguishable by marker, so the host reports the newest of the family.
+        Pinning one filename here would break on every future rebase without
+        anything actually being wrong.
+        """
         import install
 
-        name = "invocation-route-v0.21.0.patch"
-        for rel, marker in install.PATCH_MARKERS[name].items():
+        family = [
+            candidate for candidate in install.patch_candidates()
+            if install.patch_markers(candidate) is install._V021_MARKERS
+        ]
+        self.assertTrue(family, "no bundled patch carries the 0.21 topology")
+        name = family[0].name
+        for rel, marker in install._V021_MARKERS.items():
             (self.src / rel).write_text(
                 f"BASE = True\n{marker} = True\n", encoding="utf-8"
             )
@@ -26082,6 +26094,23 @@ class InstallerPatchSelectionTests(InstallerPluginOnlyTests):
         ninth = install._patch_sort_key(Path("invocation-route-v2026.9.2.patch"))
         tenth = install._patch_sort_key(Path("invocation-route-v2026.10.1.patch"))
         self.assertLess(ninth, tenth, "v2026.9.2 must sort before v2026.10.1")
+
+    def test_every_bundled_patch_declares_its_own_marker_table(self):
+        """An unregistered patch silently inherits the legacy topology.
+
+        ``patch_markers()`` falls back to ``FILE_MARKERS`` for an unknown filename,
+        so dropping a patch into assets/ without a PATCH_MARKERS entry makes a host
+        it patches correctly look partial -- the failure the split marker tables
+        were introduced to end. Upstream moves fast enough that new patches are
+        routine, so the registration is asserted rather than remembered.
+        """
+        import install
+
+        unregistered = [
+            p.name for p in install.patch_candidates()
+            if p.name not in install.PATCH_MARKERS
+        ]
+        self.assertEqual(unregistered, [], "bundled patches missing a marker table")
 
     def test_user_modified_targets_are_dirty_not_incompatible(self):
         """A user's uncommitted edit to a target is dirty, not "no patch fits".

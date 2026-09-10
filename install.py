@@ -88,6 +88,13 @@ PATCH_MARKERS = {
     "invocation-route-v2026.8.16.patch": _LEGACY_MARKERS,
     "invocation-route-v2026.8.31.patch": _LEGACY_MARKERS,
     "invocation-route-v0.21.0.patch": _V021_MARKERS,
+    # Same nine files and markers as v0.21.0, re-anchored past the 0.21.1 release:
+    # upstream inserted lines inside two of that patch's context windows (a
+    # set_review_attended() pair in turn_context, track_in_interrupt_scope in
+    # turn_facade). Both patches stay bundled because their bases are disjoint --
+    # v0.21.0 is the one that fits the 0.21.1 release tag, this one fits main after
+    # it. Selection is by applicability, so a host only ever gets the one that fits.
+    "invocation-route-v2026.9.10.patch": _V021_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 

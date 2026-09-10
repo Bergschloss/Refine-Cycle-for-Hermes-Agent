@@ -218,7 +218,14 @@ and an invocation-bound smoke test to reach the proposer.
 | 0.20.1 | yes | yes | yes | yes, with the route patch |
 | 0.20.2 | yes | yes | yes | yes, with the route patch (subagent path verified end to end) |
 | 0.21.0 | yes, after confirming a `caution` scan | yes | yes | yes, with `invocation-route-v0.21.0.patch` |
-| 0.21.1 | yes, after confirming a `caution` scan | yes | yes | yes, with the same `invocation-route-v0.21.0.patch` |
+| 0.21.1 (release tag `2237be3559`) | yes, after confirming a `caution` scan | yes | yes | yes, with the same `invocation-route-v0.21.0.patch` |
+| 0.21.1 main after the release (`a0749d583a` and later) | yes, after confirming a `caution` scan | yes | yes | yes, with `invocation-route-v2026.9.10.patch` |
+
+Both 0.21.1 rows carry the same version string, which is why the installer picks
+by applicability instead: upstream inserted lines inside two of the 0.21.0
+patch's context windows shortly after cutting the release, so the release tag and
+the main branch above it need different patches. `--status` names the one it
+chose.
 
 
 ### A Hermes update removes the route patch
@@ -244,6 +251,18 @@ Measured on the 0.21.0 → 0.21.1 update: the checkout came back clean, the mark
 directory was gone, and the bundled 0.21.0 patch then applied unchanged to the
 new base — same eight files, its 37 host tests passing, and a proposal run
 afterwards reaching the session's own model in one request with no substitution.
+
+Measured again once upstream moved past that release tag (base `a0749d583a`,
+2026-09-10, ~1000 commits after the base the 0.21.0 patch was cut against): that
+patch now fails on `agent/turn_context.py` and `agent/turn_facade.py`, whose
+context windows gained upstream lines, and `--status` reports `incompatible`
+rather than half-applying — [issue #13](https://github.com/Bergschloss/Refine-Cycle-for-Hermes-Agent/issues/13).
+`invocation-route-v2026.9.10.patch` is the same patch re-anchored: it applies to
+`a0749d583a` and to main above it, reverse-applies for rollback, and its host test
+file passes 39 tests on both bases. Two of those 39 are new and fail on an
+otherwise identical tree without the single-request `create` — one shows a locked
+call re-sent as a stream, the other a credit-limited 402 answered with a second
+request carrying a clamped `max_tokens`.
 
 ### What is verified on 0.21.0
 
@@ -461,10 +480,17 @@ expose that binding to plugins. The installer ships one patch per Hermes base:
 - `assets/invocation-route-v2026.8.16.patch`
 - `assets/invocation-route-v2026.8.31.patch`
 - `assets/invocation-route-v0.21.0.patch`
+- `assets/invocation-route-v2026.9.10.patch`
 
 Each patch carries its own marker table and target topology. The 0.21.0 topology
 uses `gateway/run_inbound.py` and `agent/turn_facade.py` where the older hosts
-used `gateway/run.py` and `run_agent.py`.
+used `gateway/run.py` and `run_agent.py`. The 2026.9.10 patch shares that
+topology and differs only in where its hunks anchor, so it is the 0.21 patch for
+hosts above the 0.21.1 release tag. Its route-locked call also passes its own
+`create` into the relay seam: upstream now defaults that seam to the
+progress-hook wrapper, which re-sends a locked call as a stream and retries a
+credit-limited 402 with a smaller cap — two requests on a path whose contract is
+exactly one.
 
 Which patch fits a host is decided by trying each candidate with
 `git apply --check`, not by trusting a version string. This avoids accepting a

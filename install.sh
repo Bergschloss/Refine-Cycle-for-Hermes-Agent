@@ -160,13 +160,14 @@ select_patch() {
 }
 
 if ! select_patch \
+        "$REPO_DIR/assets/invocation-route-v2026.9.10.patch" \
         "$REPO_DIR/assets/invocation-route-v2026.8.31.patch" \
         "$REPO_DIR/assets/invocation-route-v2026.8.16.patch" \
         "$REPO_DIR/assets/invocation-route-v0.21.0.patch"; then
     fail "every bundled route patch does not apply to this Hermes checkout.
   Hermes HEAD : $HOST_DESC
-  Tried       : invocation-route-v2026.8.31.patch, invocation-route-v2026.8.16.patch,
-                invocation-route-v0.21.0.patch
+  Tried       : invocation-route-v2026.9.10.patch, invocation-route-v2026.8.31.patch,
+                invocation-route-v2026.8.16.patch, invocation-route-v0.21.0.patch
   Nothing was modified. This host needs a new route patch."
 fi
 
