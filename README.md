@@ -369,7 +369,7 @@ an earlier diagnostic; it disables scanning for the whole profile.
 
 ## Installation
 
-> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite, `/refine status`, and `/refine audit` are verified on Hermes 0.20.1 through 0.21.0. Only **new proposals** additionally require the matching host route patch; Hermes 0.21.0 uses `assets/invocation-route-v0.21.0.patch`. See [Hermes version support](#hermes-version-support).
+> **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite, `/refine status`, and `/refine audit` are verified on Hermes 0.20.1 through 0.21.1. Only **new proposals** additionally require the matching host route patch, and the installer picks it by applicability: 0.21.0 and the 0.21.1 release tag take `assets/invocation-route-v0.21.0.patch`, while 0.21.1 main and later take `assets/invocation-route-v2026.9.10.patch`. See [Hermes version support](#hermes-version-support).
 
 The plugin lives in `<HERMES_HOME>/plugins/refine/` — `~/.hermes/plugins/refine/`
 on Linux and macOS, and `%LOCALAPPDATA%\hermes\plugins\refine\` on Windows.
