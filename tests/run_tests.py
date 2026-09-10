@@ -538,6 +538,44 @@ def load_plugin_init():
 plugin_init = load_plugin_init()
 
 
+@contextmanager
+def hook_workers():
+    """Collect the threads a hook starts inside the block, so they can be joined.
+
+    Session hooks hand their work to a bare daemon thread, so the effect a test
+    wants to observe lands on that thread rather than the calling one. Waiting a
+    wall-clock second for it turns the test into a coin flip on a loaded runner:
+    the Windows CI job runs this suite in ~290s against ~55s on a Linux host, and
+    ``cleared.wait(1)`` in the prompt-note scope test went red there on one push
+    and green on the next with nothing in between. A red run that is red at random
+    is worse than a slow one, because it trains everyone to re-run instead of read.
+
+    Recording the thread at ``start()`` rather than scanning ``threading.enumerate()``
+    by name means it cannot be missed by finishing early and does not silently stop
+    working if the production thread name changes. Join it with a timeout used as a
+    hang guard, then assert the effect -- no clock in the assertion.
+    """
+    started: list[threading.Thread] = []
+    real_start = threading.Thread.start
+
+    def record_start(self):
+        real_start(self)
+        started.append(self)
+
+    with patch.object(threading.Thread, "start", record_start):
+        yield started
+
+
+def join_hook_workers(case, workers, timeout=30.0):
+    """Join every captured worker; fail if one is still running (a hang, not a race)."""
+    for worker in workers:
+        worker.join(timeout)
+    case.assertFalse(
+        [worker.name for worker in workers if worker.is_alive()],
+        "a hook worker was still running after the join guard",
+    )
+
+
 def _fixture(*parts: str) -> str:
     """Assemble an adversarial test fixture at runtime.
 
@@ -11341,8 +11379,12 @@ class RefineTests(unittest.TestCase):
             return result
 
         with patch.object(plugin_init.journal, "clear_session_prompt_notes", side_effect=observe_clear):
-            plugin_init._on_session_end(session_id="session")
-            self.assertTrue(cleared.wait(1))
+            # Session end clears on its worker thread, so the wait is a join on that
+            # thread rather than a second on the clock (see hook_workers).
+            with hook_workers() as workers:
+                plugin_init._on_session_end(session_id="session")
+            join_hook_workers(self, workers)
+            self.assertTrue(cleared.is_set(), "session end never cleared the session notes")
         self.assertNotIn(
             "ending request", plugin_init._on_pre_llm_call(session_id="session")["context"]
         )
@@ -11355,7 +11397,10 @@ class RefineTests(unittest.TestCase):
         cleared = threading.Event()
         with patch.object(plugin_init.journal, "clear_session_prompt_notes", side_effect=observe_clear):
             plugin_init._on_session_reset(session_id="session")
-            self.assertTrue(cleared.wait(1))
+            # Reset clears on the caller's thread: it has already happened by the time
+            # the hook returns. Asserting that directly also pins it as synchronous --
+            # a reset that deferred the clear would leave the note injectable.
+            self.assertTrue(cleared.is_set(), "session reset deferred the note clear")
         self.assertNotIn(
             "reset request", plugin_init._on_pre_llm_call(session_id="session")["context"]
         )
