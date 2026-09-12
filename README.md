@@ -4,6 +4,10 @@
 
 **Your agent keeps repeating the same mistake. This makes it stop.**
 
+**Measured: with a lesson in memory the agent does the right thing 49.6% of the
+time. Without it, 21.1%.** 133 controlled probes, four arms, published with the
+raw data: [research report](docs/RESEARCH-REPORT-2026-09-12.md).
+
 **Refine Cycle** looks across recent sessions, finds those repeating problems, and
 saves one small lesson when the evidence is strong enough. Later, it checks
 whether the same problem came back.
