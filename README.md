@@ -20,9 +20,8 @@ It adapts the `/refine` concept from
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
 (Continual Harness) to the Hermes plugin system.
 
-**Measured: Hermes on its own handles 8.9–21.1% of its repeating mistakes
-correctly → 49.6–57.0% with the plugin.** 133 controlled probes:
-[research report](docs/RESEARCH-REPORT-2026-09-12.md).
+**Measured:** Hermes on its own handles **8.9–21.1%** of its repeating mistakes
+correctly → **49.6–57.0%** with the plugin. 133 controlled probes.
 
 [**Install on your Hermes host →**](#installation)
 
