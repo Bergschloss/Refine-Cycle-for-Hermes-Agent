@@ -375,6 +375,50 @@ production, which ours does not have.
 None of this touches Run 1. The 133-probe result stands unchanged: the lessons the plugin
 writes today change behaviour, and both placebos sit flat.
 
+### 4.5 Runs 6 and 7 — does a lesson survive a full memory
+
+Every run above injected exactly one lesson. A real store holds many, sharing one note
+that the host reads before each request, and that note has a size limit: 2200 characters
+as Hermes ships, raised to 4400 by this plugin. Whether a lesson still fires when it is not
+alone had never been measured, and we had been telling users the limit could not rise
+because the model stops holding the whole note. That was a guess.
+
+The detector is the lesson that scored 12/12 in Runs 3 and 4, which is the most sensitive
+choice available: at ceiling, any suppression shows as a drop. Filler is the other fourteen
+lessons under test and their topic placebos, all published. Five load levels by measured
+note length, 12 probes each. Pre-registrations and reports:
+[`docs/evidence/run6-memory-load/`](evidence/run6-memory-load/) and
+[`docs/evidence/run7-memory-position/`](evidence/run7-memory-position/).
+
+| note length | Run 6, lesson first | Run 7, lesson in the middle |
+|---|---|---|
+| 161 | 12/12 | 11/11 |
+| 1,119 | 12/12 | 11/11 |
+| 2,246 (Hermes default) | 12/12 | 10/11 |
+| 4,432 (this plugin's floor) | 12/12 | 11/11 |
+| 8,811 | 12/12 | 10/11 |
+
+No level degraded in either run. The host limit was set high enough that nothing was
+truncated, verified per cell, so this measures the model rather than the truncator.
+
+Run 6's pre-registration called first position "the pessimistic condition for recall". That
+was wrong and the error is ours: first and last are the strong positions, and the middle is
+where things get lost. Run 6 therefore measured the most favourable position while
+describing it as the worst, which is why Run 7 exists and why it changes exactly one
+variable.
+
+Run 7 lost one probe at every level to a provider rate limit, excluded from the
+denominators per its rule. That probe passed at every level of Run 6, so its absence works
+against the result rather than for it. Its two failures, at 2,246 and 8,811 characters with
+a clean level between them, do not form a gradient.
+
+What this licenses, per the pre-registered outcome: the reason we had been giving for
+keeping the limit at 4400 is wrong, and we say so here. What it does not license is
+raising the default. The detector names its graded call outright, which is the strongest
+form a lesson can take; a vaguer one may degrade earlier and was not measured. Nothing
+above 8,811 characters was tested, and the plugin's limit is a floor, so an operator who
+sets a higher number keeps it.
+
 ---
 
 ## 5. Release v1.3.3 — verification, not an experiment
