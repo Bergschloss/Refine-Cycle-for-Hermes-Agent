@@ -21,7 +21,7 @@ It adapts the `/refine` concept from
 (Continual Harness) to the Hermes plugin system.
 
 **Measured:** Hermes on its own handles **8.9–21.1%** of its repeating mistakes
-correctly → **49.6–57.0%** with the plugin. 133 controlled probes.
+correctly → **49.6–57.0%** with the plugin.
 
 [**Install on your Hermes host →**](#installation)
 
