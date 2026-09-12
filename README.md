@@ -1330,6 +1330,25 @@ real recorded conversations, ablations
 that put the shipped defaults against wider alternatives, and clean installs on
 both Linux and Windows hosts. That work is what the design rests on.
 
+**It was measured against controls, not only observed.** A pre-registered
+experiment ran 133 probes across four arms, every probe in all four. With the
+lesson in memory the agent did the graded thing 66 times; with memory empty, 28.
+Both placebos sat flat: a topical sentence naming the failure domain scored 28,
+and a scramble of the lesson's own vocabulary scored 30. The gain therefore comes
+from what the lesson says rather than from the fact that something was written.
+Risk difference +28.6 points, and all 38 discordant pairs ran the same way.
+
+Read that with its bounds. Nine of the fifteen lessons pass by making the
+escalation call their own text names, so what is measured is instructed
+compliance on a matched trigger, not learning. It ran on one route, and the same
+lessons produced an opposite-sign effect on a different route in an earlier
+pilot. Two lessons passed in every arm and four failed in every arm, so 41% of
+the probes could not discriminate at all. The full report carries the frozen
+decider's output, the per-lesson table, both pre-registered decision rules with
+their hashes, and a sign error we found in our own analysis script:
+[`docs/RESEARCH-REPORT-2026-09-12.md`](docs/RESEARCH-REPORT-2026-09-12.md), with
+the artifacts in [`docs/evidence/`](docs/evidence/).
+
 **It does not damage anything.** Sessions where writing nothing is the correct
 behaviour receive no writes. Every rollback restores its target byte for byte.
 Live memory, journal and configuration are untouched by the runs themselves,
