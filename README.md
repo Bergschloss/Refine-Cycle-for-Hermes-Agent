@@ -4,10 +4,6 @@
 
 **Your agent keeps repeating the same mistake. This makes it stop.**
 
-**Measured: Hermes on its own handles 21.1% of its repeating mistakes correctly
-→ 49.6% with the plugin.** 133 controlled probes:
-[research report](docs/RESEARCH-REPORT-2026-09-12.md).
-
 **Refine Cycle** looks across recent sessions, finds those repeating problems, and
 saves one small lesson when the evidence is strong enough. Later, it checks
 whether the same problem came back.
@@ -23,6 +19,10 @@ runs.
 It adapts the `/refine` concept from
 [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
 (Continual Harness) to the Hermes plugin system.
+
+**Measured: Hermes on its own handles 21.1% of its repeating mistakes correctly
+→ 49.6% with the plugin.** 133 controlled probes:
+[research report](docs/RESEARCH-REPORT-2026-09-12.md).
 
 [**Install on your Hermes host →**](#installation)
 
