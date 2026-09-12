@@ -369,6 +369,23 @@ def _parse_prompt_note_rule(content):
             r"\s+(?:cli|command|tool|binary|utility|mcp|api|sdk)$", "",
             target, flags=re.I,
         ).lower()
+        # The tail of "instead of ..." is prose as often as it is a name. "use
+        # execute_code with Python code instead of passing code to terminal"
+        # yielded target="passing code to terminal", which matches no tool under
+        # the exact matcher or the older substring one. Measured on the live host:
+        # BOTH block rules that existed there had a clause for a target, so every
+        # prompt-note rule on that host was inert while reading as enforcement.
+        # Same decision as the condition side: read an identity out of the tail,
+        # or build no rule. `_tool_identity` is deliberately the SAME gate the
+        # condition side uses -- one vocabulary for what may be enforced, so the
+        # two sides cannot drift -- and it runs AFTER the normalisation above, so
+        # a target that survives is byte-identical to the one the validator's own
+        # normaliser (`core._reroute_target_is_load_bearing`) computes from the
+        # same text. This can therefore only refuse a note the validator already
+        # inspected; it can never produce a target the validator did not see.
+        target = _tool_identity(target)
+        if not target:
+            return None
         # If the condition or raw target mentions tool/MCP/API, force block_tool.
         is_tool_context = bool(re.search(
             r"\b(?:tool|mcp|api|sdk)\b",
@@ -514,7 +531,14 @@ def _condition_tool(cond):
 
 
 def _tool_identity(word):
-    """A condition word as an enforceable tool name, or "" if it is not one."""
+    """A note's word as an enforceable tool name, or "" if it is not one.
+
+    Shared by both sides of a note: the condition ("when write_file reports …")
+    and the action's reroute tail ("… instead of the terminal tool"). One
+    vocabulary on purpose. The two sides read different grammar, but "what counts
+    as a name we may enforce against" is one question, and answering it twice is
+    how the answers drift.
+    """
     identity = (word or "").strip().strip(".:-")
     if identity in _COND_TOOL_STOPWORDS:
         return ""

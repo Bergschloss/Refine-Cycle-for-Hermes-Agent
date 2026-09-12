@@ -5603,6 +5603,125 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(rule["target"], "make")
         self.assertIn("ccache", rule["action"])
 
+    def test_reroute_tail_that_names_a_tool_extracts_it_and_enforces(self):
+        """The reroute target must be an identity, and it must actually fire.
+
+        "use X instead of Y" took Y from the tail of the sentence, so a tail that
+        is prose became the target. Where the tail DOES name a tool, that name is
+        what the rule must carry -- and the rule must reach the tool.
+        """
+        self.addCleanup(plugin_init._update_block_rules, [])
+        # A bare name in the tail keeps the target it has today. The classifier
+        # reads `terminal` as a binary (`_looks_like_cli`), so this rule is a
+        # block_binary; the tool-context phrasing below is what reaches the tool.
+        bare = plugin_init._parse_prompt_note_rule(
+            "When passing Python code to terminal, use execute_code instead of terminal."
+        )
+        self.assertIsNotNone(bare)
+        self.assertEqual(bare["target"], "terminal")
+
+        note = (
+            "When passing Python code to terminal, use execute_code instead of "
+            "the terminal tool."
+        )
+        rule = plugin_init._parse_prompt_note_rule(note)
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule["type"], "block_tool")
+        self.assertEqual(rule["target"], "terminal")
+        plugin_init._update_block_rules(
+            [{"content": note, "scope": "global", "session_id": ""}]
+        )
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            blocked = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "python -c pass"},
+                session_id="sid-test",
+            )
+            other = plugin_init._on_pre_tool_call(
+                tool_name="read_file", args={"path": "x"}, session_id="sid-test",
+            )
+        self.assertIsNotNone(blocked, "a reroute away from a tool must reach it")
+        self.assertEqual(blocked["action"], "block")
+        self.assertIsNone(other, "an unrelated tool must not be blocked")
+
+    def test_reroute_tail_that_is_prose_yields_no_rule(self):
+        """The action side of the condition bug, measured live on the host.
+
+        Both block rules that existed on the production host had a prose clause
+        for a target -- "passing code to terminal", "executing it as a shell
+        command via terminal" -- so neither matched any tool under the exact
+        matcher or the older substring one. Every prompt-note rule on that host
+        was inert while looking like enforcement, and nothing reported it.
+        """
+        for note in (
+            # The shape: the tail continues the sentence instead of naming a tool.
+            "When passing Python code to terminal, use execute_code with Python "
+            "code instead of passing code to terminal.",
+            # The two live notes, verbatim.
+            "When using terminal, pass shell commands in command; use "
+            "execute_code with Python code instead of passing code to terminal.",
+            "When trying to invoke a Hermes slash command (e.g., /refine, "
+            "/refine-cycle), use the slash command directly in chat rather than "
+            "executing it as a shell command via terminal.",
+        ):
+            with self.subTest(note=note[:48]):
+                self.assertIsNone(plugin_init._parse_prompt_note_rule(note))
+
+    def test_every_working_reroute_note_keeps_its_target(self):
+        """Behaviour preservation, name by name.
+
+        These are the reroute notes the rest of the suite and the B1/core-tool
+        guards depend on. The parser's target and the validator's own normaliser
+        (`core._reroute_target_is_load_bearing`) must keep agreeing: the parser
+        may refuse a note the validator inspects, never invent a target the
+        validator never saw.
+        """
+        expected = {
+            "When the build fails with a stale cache, use ccache instead of make.": "make",
+            "When calling curl, use wget instead of curl.": "curl",
+            "When fetching pages, use httpie instead of curl.": "curl",
+            "When calling sed, use awk instead of sed.": "sed",
+            "When calling git, use echo instead of git.": "git",
+            "When calling python, use noop instead of python.": "python",
+            "When installing, use yarn instead of npm.": "npm",
+            "When connecting, use telnet instead of ssh.": "ssh",
+            "When calling the git CLI, use gh instead of the git CLI.": "git",
+            "When encountering timeouts, use echo instead of terminal tool.": "terminal",
+            "When reading files, use cat instead of read_file tool.": "read_file",
+            "When writing files, use patch instead of write_file tool.": "write_file",
+            "When managing skills, use manual edit instead of skill_manage tool.": "skill_manage",
+            "When calling python3.11, use python3.10 instead of python3.11.": "python3.11",
+            "When calling node.js, use deno instead of node.js.": "node.js",
+        }
+        for note, target in expected.items():
+            with self.subTest(note=note[:40]):
+                rule = plugin_init._parse_prompt_note_rule(note)
+                self.assertIsNotNone(rule, "this note builds a rule today")
+                self.assertEqual(rule["target"], target)
+                # Whatever the parser targets, the validator's guard must see the
+                # same string, or a load-bearing reroute is bypassable by phrasing.
+                guard = core._reroute_target_is_load_bearing(note.split(", ", 1)[1])
+                self.assertIn(guard, ("", rule["target"]))
+
+        # And enforcement, both rule kinds: a binary through terminal, a tool by
+        # name.
+        self.addCleanup(plugin_init._update_block_rules, [])
+        plugin_init._update_block_rules([
+            {"content": "When calling curl, use wget instead of curl.",
+             "scope": "global", "session_id": ""},
+            {"content": "When reading files, use cat instead of read_file tool.",
+             "scope": "global", "session_id": ""},
+        ])
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            binary = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "curl http://x"},
+                session_id="sid-test",
+            )
+            tool = plugin_init._on_pre_tool_call(
+                tool_name="read_file", args={"path": "x"}, session_id="sid-test",
+            )
+        self.assertIsNotNone(binary, "block_binary must still fire")
+        self.assertIsNotNone(tool, "block_tool must still fire")
+
     def test_param_note_produces_require_fields(self):
         rule = plugin_init._parse_prompt_note_rule(
             "When calling the maps tool, always include both 'origin' and "
