@@ -310,7 +310,7 @@ _BLOCK_RULES: list = []  # list of dicts: {type, target, action, ...}
 _PROPOSER_CHILD_SESSIONS: set = set()
 
 def _update_block_rules(notes):
-    """Parse prompt-notes into structured block rules.
+    """Parse each prompt-note policy line into an independently scoped rule.
 
     A rule inherits its note's ``scope``/``session_id`` unchanged. Without
     this, a note scoped to one session (``scope == "session"``) built a rule
@@ -319,22 +319,34 @@ def _update_block_rules(notes):
     else's conversation. The prompt-injection path a few lines below this one
     (``_on_pre_llm_call``) already filters by scope before injecting text;
     the block path must apply the identical filter before enforcing.
+
+    Validation permits two policy lines. They are separate policies, so they
+    must be parsed separately: parsing the complete note can pair the first
+    line's condition with the second line's action and persistently block the
+    wrong tool.
     """
     global _BLOCK_RULES
     rules = []
     for note in (notes or []):
-        content = note.get("content", "")
-        rule = _parse_prompt_note_rule(content)
-        if rule:
-            rule["scope"] = note.get("scope", "global")
-            rule["session_id"] = note.get("session_id", "")
-            rules.append(rule)
+        for content in str(note.get("content", "")).splitlines():
+            rule = _parse_prompt_note_rule(content.strip())
+            if rule:
+                rule["scope"] = note.get("scope", "global")
+                rule["session_id"] = note.get("session_id", "")
+                rules.append(rule)
     _BLOCK_RULES = rules
 
 
 def _parse_prompt_note_rule(content):
-    """Extract a structured block rule from a prompt-note string."""
-    parts = content.split(", ", 1)
+    """Extract one structured block rule from one prompt-note policy line."""
+    # The validator permits up to two independent policy lines. Callers that
+    # need every rule split them before calling this singular parser; refusing
+    # multiline input here prevents a future caller from pairing one line's
+    # condition with another line's action.
+    lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
+    parts = lines[0].split(", ", 1)
     if len(parts) < 2:
         return None
     action_text = parts[1].rstrip(".")
@@ -528,13 +540,14 @@ def _looks_like_tool(word):
 
 
 def _tool_matches(tool_name: str, target: str) -> bool:
-    """Match a tool name against a target, handling mcp__ and namespace prefixes."""
+    """Match an exact tool identity, including supported namespace prefixes."""
     if not tool_name or not target:
         return False
     tn, tgt = tool_name.lower(), target.lower()
-    if tn == tgt or tgt in tn:
+    if tn == tgt:
         return True
-    # Handle mcp__server__tool and namespace:tool patterns
+    # Namespace delimiters are identity boundaries. An arbitrary substring is
+    # not: target ``edit`` must never match an unrelated ``credit_check`` tool.
     return tn.endswith("__" + tgt) or tn.endswith(":" + tgt) or tn.endswith("." + tgt)
 
 
