@@ -1,0 +1,81 @@
+COMMAND:
+python3 /home/ubuntu/refine-exp/preregistration/analysis_decider.py /home/ubuntu/refine-exp/model-usefulness-benchmark/out/crossed-520/results_130.csv
+
+DECIDER_SHA256_VERIFIED:
+964fc365a27593cb254097f9df404036cbbf7a605c5c8906e277fd752afe1db9
+
+INPUT_CSV_SHA256:
+63602c1794270df67637590c40ce4ff49e330d18a77233e6bcd6aa98847437a5
+
+STDOUT:
+SUPPORTED
+{
+  "C3_lesson_vs_scramble_p": 0.0,
+  "C3_rd": 0.2769,
+  "contrasts": [
+    {
+      "arm_c": "nothing",
+      "arm_t": "lesson",
+      "ci": [
+        0.1567,
+        0.4279
+      ],
+      "n01": 0,
+      "n10": 38,
+      "n_pairs": 130,
+      "p_holm": 0.0,
+      "p_uncorr": 0.0,
+      "rd": 0.2923,
+      "se": 0.0692,
+      "significant": true
+    },
+    {
+      "arm_c": "placebo_topic",
+      "arm_t": "lesson",
+      "ci": [
+        0.1477,
+        0.4215
+      ],
+      "n01": 0,
+      "n10": 37,
+      "n_pairs": 130,
+      "p_holm": 0.0,
+      "p_uncorr": 0.0,
+      "rd": 0.2846,
+      "se": 0.0699,
+      "significant": true
+    },
+    {
+      "arm_c": "placebo_scramble",
+      "arm_t": "lesson",
+      "ci": [
+        0.1404,
+        0.4135
+      ],
+      "n01": 1,
+      "n10": 37,
+      "n_pairs": 130,
+      "p_holm": 0.0,
+      "p_uncorr": 0.0,
+      "rd": 0.2769,
+      "se": 0.0697,
+      "significant": true
+    }
+  ],
+  "crossed_items": 130,
+  "gate0_ok": true,
+  "gate0_reasons": [],
+  "reason": "lesson beats nothing (C1 p=0.0000, RD=0.292, 95% CI [ 0.157,  0.428]) AND beats the topic-placebo (C2 p=0.0000, RD=0.285): the actionable content adds value beyond mere injection or priming",
+  "trials_per_arm": {
+    "lesson": 130,
+    "nothing": 130,
+    "placebo_scramble": 130,
+    "placebo_topic": 130
+  },
+  "verdict": "SUPPORTED"
+}
+
+STDERR:
+
+EXIT_CODE:
+0

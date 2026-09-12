@@ -1,0 +1,3593 @@
+[
+  {
+    "item_id": "probe_08d70bc36553_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_01",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_01",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_01",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_01",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_02",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_02",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_02",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_02",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_03",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_03",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_03",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_03",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_04",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_04",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_04",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_04",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_05",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_05",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_05",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_05",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_06",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_06",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_06",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_06",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_07",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_07",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_07",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_07",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_08",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_08",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_08",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_08",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_09",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_09",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_09",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_09",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_10",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_10",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_10",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_10",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_10",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_11",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_11",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_11",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_11",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_11",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_08d70bc36553_12",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_08d70bc36553_12",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_08d70bc36553_12",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_08d70bc36553_12",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_08d70bc36553_12",
+        "fingerprint": "08d70bc36553",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_01",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_01",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_01",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_01",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_02",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_02",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_02",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_02",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_03",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_03",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_03",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_03",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_04",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_04",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_04",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_04",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_05",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_05",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_05",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_05",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_06",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_06",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_06",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_06",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_07",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_07",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_07",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_07",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_2b4ff368ae22_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_2b4ff368ae22_08",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "lesson": {
+        "probe_id": "probe_2b4ff368ae22_08",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_2b4ff368ae22_08",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_2b4ff368ae22_08",
+        "fingerprint": "2b4ff368ae22",
+        "domain_tool": "mcp__github__get_file_contents"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_01",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_01",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_01",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_01",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_02",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_02",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_02",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_02",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_03",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_03",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_03",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_03",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_04",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_04",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_04",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_04",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_05",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_05",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_05",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_05",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_06",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_06",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_06",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_06",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_07",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_07",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_07",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_07",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_348929cb76c6_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_348929cb76c6_08",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "lesson": {
+        "probe_id": "probe_348929cb76c6_08",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_348929cb76c6_08",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_348929cb76c6_08",
+        "fingerprint": "348929cb76c6",
+        "domain_tool": "mcp__jules__get_activities_since"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_01",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_01",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_01",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_01",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_02",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_02",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_02",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_02",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_03",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_03",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_03",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_03",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_04",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_04",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_04",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_04",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_05",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_05",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_05",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_05",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_06",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_06",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_06",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_06",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_07",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_07",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_07",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_07",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_08",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_08",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_08",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_08",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_48ca17b56a07_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_48ca17b56a07_09",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_48ca17b56a07_09",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_48ca17b56a07_09",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_48ca17b56a07_09",
+        "fingerprint": "48ca17b56a07",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_01",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_01",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_01",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_01",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_02",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_02",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_02",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_02",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_03",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_03",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_03",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_03",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_04",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_04",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_04",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_04",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_05",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_05",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_05",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_05",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_06",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_06",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_06",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_06",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_07",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_07",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_07",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_07",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_08",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_08",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_08",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_08",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_51ad58a9a362_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_51ad58a9a362_09",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_51ad58a9a362_09",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_51ad58a9a362_09",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_51ad58a9a362_09",
+        "fingerprint": "51ad58a9a362",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_01",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_01",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_01",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_01",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_02",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_02",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_02",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_02",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_03",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_03",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_03",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_03",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_04",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_04",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_04",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_04",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_05",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_05",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_05",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_05",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_06",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_06",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_06",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_06",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_07",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_07",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_07",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_07",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_08",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_08",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_08",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_08",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_64e7f67b93e6_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_64e7f67b93e6_09",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "lesson": {
+        "probe_id": "probe_64e7f67b93e6_09",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_64e7f67b93e6_09",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_64e7f67b93e6_09",
+        "fingerprint": "64e7f67b93e6",
+        "domain_tool": "mcp__github__merge_pull_request"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_01",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_01",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_01",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_01",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_02",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_02",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_02",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_02",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_03",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_03",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_03",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_03",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_04",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_04",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_04",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_04",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_05",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_05",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_05",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_05",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_06",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_06",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_06",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_06",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_07",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_07",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_07",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_07",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_08",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_08",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_08",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_08",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_751789fa6c33_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_751789fa6c33_09",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_751789fa6c33_09",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_751789fa6c33_09",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_751789fa6c33_09",
+        "fingerprint": "751789fa6c33",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_01",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_01",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_01",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_01",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_02",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_02",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_02",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_02",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_03",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_03",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_03",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_03",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_04",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_04",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_04",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_04",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_05",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_05",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_05",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_05",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_06",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_06",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_06",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_06",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_07",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_07",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_07",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_07",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_08",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_08",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_08",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_08",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_935cfb594cff_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_935cfb594cff_09",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_935cfb594cff_09",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_935cfb594cff_09",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_935cfb594cff_09",
+        "fingerprint": "935cfb594cff",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_01",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_01",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_01",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_01",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_02",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_02",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_02",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_02",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_03",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_03",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_03",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_03",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_04",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_04",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_04",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_04",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_05",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_05",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_05",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_05",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_06",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_06",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_06",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_06",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_07",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_07",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_07",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_07",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_08",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_08",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_08",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_08",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_a774048131e2_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_a774048131e2_09",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "lesson": {
+        "probe_id": "probe_a774048131e2_09",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_a774048131e2_09",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_a774048131e2_09",
+        "fingerprint": "a774048131e2",
+        "domain_tool": "PowerShell"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_01",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_01",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_01",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_01",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_02",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_02",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_02",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_02",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_03",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_03",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_03",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_03",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_04",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_04",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_04",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_04",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_05",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_05",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_05",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_05",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_06",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_06",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_06",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_06",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_07",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_07",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_07",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_07",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_08",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_08",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_08",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_08",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c2e322e81368_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c2e322e81368_09",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_c2e322e81368_09",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c2e322e81368_09",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c2e322e81368_09",
+        "fingerprint": "c2e322e81368",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_01",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_01",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_01",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_01",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_02",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_02",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_02",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_02",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_03",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_03",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_03",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_03",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_04",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_04",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_04",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_04",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_05",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_05",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_05",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_05",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_06",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_06",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_06",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_06",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_07",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_07",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_07",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_07",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_c9def7291693_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_c9def7291693_08",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_c9def7291693_08",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_c9def7291693_08",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_c9def7291693_08",
+        "fingerprint": "c9def7291693",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_01",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_01",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_01",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_01",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_02",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_02",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_02",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_02",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_03",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_03",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_03",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_03",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_04",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_04",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_04",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_04",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_05",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_05",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_05",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_05",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_06",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_06",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_06",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_06",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_07",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_07",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_07",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_07",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_d9227f479b2b_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_d9227f479b2b_08",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_d9227f479b2b_08",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_d9227f479b2b_08",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_d9227f479b2b_08",
+        "fingerprint": "d9227f479b2b",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_01",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_01",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_01",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_01",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_02",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_02",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_02",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_02",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_03",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_03",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_03",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_03",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_04",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_04",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_04",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_04",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_05",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_05",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_05",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_05",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_06",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_06",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_06",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_06",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_07",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_07",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_07",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_07",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_08",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_08",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_08",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_08",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_e9d240f906dc_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_e9d240f906dc_09",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "lesson": {
+        "probe_id": "probe_e9d240f906dc_09",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_e9d240f906dc_09",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_e9d240f906dc_09",
+        "fingerprint": "e9d240f906dc",
+        "domain_tool": "mcp__jules__create_coding_task"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_01",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_01",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_01",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_01",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_02",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_02",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_02",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_02",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_03",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_03",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_03",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_03",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_04",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_04",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_04",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_04",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_05",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_05",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_05",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_05",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_06",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_06",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_06",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_06",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_07",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_07",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_07",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_07",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_08",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_08",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_08",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_08",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_f0db28a1c990_09",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_f0db28a1c990_09",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_f0db28a1c990_09",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_f0db28a1c990_09",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_f0db28a1c990_09",
+        "fingerprint": "f0db28a1c990",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_01",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_01",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_01",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_01",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_01",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_02",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_02",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_02",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_02",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_02",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_03",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_03",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_03",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_03",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_03",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_04",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_04",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_04",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_04",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_04",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_05",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_05",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_05",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_05",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_05",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_06",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_06",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_06",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_06",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_06",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_07",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_07",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_07",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_07",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_07",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  },
+  {
+    "item_id": "probe_fb25ce8f2797_08",
+    "arms": {
+      "nothing": {
+        "probe_id": "probe_fb25ce8f2797_08",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "lesson": {
+        "probe_id": "probe_fb25ce8f2797_08",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_scramble": {
+        "probe_id": "probe_fb25ce8f2797_08",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      },
+      "placebo_topic": {
+        "probe_id": "probe_fb25ce8f2797_08",
+        "fingerprint": "fb25ce8f2797",
+        "domain_tool": "Bash"
+      }
+    },
+    "all_probe_ids_match": true,
+    "all_fingerprints_match": true
+  }
+]
