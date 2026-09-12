@@ -5611,10 +5611,10 @@ class RefineTests(unittest.TestCase):
         what the rule must carry -- and the rule must reach the tool.
         """
         self.addCleanup(plugin_init._update_block_rules, [])
-        # A bare name in the tail keeps the target it has today. Which KIND of
-        # rule it becomes is the host's answer, not this test's concern -- see
-        # test_reroute_kind_comes_from_the_host_tool_registry; in this process no
-        # registry is populated, so the kind falls back to the name's shape.
+        # A bare name in the tail keeps the target and kind it had before the
+        # prose-tail fix. The classifier reads `terminal` as a binary
+        # (`_looks_like_cli`), so this rule is block_binary; the tool-context
+        # phrasing below is what reaches the tool.
         bare = plugin_init._parse_prompt_note_rule(
             "When passing Python code to terminal, use execute_code instead of terminal."
         )
@@ -5723,112 +5723,77 @@ class RefineTests(unittest.TestCase):
         self.assertIsNotNone(binary, "block_binary must still fire")
         self.assertIsNotNone(tool, "block_tool must still fire")
 
-    def test_reroute_kind_comes_from_the_host_tool_registry(self):
-        """A note naming a real TOOL must produce a tool rule, not a binary rule.
+    def test_one_character_cli_reroute_target_still_enforces(self):
+        """R is a real executable and was inside the old parser's domain.
 
-        `_looks_like_cli` reads `terminal` as a CLI name, so "use execute_code
-        instead of terminal" became a block_binary — a rule that only ever
-        inspects `terminal` command strings and so never reaches the tool the
-        note is about. It looked correct, which made it worse than the dead
-        rules: it silently enforced something the note never asked for.
+        The action-tail identity gate reused the condition-side tool-name regex,
+        whose second ``+`` requires at least two characters. That made an
+        accepted, previously enforceable reroute away from the R executable
+        silently become advice only -- exactly what the preservation requirement
+        forbids.
         """
-        self.addCleanup(plugin_init._update_block_rules, [])
-        note = (
-            "When passing Python code to terminal, use execute_code instead of terminal."
+        note = "When plotting data, use python instead of R."
+        self.assertIsNone(
+            core._prompt_note_content_error(note, check_rendered_size=False),
+            "precondition: this is an accepted prompt note",
         )
-        # Precondition: the shape-based classifier disagrees, which is the bug.
-        self.assertTrue(plugin_init._looks_like_cli("terminal"))
-        with patch.object(
-            plugin_init, "_host_tool_names",
-            return_value={"terminal", "read_file", "execute_code"},
-        ):
-            rule = plugin_init._parse_prompt_note_rule(note)
-            self.assertIsNotNone(rule)
-            self.assertEqual(rule["type"], "block_tool")
-            self.assertEqual(rule["target"], "terminal")
-            plugin_init._update_block_rules(
-                [{"content": note, "scope": "global", "session_id": ""}]
-            )
-            with patch.object(config, "prompt_notes_enabled", return_value=True):
-                blocked = plugin_init._on_pre_tool_call(
-                    tool_name="terminal", args={"command": "python -c pass"},
-                    session_id="sid-test",
-                )
-                other = plugin_init._on_pre_tool_call(
-                    tool_name="write_file", args={"path": "x", "content": "y"},
-                    session_id="sid-test",
-                )
-        self.assertIsNotNone(blocked, "the rule must reach the tool it names")
-        self.assertEqual(blocked["action"], "block")
-        self.assertIsNone(other, "an unrelated tool must not be blocked")
-
-    def test_reroute_kind_falls_back_visibly_when_the_registry_is_unreadable(self):
-        """A kind that depends on whether a lookup succeeded is worse than one
-        that is consistently wrong. So the unknown case keeps TODAY's behaviour,
-        and says so once instead of silently picking a side."""
-        plugin_init._TOOL_REGISTRY_FALLBACK_LOGGED = False
-        self.addCleanup(
-            setattr, plugin_init, "_TOOL_REGISTRY_FALLBACK_LOGGED", False
-        )
-        note = (
-            "When passing Python code to terminal, use execute_code instead of terminal."
-        )
-        with patch.object(plugin_init, "_host_tool_names", return_value=None):
-            with self.assertLogs(plugin_init.logger, level="INFO") as logged:
-                rule = plugin_init._parse_prompt_note_rule(note)
-            # Same rule the parser built before the lookup existed.
-            self.assertEqual(rule["type"], "block_binary")
-            self.assertEqual(rule["target"], "terminal")
-            self.assertTrue(
-                any("registry" in line for line in logged.output),
-                f"the fallback must be visible: {logged.output}",
-            )
-            # And once per process, not once per turn.
-            for _ in range(3):
-                plugin_init._parse_prompt_note_rule(note)
-        self.assertTrue(plugin_init._TOOL_REGISTRY_FALLBACK_LOGGED)
-
-    def test_reroute_kind_stays_a_binary_rule_for_a_name_the_host_lacks(self):
-        """The other direction: a real CLI that is not a tool is unchanged."""
-        with patch.object(
-            plugin_init, "_host_tool_names", return_value={"terminal", "read_file"},
-        ):
-            rule = plugin_init._parse_prompt_note_rule(
-                "When a build is slow, use make instead of ninja."
-            )
+        rule = plugin_init._parse_prompt_note_rule(note)
         self.assertIsNotNone(rule)
         self.assertEqual(rule["type"], "block_binary")
-        self.assertEqual(rule["target"], "ninja")
+        self.assertEqual(rule["target"], "r")
 
-    def test_a_name_that_is_both_a_tool_and_a_binary_resolves_to_the_tool(self):
-        """`patch` is a host tool and a real shell binary. The registry wins: the
-        agent reaches it through the tool dispatch, which is where the advice
-        applies, and a tool rule leaves the binary reachable rather than breaking
-        shell commands the note never mentioned."""
-        # Without the lookup, the shape rule would call this a binary.
-        self.assertTrue(plugin_init._looks_like_cli("patch"))
-        with patch.object(
-            plugin_init, "_host_tool_names",
-            return_value={"patch", "write_file", "terminal"},
-        ):
-            rule = plugin_init._parse_prompt_note_rule(
-                "When a hunk does not apply, use write_file instead of patch."
+        self.addCleanup(plugin_init._update_block_rules, [])
+        plugin_init._update_block_rules([
+            {"content": note, "scope": "global", "session_id": ""}
+        ])
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            blocked = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "R --vanilla"},
+                session_id="sid-test",
             )
-        self.assertEqual(rule["type"], "block_tool")
-        self.assertEqual(rule["target"], "patch")
-
-    def test_host_tool_names_is_never_an_empty_set(self):
-        """The tri-state contract, against whatever registry this environment has.
-
-        None means "cannot be asked" and must never be confused with "the host has
-        no tools": an empty registry is a process where discovery has not run, and
-        reading it as a definitive no would send every name to the CLI branch.
-        """
-        names = plugin_init._host_tool_names()
-        self.assertTrue(
-            names is None or (isinstance(names, set) and names),
-            f"expected None or a non-empty set, got {names!r}",
+            different = {
+                command: plugin_init._on_pre_tool_call(
+                    tool_name="terminal", args={"command": command},
+                    session_id="sid-test",
+                )
+                for command in (
+                    "ruby script.rb",  # alphabetic suffix
+                    "r2 --version",    # numeric suffix
+                    "2r --version",    # numeric prefix
+                    "r-foo --version", # punctuation boundary
+                )
+            }
+        self.assertIsNotNone(blocked, "the R executable must remain blocked")
+        self.assertEqual(blocked["action"], "block")
+        self.assertEqual(
+            different, {command: None for command in different},
+            "a one-letter target must match only that executable",
         )
+
+    def test_reroute_kind_stays_on_the_previous_deterministic_fallback(self):
+        """Hermes does not expose this turn's effective ``valid_tool_names`` to
+        pre_llm_call hooks. The process registry is not a substitute: it includes
+        names removed by enabled/disabled toolsets and failed availability checks.
+        Until the host exposes the effective set, keep the pre-existing,
+        deterministic shape decision rather than claiming an unscoped lookup is
+        authoritative.
+        """
+        bare = plugin_init._parse_prompt_note_rule(
+            "When passing Python code to terminal, use execute_code instead of terminal."
+        )
+        labelled = plugin_init._parse_prompt_note_rule(
+            "When passing Python code to terminal, use execute_code instead of "
+            "the terminal tool."
+        )
+        binary = plugin_init._parse_prompt_note_rule(
+            "When a build is slow, use make instead of ninja."
+        )
+        self.assertEqual(bare["type"], "block_binary")
+        self.assertEqual(bare["target"], "terminal")
+        self.assertEqual(labelled["type"], "block_tool")
+        self.assertEqual(labelled["target"], "terminal")
+        self.assertEqual(binary["type"], "block_binary")
+        self.assertEqual(binary["target"], "ninja")
 
     def test_param_note_produces_require_fields(self):
         rule = plugin_init._parse_prompt_note_rule(

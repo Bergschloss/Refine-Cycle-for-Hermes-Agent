@@ -391,8 +391,21 @@ def _parse_prompt_note_rule(content):
             r"\b(?:tool|mcp|api|sdk)\b",
             raw_target + " " + parts[0], re.I,
         ))
+        # A bare name can be both a host tool and a shell binary (`terminal`,
+        # `patch`). The host's process registry cannot decide which one this turn
+        # means: `agent.valid_tool_names` is filtered by enabled/disabled toolsets,
+        # availability check_fns, dynamic schemas and tool-search assembly, while
+        # pre_llm_call hooks receive none of that effective set. Querying the
+        # registry made a disabled `patch` look callable and moved its rule from
+        # the binary door to an unreachable tool door. Until Hermes exposes this
+        # turn's effective names to the hook, keep the pre-existing deterministic
+        # shape classification; do not approximate invocation state from process
+        # registration.
+        rule_type = "block_tool" if is_tool_context else (
+            "block_binary" if _looks_like_cli(target) else "block_tool"
+        )
         return {
-            "type": _reroute_rule_type(target, is_tool_context),
+            "type": rule_type,
             "target": target,
             "action": action_text,
         }
@@ -448,9 +461,12 @@ def _parse_prompt_note_rule(content):
 # require-fields rule never fired once — with nothing reporting it, because the
 # tests asserted on note text rather than on hook decisions.
 _COND_TOOL_IDENT = r"[a-z_][a-z0-9_.:-]*"
-# A tool name as it may be enforced: at least two characters, and the punctuation
-# real names carry (``mcp__server__tool``, ``namespace:tool``, ``python3.11``).
-_COND_TOOL_NAME = re.compile(r"^[a-z_][a-z0-9_.:-]+$")
+# A tool name as it may be enforced. One-character executable identities are
+# included because the action side also protects real CLIs such as ``R``; the
+# stopword gate below keeps grammatical one-letter heads (``a``, ``i``) out.
+# Punctuation covers real names (``mcp__server__tool``, ``namespace:tool``,
+# ``python3.11``).
+_COND_TOOL_NAME = re.compile(r"^[a-z_][a-z0-9_.:-]*$")
 # Nouns a note appends to label a name ("the maps tool", "the write_file
 # command"). They describe the name; they are never the name.
 _COND_TOOL_ROLE_NOUN = r"(?:tool|command|call|function|api|mcp|binary|cli|utility)"
@@ -528,13 +544,14 @@ def _condition_tool(cond):
 
 
 def _tool_identity(word):
-    """A note's word as an enforceable tool name, or "" if it is not one.
+    """A note's word as an enforceable target identity, or "" if it is not one.
 
     Shared by both sides of a note: the condition ("when write_file reports …")
     and the action's reroute tail ("… instead of the terminal tool"). One
-    vocabulary on purpose. The two sides read different grammar, but "what counts
-    as a name we may enforce against" is one question, and answering it twice is
-    how the answers drift.
+    identity vocabulary on purpose. Conditions use it for tool names; action
+    tails may also name a CLI (including a one-character executable such as R).
+    The grammar differs, but answering "is this one bounded identity rather than
+    prose?" twice is how the two sides drift.
     """
     identity = (word or "").strip().strip(".:-")
     if identity in _COND_TOOL_STOPWORDS:
@@ -542,97 +559,6 @@ def _tool_identity(word):
     if re.fullmatch(_COND_TOOL_ROLE_NOUN, identity):
         return ""
     return identity if _COND_TOOL_NAME.match(identity) else ""
-
-
-# One log line per process, not one per turn: `_update_block_rules` runs on every
-# pre_llm_call. A race between two hook threads costs a duplicate line, nothing
-# else, so this needs no lock.
-_TOOL_REGISTRY_FALLBACK_LOGGED = False
-
-
-def _host_tool_names():
-    """Every tool name this host has registered, or None when that is unknowable.
-
-    The authority, not a guess. ``tools.registry`` is the same registration map
-    ``model_tools.get_tool_definitions()`` reads to build the definitions that
-    ``agent_init._load_tools`` turns into ``agent.valid_tool_names`` — the set the
-    host's own ``turn_tool_validation.validate_tool_calls`` rejects unknown tool
-    names against.
-
-    Read through the registry rather than by calling ``get_tool_definitions()``
-    for two reasons, both about this being a per-turn path. That call recomputes
-    (the agent memoised its result under ITS toolset selection and quiet_mode, so
-    a call from here misses that entry), prints the tool-selection banner and runs
-    every availability ``check_fn`` — visible side effects and real cost before
-    every LLM call. And its result is filtered per turn, so a tool that exists but
-    is disabled for this platform would change a rule's KIND, when the only
-    question here is whether the host has a tool by that name at all.
-
-    ``None``, never an empty set, when the registry is missing or still empty. An
-    empty registry means discovery has not run in this process; that is not the
-    same statement as "the host has no such tool", and treating it as one would
-    send every name down the CLI branch — the bug this lookup removes, wearing a
-    new hat.
-    """
-    try:
-        from tools.registry import registry
-        names = {
-            str(getattr(entry, "name", "") or "")
-            for entry in registry.get_all_entries()
-        } - {""}
-    except Exception:
-        return None
-    return names or None
-
-
-def _reroute_rule_type(target, is_tool_context):
-    """Whether a reroute target is enforced as a tool or as a shell binary.
-
-    Decided by asking the host, because guessing from the shape of the name was
-    wrong in the one direction that does not look wrong: `_looks_like_cli` reads
-    `terminal` as a CLI name, so "use execute_code instead of terminal" became a
-    `block_binary`, which only ever inspects `terminal` COMMAND strings. The rule
-    existed, the target was right, and it watched a door the agent never uses.
-    That is worse than the dead rules fixed alongside it, because it reads as
-    working.
-
-    Order, and why:
-
-    1. the note's own words win first — if it says "tool"/"MCP"/"API", it is a
-       tool rule, exactly as before this lookup existed;
-    2. the name is registered on this host -> tool rule;
-    3. the host says no -> the previous shape-based classification;
-    4. the host cannot be asked -> ALSO the previous classification, and a log
-       line. A rule whose kind depends on whether a lookup happened to succeed is
-       worse than one that is consistently wrong, so the unknown case must land
-       on today's behaviour and must not do it silently.
-
-    A name that is both a registered tool and a real shell binary (`patch`,
-    `memory`) resolves to a tool rule. The agent reaches those through the tool
-    dispatch, which is where the note's advice applies; `block_binary` would aim
-    the rule at the shell instead. It is also the safer error of the two: a tool
-    rule leaves the binary reachable through `terminal`, while the reverse breaks
-    shell commands the note never mentioned.
-    """
-    if is_tool_context:
-        return "block_tool"
-    shape_type = "block_binary" if _looks_like_cli(target) else "block_tool"
-    names = _host_tool_names()
-    if names is None:
-        global _TOOL_REGISTRY_FALLBACK_LOGGED
-        if not _TOOL_REGISTRY_FALLBACK_LOGGED:
-            _TOOL_REGISTRY_FALLBACK_LOGGED = True
-            logger.info(
-                "refine: host tool registry unreadable or not yet populated; "
-                "reroute rule kind falls back to the name's shape (%s -> %s)",
-                target, shape_type,
-            )
-        return shape_type
-    # Same matcher the rule will be enforced with, so the kind decision and the
-    # enforcement agree on what counts as this tool (including mcp__/ns: forms).
-    if any(_tool_matches(name, target) for name in names):
-        return "block_tool"
-    return shape_type
 
 
 def _looks_like_cli(word):
@@ -667,6 +593,16 @@ def _binary_matches(binary: str, target: str) -> bool:
     """Check if binary matches target; cmake won't match make."""
     if binary == target:
         return True
+    # One-character executable identities (notably R) were always valid input to
+    # this matcher, but only became reachable from reroute notes once the action
+    # identity gate stopped requiring two characters. The legacy boundary rules
+    # below deliberately allow numeric and punctuation boundaries for names like
+    # python3.11; applied to target ``r`` they also absorb unrelated executables
+    # (r2, 2r, r-foo). A one-character name has no safe fuzzy boundary: after
+    # `_extract_binaries` has already normalized basename, case and `.exe`, it is
+    # exact or it is a different executable.
+    if len(target) == 1:
+        return False
     if target in binary:
         prefix = binary[:binary.index(target)]
         suffix = binary[binary.index(target) + len(target):]
