@@ -307,6 +307,74 @@ experiment varying trigger literalness and remedy concreteness factorially, with
 production vocabulary, any gate run in shadow first, and false rejections measured before
 anything enforces.
 
+That programme was then run. Sections 4.2 and 4.3 report it.
+
+### 4.2 Run 4 — the confound removed, N = 60
+
+Section 4.1 rejected the A/B on two grounds: the rewrite changed the trigger and the
+remedy together, and the new remedy named a scaffold tool absent from production. Run 4
+separated them on the same fingerprint and the same 12 probes, varying only the lesson
+text across four cells plus an empty baseline. Pre-registration and full report:
+[`docs/evidence/run4-2x2/`](evidence/run4-2x2/), hash recorded before the first trial.
+
+| | remedy in production wording | remedy naming the scaffold call |
+|---|---|---|
+| generic trigger | 1/12 | 1/12 |
+| literal trigger | **12/12** | 12/12 |
+
+Baseline 0/12. Both validity gates passed. The literal trigger carried the whole effect:
+paired, 11 discordant pairs one way and none the other, p = 0.00098. Naming the scaffold
+tool contributed nothing, and the two literal-trigger arms were identical with zero
+discordant pairs between them.
+
+So the objection in 4.1 was wrong in our favour. The effect did not depend on the scaffold
+name, and it appeared in wording a production lesson can actually use. Both pre-registered
+conditions for transfer were met, for this one fingerprint.
+
+### 4.3 Run 5 — the hypothesis that raised, and its rejection, N = 96
+
+Run 4 raised a specific and testable claim: **a lesson fails when its trigger is abstract,
+and rewriting it with a literal trigger and a production-vocabulary remedy makes it work.**
+If true, the four lessons that scored zero in Run 1 were fixable by rewriting, and the
+plugin's proposer could be changed to emit that shape.
+
+Run 5 tested it on the two other floor lessons whose probes the ceiling test had already
+cleared. They are broken in different halves, which is why they were chosen: `fb25ce8f2797`
+has an abstract trigger, `2b4ff368ae22` has an abstract remedy. Four arms each, 12 probes
+each, analysed separately with no pooling. Pre-registration and report:
+[`docs/evidence/run5-wording-rule/`](evidence/run5-wording-rule/).
+
+| fingerprint | as emitted | rewritten, production wording | explicit call |
+|---|---|---|---|
+| `fb25ce8f2797` | 2/12 | **0/12** | 12/12 |
+| `2b4ff368ae22` | 0/12 | **0/12** | 12/12 |
+
+Baseline 0/12 for both. Both validity gates passed for both. The rewrites did nothing at
+all. Only the arm naming the exact graded call worked, and it worked completely.
+
+The pre-registered branch fired: *"neither confirms -> the 51ad58a9a362 result does not
+generalise, and the wording programme ends here. Publish that."*
+
+### 4.4 What the three runs leave standing
+
+The rewriting hypothesis is rejected. We cannot show that rewording a dead lesson revives
+it, and the proposer change is off the table. Not because its implementation is dangerous,
+which it also is, but because there is no evidence it would help.
+
+One post-hoc observation, offered as a hypothesis and not as a finding. The single case
+where production wording worked is the one where the lesson's own words matched the tool's
+argument value: "ask for clarification" against `probe_escalate(kind='clarification')`.
+The two that failed did not: "report that node is missing" against
+`probe_report(status='blocked', error_signature=...)`, and "check that the repository and
+path are correct" against `probe_verify(check='github_endpoint')`. A literal trigger is
+necessary, since the generic-trigger arm in Run 4 scored 1/12, and Run 5 shows it is not
+sufficient. What may actually carry the effect is whether the lesson names the action in
+the vocabulary the tool itself uses. Testing that would need a harness whose tools exist in
+production, which ours does not have.
+
+None of this touches Run 1. The 133-probe result stands unchanged: the lessons the plugin
+writes today change behaviour, and both placebos sit flat.
+
 ---
 
 ## 5. Release v1.3.3 — verification, not an experiment
