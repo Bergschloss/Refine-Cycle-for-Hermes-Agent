@@ -390,8 +390,14 @@ def _parse_prompt_note_rule(content):
         cond = parts[0].lower()
         if cond.startswith("when "):
             cond = cond[5:]
-        # Extract tool name from condition
-        tool = cond.split("calling ")[-1].split(",")[0].strip()
+        tool = _condition_tool(cond)
+        if not tool:
+            # The condition names no tool this can identify, so there is nothing
+            # to enforce against. The note stays advice: a rule whose target
+            # matches no tool would be silently dead, and inventing a target out
+            # of condition prose is how 'exit code 127' once blocked the `code`
+            # CLI (see the fallback comment below).
+            return None
         return {
             "type": "require_fields",
             "tool": tool,
@@ -404,6 +410,105 @@ def _parse_prompt_note_rule(content):
     # 'code' from prose) — a false block stops the agent, so a note that does
     # not name its target explicitly must stay advice, never a rule.
     return None
+
+
+# --- Tool identity inside a prompt-note condition ---------------------------
+# The condition is prose: the validator accepts "when <3..200 chars>, <action>"
+# and says nothing about how the tool is named. Extraction understood one shape,
+# "when calling X", and read the whole clause as the tool name for every other
+# accepted shape. "when write_file reports 'missing content'" therefore produced
+# tool="write_file reports 'missing content'", which matches no tool, so the note
+# passed every validator, was stored, rendered into the prompt, and its
+# require-fields rule never fired once — with nothing reporting it, because the
+# tests asserted on note text rather than on hook decisions.
+_COND_TOOL_IDENT = r"[a-z_][a-z0-9_.:-]*"
+# A tool name as it may be enforced: at least two characters, and the punctuation
+# real names carry (``mcp__server__tool``, ``namespace:tool``, ``python3.11``).
+_COND_TOOL_NAME = re.compile(r"^[a-z_][a-z0-9_.:-]+$")
+# Nouns a note appends to label a name ("the maps tool", "the write_file
+# command"). They describe the name; they are never the name.
+_COND_TOOL_ROLE_NOUN = r"(?:tool|command|call|function|api|mcp|binary|cli|utility)"
+# How a condition names a tool by its outcome instead of by the act of calling it.
+_COND_TOOL_OUTCOME_VERB = (
+    r"(?:reports?|reported|returns?|returned|fails?|failed|errors?|errored"
+    r"|rejects?|rejected|raises?|raised|responds?|responded|complains?"
+    r"|complained|says?|said|(?:times?|timed)\s+out)"
+)
+# Heads that are grammar, not identity. `_tool_matches` matches a target as a
+# substring, so admitting one of these would widen a note into a rule that fires
+# on unrelated tools: the target "it" alone is contained in `edit`.
+_COND_TOOL_STOPWORDS = frozenset({
+    "the", "a", "an", "this", "that", "these", "those", "it", "its", "they",
+    "them", "we", "you", "i", "he", "she", "there", "something", "anything",
+    "everything", "nothing", "one", "some", "any", "my", "our", "your",
+    "their", "his", "her",
+})
+_COND_DETERMINER = r"(?:the|a|an|this|that)"
+_COND_CALLING_TOOL = re.compile(
+    rf"\bcalling\s+(?:{_COND_DETERMINER}\s+)?({_COND_TOOL_IDENT})"
+    rf"(?:\s+{_COND_TOOL_ROLE_NOUN})?\b"
+)
+# "write_file reports ...", "terminal returns ...". No determiner: "a login
+# fails" and "the build fails" describe an activity, not a tool, and must stay
+# advice.
+_COND_OUTCOME_TOOL = re.compile(
+    rf"^({_COND_TOOL_IDENT})(?:\s+{_COND_TOOL_ROLE_NOUN})?"
+    rf"\s+{_COND_TOOL_OUTCOME_VERB}\b"
+)
+# "the write_file tool reports ...". A determiner is allowed only when the phrase
+# itself says the name is a tool, which is what keeps "the build fails" out.
+_COND_OUTCOME_TOOL_LABELLED = re.compile(
+    rf"^{_COND_DETERMINER}\s+({_COND_TOOL_IDENT})\s+{_COND_TOOL_ROLE_NOUN}"
+    rf"\s+{_COND_TOOL_OUTCOME_VERB}\b"
+)
+
+
+def _condition_tool(cond):
+    """The tool a prompt-note condition is about, or "" when it names none.
+
+    Handles the shapes the validator accepts::
+
+        calling write_file              -> write_file
+        calling the maps tool           -> maps
+        write_file reports '...'        -> write_file
+        terminal returns exit code 127  -> terminal
+        the write_file tool fails ...   -> write_file
+        a login fails                   -> ""   (an activity, not a tool)
+
+    "" means the caller must build no rule. That is the safe direction twice
+    over: a rule whose target matches no tool is dead weight that looks alive,
+    and a target guessed out of condition prose is a false block — which is how
+    a note about "exit code 127" once blocked the `code` CLI.
+    """
+    cond = (cond or "").strip().lower()
+    if not cond:
+        return ""
+    # Whatever follows "calling" is the callee, so its head identifier is the
+    # tool. The LAST occurrence is used, matching the previous
+    # ``split("calling ")[-1]`` reading, so every condition that already parsed
+    # still yields the same name.
+    calling = list(_COND_CALLING_TOOL.finditer(cond))
+    if calling:
+        identity = _tool_identity(calling[-1].group(1))
+        if identity:
+            return identity
+    for pattern in (_COND_OUTCOME_TOOL, _COND_OUTCOME_TOOL_LABELLED):
+        found = pattern.match(cond)
+        if found:
+            identity = _tool_identity(found.group(1))
+            if identity:
+                return identity
+    return ""
+
+
+def _tool_identity(word):
+    """A condition word as an enforceable tool name, or "" if it is not one."""
+    identity = (word or "").strip().strip(".:-")
+    if identity in _COND_TOOL_STOPWORDS:
+        return ""
+    if re.fullmatch(_COND_TOOL_ROLE_NOUN, identity):
+        return ""
+    return identity if _COND_TOOL_NAME.match(identity) else ""
 
 
 def _looks_like_cli(word):

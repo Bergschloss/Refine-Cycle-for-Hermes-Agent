@@ -5612,6 +5612,100 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(rule["type"], "require_fields")
         self.assertEqual(rule["fields"], ["origin", "destination"])
 
+    def test_param_note_extracts_tool_from_outcome_condition(self):
+        """A field note phrased "When <tool> reports ..." must enforce.
+
+        Tool extraction read the condition as "When calling <tool>" only. Every
+        other phrasing the validator accepts yielded the whole clause as the
+        tool name ("write_file reports 'missing content'"), which matches no
+        tool, so the note passed every gate, rendered into the prompt, and its
+        require-fields rule never fired once. Nothing reported it.
+        """
+        for condition in (
+            "When write_file reports 'missing content'",
+            "When write_file returns 'missing content'",
+            "When write_file fails with 'missing content'",
+            "When the write_file tool reports 'missing content'",
+        ):
+            with self.subTest(condition=condition):
+                rule = plugin_init._parse_prompt_note_rule(
+                    condition + ", always include both 'path' and 'content' fields."
+                )
+                self.assertIsNotNone(rule)
+                self.assertEqual(rule["type"], "require_fields")
+                self.assertEqual(rule["tool"], "write_file")
+                self.assertEqual(rule["fields"], ["path", "content"])
+
+    def test_outcome_condition_rule_fires_only_on_its_own_tool(self):
+        """The rule must actually block the call it describes, and only that one."""
+        # _BLOCK_RULES lives for the process, so a rule installed here must not
+        # outlive the test and reach another class's _on_pre_tool_call calls.
+        self.addCleanup(plugin_init._update_block_rules, [])
+        plugin_init._update_block_rules([{
+            "content": (
+                "When write_file reports 'missing content', always include "
+                "both 'path' and 'content' fields."
+            ),
+            "scope": "global",
+            "session_id": "",
+        }])
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            blocked = plugin_init._on_pre_tool_call(
+                tool_name="write_file", args={"path": "notes.md"},
+                session_id="sid-test",
+            )
+            other = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "ls"},
+                session_id="sid-test",
+            )
+        self.assertIsNotNone(blocked, "the note's own tool must be blocked")
+        self.assertEqual(blocked["action"], "block")
+        self.assertIn("content", blocked["message"])
+        self.assertIsNone(other, "an unrelated tool must not be blocked")
+
+    def test_calling_condition_still_extracts_tool_and_enforces(self):
+        """The form that worked before must keep working, unchanged."""
+        rule = plugin_init._parse_prompt_note_rule(
+            "When calling write_file, always include both 'path' and 'content' fields."
+        )
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule["type"], "require_fields")
+        self.assertEqual(rule["tool"], "write_file")
+        self.assertEqual(rule["fields"], ["path", "content"])
+        self.addCleanup(plugin_init._update_block_rules, [])
+        plugin_init._update_block_rules([{
+            "content": (
+                "When calling write_file, always include both 'path' and "
+                "'content' fields."
+            ),
+            "scope": "global",
+            "session_id": "",
+        }])
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            blocked = plugin_init._on_pre_tool_call(
+                tool_name="write_file", args={"path": "notes.md"},
+                session_id="sid-test",
+            )
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked["action"], "block")
+
+    def test_param_note_naming_no_tool_yields_no_rule(self):
+        """A condition about an activity names no tool, so there is nothing to
+        enforce against. A rule whose target matches no tool is dead weight, and
+        synthesizing a target out of condition prose is how "exit code 127" once
+        blocked the `code` CLI."""
+        for condition in (
+            "When a login fails",
+            "When the build fails",
+            "When storing an entry",
+            "When it fails",
+        ):
+            with self.subTest(condition=condition):
+                self.assertIsNone(plugin_init._parse_prompt_note_rule(
+                    condition + ", always include both 'origin' and "
+                    "'destination' fields."
+                ))
+
     def test_prose_note_yields_no_rule(self):
         """Condition prose must never synthesize a block target."""
         self.assertIsNone(plugin_init._parse_prompt_note_rule(
