@@ -533,8 +533,8 @@ left to be discovered in a diff.
 
 Stock Hermes ships `memory_char_limit: 2200` — roughly 800 tokens. That number was
 chosen when the models driving Hermes were smaller and shorter-context; a compact
-store was the right trade then. It is no longer the constraint it was, and current
-models carry 4400 characters of durable memory without difficulty.
+store was the right trade then. It is no longer the constraint it was: we measured a
+lesson still firing at 8,811 characters, twice the floor this installer sets.
 
 For this plugin the stock size is actively too small. Refine's whole output is
 lessons written into that store, and it accumulates: on a real install, six applied
@@ -569,6 +569,27 @@ copy would silently discard everything else you changed since.
 The plugin itself never hardcodes 4400. It reads whatever limit the host reports
 and shows it to you at every write (for example `memory 1443/4400`), so raising the limit
 further is a host decision the plugin follows rather than fights.
+
+**If you want to raise it, here is what we measured.** A lesson still fired on every
+probe at 8,811 characters, whether it sat at the front of the note or buried in the
+middle, so 4400 is not a ceiling the model imposes. The cost of going higher is small,
+because the note is billed as fresh input once per session and read from cache after
+that, and because output tokens do not change with memory at all:
+
+| memory change | cost per session |
+|---|---|
+| 2200 → 4400 | +5 to 7% |
+| 4400 → 8800 | +9 to 12% |
+| 2200 → 8800 | +14 to 20% |
+
+The range covers four different pricing shapes; the answer barely moves between them.
+Token counts, method and the pricing assumptions are in
+[`docs/evidence/memory-cost.md`](docs/evidence/memory-cost.md), and the runs behind them
+are section 4.5 of the [research report](docs/RESEARCH-REPORT-2026-09-12.md).
+
+We have not raised the shipped default on the strength of this. The lesson under test
+named its action outright, which is the strongest form a lesson takes, and a vaguer one
+may fade sooner than 8,811 characters. Above that we measured nothing.
 
 ---
 
