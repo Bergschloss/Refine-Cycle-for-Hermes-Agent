@@ -4,8 +4,8 @@
 
 **Your agent keeps repeating the same mistake. This makes it stop.**
 
-**Measured: 21.1%, Hermes on its own still repeating the same mistake → 49.6%
-with the plugin.** 133 controlled probes:
+**Measured: Hermes on its own handles 21.1% of its repeating mistakes correctly
+→ 49.6% with the plugin.** 133 controlled probes:
 [research report](docs/RESEARCH-REPORT-2026-09-12.md).
 
 **Refine Cycle** looks across recent sessions, finds those repeating problems, and
