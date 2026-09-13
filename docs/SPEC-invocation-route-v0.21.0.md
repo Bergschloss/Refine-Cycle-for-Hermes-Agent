@@ -1,5 +1,7 @@
 # Hermes 0.21.0 invocation route — delivered and verified
 
+> Superseded by [HOST-PATCH.md](HOST-PATCH.md), which covers the current patch and the rebase procedure. This file is the delivery record for the 0.21.0 patch and is kept for history.
+
 **Status:** delivered in `assets/invocation-route-v0.21.0.patch`; selectable by
 both installers; classified, backed up, verified, and rolled back through
 patch-specific metadata.
