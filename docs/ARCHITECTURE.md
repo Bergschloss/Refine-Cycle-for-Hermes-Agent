@@ -183,7 +183,7 @@ Refine-Cycle-for-Hermes-Agent/
 
 Moved from the README. The pipeline summary above is the short form of this.
 
-![How the Refine Cycle plugin works: a session ends, repeated failures are found across sessions, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](assets/refine-cycle.gif)
+![How the Refine Cycle plugin works: a session ends, repeated failures are found across sessions, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](../assets/refine-cycle.gif)
 
 ```
 trajectory (state.db) → scrub → fingerprint + aggregate → signal gate

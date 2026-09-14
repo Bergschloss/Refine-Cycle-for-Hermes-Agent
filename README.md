@@ -64,6 +64,14 @@ All three are reversible with `python install.py --rollback`.
 
 **If you actually use that approval queue** — you drain it, and you want to see every write before it lands — this plugin works against how you have set Hermes up, and you should not enable it. That is a good reason to pass.
 
+## How it works
+
+![How the Refine Cycle plugin works: a session ends, repeated failures are found across sessions, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](assets/refine-cycle.gif)
+
+After a session, the plugin reads the errors in it and in earlier sessions and turns each one into a fingerprint, so the same failure with a different id, path or timestamp counts once. Nothing is applied until a failure repeats. Then the model is asked for one small edit. The edit passes size, injection and duplicate checks, goes into the journal, and only then lands. Later sessions show whether the failure stopped. The plugin exits early at three points: nothing repeats, a check rejects the edit, or the edit is rolled back.
+
+Stage by stage: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## How this differs from Hermes's built-in self-improvement
 
 Hermes ships its own background review: after a turn or a session it looks at the
