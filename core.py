@@ -4885,7 +4885,13 @@ def _notify_lesson(
     the message goes there, otherwise notify falls back to a configured target.
     """
     try:
-        _notify.notify(_lesson_body(used, limit), active_chat)
+        body = _lesson_body(used, limit)
+        # Only a release this process already knows about: the notification is
+        # sent under the mutation lock and must never wait on the network.
+        update = _update_check.update_available(fetch=False)
+        if update:
+            body += f" \u00b7 {update['latest']} available"
+        _notify.notify(body, active_chat)
     except Exception:
         logger.debug("refine notify: lesson message failed", exc_info=True)
 

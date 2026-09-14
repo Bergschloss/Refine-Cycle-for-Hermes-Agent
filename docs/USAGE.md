@@ -30,6 +30,7 @@ registration warning and command help show which name is active.
 /refine focus on Gmail API failures
 /refine audit
 /refine status
+/refine update
 /refine dry-run
 /refine dry-run focus on Gmail API failures
 /refine dry-run session <session_id>
@@ -49,6 +50,8 @@ use, and the active journal/migration state. `dry-run [reason]` runs the normal
 proposal path and journals the preview without applying an edit or consuming the
 daily edit budget. `dry-run session <session_id>` previews one exact historical
 session after confirming it through the read-only Hermes sessions table.
+
+`update` installs the latest release when it is newer than the installed one. It downloads the commit the release tag points at, not a branch tip, runs the `install.py` shipped in that release with `--plugin-only`, and checks that the plugin directory now reports the new version. If anything fails, the previous files are put back. The running Hermes keeps the old code until it restarts (`/restart` in chat). An install from the Hermes plugin catalog is left alone and the reply points to `hermes plugins update refine-cycle`. The plugin never runs this on its own.
 
 `model` shows or sets the model refine asks for. Bare `model` prints the
 effective target and whether host trust allows it; `model <name>` or

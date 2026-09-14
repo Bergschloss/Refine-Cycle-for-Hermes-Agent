@@ -9,13 +9,14 @@ import ast
 import hashlib
 import importlib.util
 import inspect
+from asyncio import run as asyncio_run
 import re
 import json
 import os
 import shutil
 import subprocess
 from collections import Counter
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack as contextlib_ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 import sqlite3
 import sys
@@ -16506,6 +16507,176 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_installed_version_is_read_from_the_manifest(self):
         self.assertRegex(update_check.installed_version(), r"^\d+\.\d+\.\d+$")
+
+    # -- /refine update and the lesson-notification tail -------------------------
+
+    def _memory_proposal(self, name):
+        return {
+            "action": "create", "kind": "memory", "name": name,
+            "content": f"a brand new fact for {name}", "reason": "why", "evidence": [],
+        }
+
+    def test_the_lesson_notification_names_a_newer_release_without_a_network_call(self):
+        # The notification is sent under the mutation lock, so it may only read a
+        # release already known; it must never wait on GitHub there.
+        update_check._memory.update(
+            {"checked_ts": time.time(), "release": self._release("v99.0.0")}
+        )
+        with patch.object(update_check, "_fetch_latest_release",
+                          side_effect=AssertionError("network used under the lock")), \
+                patch.object(core._notify, "notify") as sent:
+            result = self.run_proposal(self._memory_proposal("tail-newer"))
+        self.assertTrue(result["success"])
+        self.assertTrue(sent.call_args[0][0].endswith(" \u00b7 v99.0.0 available"))
+
+    def test_the_lesson_notification_is_unchanged_when_no_newer_release_is_known(self):
+        with patch.object(core._notify, "notify") as sent:
+            result = self.run_proposal(self._memory_proposal("tail-current"))
+        self.assertTrue(result["success"])
+        self.assertNotIn("available", sent.call_args[0][0])
+
+    def _release_tree(self, version):
+        tree = self.root / f"release-{version}"
+        tree.mkdir()
+        (tree / "install.py").write_text("# stub\n", encoding="utf-8")
+        (tree / "plugin.yaml").write_text(f"name: refine\nversion: {version}\n", encoding="utf-8")
+        return tree
+
+    def _update_env(self, *, installed, latest, tree=None, plugin_dir=None):
+        plugin_dir = plugin_dir or (self.root / "installed-plugin")
+        plugin_dir.mkdir(exist_ok=True)
+        stack = contextlib_ExitStack()
+        stack.enter_context(patch.object(update_check, "installed_version",
+                                         side_effect=list(installed)))
+        stack.enter_context(patch.object(update_check, "_fetch_latest_release",
+                                         return_value=self._release(latest)))
+        stack.enter_context(patch.object(update_check, "_plugin_dir", return_value=plugin_dir))
+        stack.enter_context(patch.object(update_check, "_host_checkout",
+                                         return_value=self.root / "hermes"))
+        if tree is None:
+            stack.enter_context(patch.object(update_check, "_download_release",
+                                             side_effect=AssertionError("downloaded")))
+        else:
+            stack.enter_context(patch.object(update_check, "_download_release",
+                                             return_value=tree))
+        return stack
+
+    def test_update_installs_a_newer_release_with_its_own_installer(self):
+        tree = self._release_tree("99.0.0")
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            out = "State           : patched, all 8 files carry markers" if "--status" in argv else "Done"
+            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+        with self._update_env(installed=["1.3.6", "99.0.0"], latest="v99.0.0", tree=tree):
+            result = update_check.run_update(runner=runner)
+
+        self.assertEqual(result["outcome"], "updated")
+        self.assertEqual(calls[0][1:], [str(tree / "install.py"), "--plugin-only",
+                                        "--hermes-src", str(self.root / "hermes")])
+        self.assertIn("/restart", result["message"])
+        self.assertNotIn("--patch-only", result["message"])
+
+    def test_update_warns_when_the_host_patch_needs_attention(self):
+        tree = self._release_tree("99.0.0")
+
+        def runner(argv, **kwargs):
+            out = "State           : stock, clean base abc" if "--status" in argv else "Done"
+            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+        with self._update_env(installed=["1.3.6", "99.0.0"], latest="v99.0.0", tree=tree):
+            result = update_check.run_update(runner=runner)
+
+        self.assertEqual(result["outcome"], "updated")
+        self.assertIn("install.py --patch-only", result["message"])
+
+    def test_update_does_nothing_when_already_current(self):
+        with self._update_env(installed=["1.3.6"], latest="v1.3.6"):
+            result = update_check.run_update(
+                runner=lambda *a, **k: self.fail("installer ran"))
+        self.assertEqual(result["outcome"], "already_latest")
+
+    def test_update_leaves_a_catalog_install_to_hermes(self):
+        plugin_dir = self.root / "catalog-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / ".hermes-catalog.json").write_text("{}", encoding="utf-8")
+        with self._update_env(installed=["1.3.6"], latest="v99.0.0", plugin_dir=plugin_dir), \
+                patch.object(update_check, "_fetch_latest_release",
+                             side_effect=AssertionError("network used")):
+            result = update_check.run_update(
+                runner=lambda *a, **k: self.fail("installer ran"))
+        self.assertEqual(result["outcome"], "catalog_install")
+        self.assertIn("hermes plugins update", result["message"])
+
+    def test_a_failed_installer_restores_the_previous_files(self):
+        tree = self._release_tree("99.0.0")
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "core.py").write_text("old core\n", encoding="utf-8")
+
+        def runner(argv, **kwargs):
+            (plugin_dir / "core.py").write_text("half-copied\n", encoding="utf-8")
+            (plugin_dir / "new_module.py").write_text("new\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="ERROR: import failed")
+
+        with self._update_env(installed=["1.3.6"], latest="v99.0.0", tree=tree,
+                              plugin_dir=plugin_dir):
+            result = update_check.run_update(runner=runner)
+
+        self.assertEqual(result["outcome"], "failed")
+        self.assertIn("import failed", result["message"])
+        self.assertEqual((plugin_dir / "core.py").read_text(encoding="utf-8"), "old core\n")
+        self.assertFalse((plugin_dir / "new_module.py").exists())
+
+    def test_update_refuses_an_archive_that_escapes_its_folder(self):
+        import io
+        import tarfile
+
+        for index, bad_name in enumerate(("../escaped.py", "/absolute.py")):
+            archive = self.root / f"bad-{index}.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                data = b"x"
+                info = tarfile.TarInfo(bad_name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+            with self.assertRaises(ValueError):
+                update_check._safe_extract(archive, self.root / f"out-{index}")
+
+    def test_a_release_tag_must_resolve_to_a_full_commit(self):
+        with patch.object(update_check, "_get_json",
+                          return_value={"object": {"type": "commit", "sha": "abc"}}):
+            with self.assertRaises(ValueError):
+                update_check._resolve_tag_commit("v1.0.0")
+        answers = [
+            {"object": {"type": "tag", "sha": "1" * 40}},
+            {"object": {"type": "commit", "sha": "a" * 40}},
+        ]
+        with patch.object(update_check, "_get_json", side_effect=answers):
+            self.assertEqual(update_check._resolve_tag_commit("v1.0.0"), "a" * 40)
+
+    def test_a_downloaded_release_must_be_the_version_it_claims(self):
+        tree = self._release_tree("99.0.1")
+        with self.assertRaises(ValueError):
+            update_check._verify_tree(tree, "v99.0.0")
+        update_check._verify_tree(tree, "v99.0.1")
+
+    def test_refine_update_command_runs_off_the_event_loop(self):
+        """The gateway calls handlers on its event loop; the update must not run there."""
+        seen = {}
+
+        def run_update():
+            seen["thread"] = threading.current_thread()
+            return {"outcome": "updated", "message": "Updated to v99.0.0."}
+
+        with patch.object(update_check, "run_update", side_effect=run_update):
+            pending = plugin_init._handle_refine_command("update")
+            self.assertTrue(inspect.iscoroutine(pending))
+            text = asyncio_run(pending)
+
+        self.assertIn("v99.0.0", text)
+        self.assertIsNot(seen["thread"], threading.main_thread())
 
     def test_dry_run_reports_journal_failure(self):
         model = MockLlm({

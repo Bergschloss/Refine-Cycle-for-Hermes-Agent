@@ -4,6 +4,7 @@ import difflib
 import json
 import logging
 import re
+import asyncio
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -11,9 +12,9 @@ from typing import Any, Dict, Optional, Tuple
 from agent.plugin_llm import PluginLlm
 
 try:
-    from . import config, core, journal, ledger
+    from . import config, core, journal, ledger, update_check
 except ImportError:
-    import config, core, journal, ledger  # noqa: F811
+    import config, core, journal, ledger, update_check  # noqa: F811
 
 logger = logging.getLogger(__name__)
 _ROLLBACK_COMMAND = re.compile(r"^rollback\s+([0-9a-fA-F]{12})$")
@@ -239,6 +240,9 @@ def _run_auto_refine(
             if cleanup_session_notes:
                 _clear_session_prompt_notes(session_id)
             return
+        # A worker thread nobody waits on, before the lock: the one place in a
+        # long-running gateway where the daily release check can refresh.
+        update_check.latest_release()
         with journal.try_mutation_lock() as acquired:
             try:
                 if not acquired:
@@ -893,7 +897,7 @@ _SESSION_SUBCOMMAND = "session"
 # Every subcommand _handle_refine_command actually implements. Kept beside the
 # two names above so the list cannot drift from the branches that consume them.
 _KNOWN_SUBCOMMANDS = ("audit", "dry-run", _MODEL_SUBCOMMAND, "rollback",
-                      _SESSION_SUBCOMMAND, "status")
+                      _SESSION_SUBCOMMAND, "status", "update")
 
 
 def _explicit_session_status(value: Any) -> tuple[str, str]:
@@ -1048,6 +1052,23 @@ def _mistyped_subcommand_error(args: str) -> Optional[str]:
     )
 
 
+async def _update_command() -> str:
+    """Download and install the latest release on a worker thread.
+
+    The gateway calls command handlers on its event loop and awaits a coroutine
+    when one is returned. A download and an install run for tens of seconds, and
+    doing them inline would stall every chat on that gateway for as long.
+    """
+    try:
+        result = await asyncio.to_thread(update_check.run_update)
+    except Exception as exc:
+        logger.exception("refine update failed")
+        return f"\u274c Update failed: {core.scrub_text(str(exc))}"
+    mark = {"updated": "\u2705", "already_latest": "\u2139\ufe0f",
+            "catalog_install": "\u2139\ufe0f"}.get(result.get("outcome"), "\u274c")
+    return f"{mark} {core.scrub_text(result.get('message', ''))}"
+
+
 def _handle_refine_command(raw_args: str) -> Optional[str]:
     """Handle exact audit/rollback subcommands; all other text is a reason."""
     args = raw_args.strip()
@@ -1057,6 +1078,9 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         except Exception as exc:
             logger.exception("refine audit failed")
             return f"❌ Audit failed: {core.scrub_text(str(exc))}"
+
+    if args == "update":
+        return _update_command()
 
     if args == "status":
         try:
@@ -1641,11 +1665,11 @@ def register(ctx) -> None:
         _handle_refine_command,
         description=(
             "Self-improve skills/memory. "
-            f"Usage: /{command_name} [reason|audit|status|dry-run [session <session_id>|reason]|"
+            f"Usage: /{command_name} [reason|audit|status|update|dry-run [session <session_id>|reason]|"
             "model [target|auto]|session <session_id>|rollback <id>]"
         ),
         args_hint=(
-            "[reason | audit | status | dry-run [session <session_id> | reason] | "
+            "[reason | audit | status | update | dry-run [session <session_id> | reason] | "
             "model [target|auto] | session <session_id> | rollback <id>]"
         ),
     )

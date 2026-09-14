@@ -33,7 +33,9 @@ initiated.
 
 ## What else leaves the host
 
-`/refine status` makes one anonymous request to `api.github.com` for the latest Refine Cycle release tag, at most once a day per running process, and only when `update_check` is on (the default). The request carries no session, config or host data. The result is only displayed; nothing is downloaded or installed, because a plugin that updates itself would bypass the review a pinned install exists for.
+With `update_check` on (the default), the plugin makes one anonymous request to `api.github.com` for the latest Refine Cycle release tag, at most once a day per running process: from `/refine status`, or from an automatic pass before it takes the mutation lock. The request carries no session, config or host data. The answer is shown in `/refine status` and as a short tail on the lesson notification.
+
+`/refine update` is the only thing that downloads code, and only when you send it. It fetches the release archive from `codeload.github.com` for the exact commit the release tag names, refuses an archive with links or paths outside its folder, and installs with that release's own `install.py`. The plugin never updates itself: that would bypass the review a pinned install exists for, and a compromised release would reach every install without anyone choosing it.
 
 ## Safety & limits
 
