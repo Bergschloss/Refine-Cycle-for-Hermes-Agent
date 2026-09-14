@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import inspect
 import threading
 import time
 from typing import (
@@ -191,9 +192,62 @@ def _bounded_trajectory(text: str) -> str:
     return result[:limit]
 
 
+# Hosts that expose the turn-bound invocation natively name the opt-in flag
+# differently: NousResearch/hermes-agent#110380 uses ``inherit_turn_invocation``,
+# #110361 uses ``inherit_turn``. Whichever the host accepts is the one sent.
+_TURN_INHERIT_KWARGS = ("inherit_turn_invocation", "inherit_turn")
+
+
+def turn_inherit_kwarg(llm: Any) -> str:
+    """Name of the host's native turn-inheritance flag, or "" when it has none."""
+    method = getattr(llm, "complete_structured", None)
+    if method is None:
+        return ""
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return ""
+    for name in _TURN_INHERIT_KWARGS:
+        if name in params:
+            return name
+    return ""
+
+
+def current_invocation(llm: Any) -> Any:
+    """The host's own report of the route this turn is bound to, or ``None``."""
+    reader = getattr(llm, "current_invocation", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader()
+    except Exception:
+        return None
+
+
 def _is_invocation_bound(llm: PluginLlm) -> bool:
-    """Return whether Hermes locked this facade to the active invocation route."""
-    return bool(getattr(llm, "invocation_bound", False))
+    """Return whether calls on this facade go out on the active turn's own route.
+
+    A host says yes in one of two ways. The invocation-route patch hands out a
+    facade already locked to the route (``invocation_bound``). A host with the
+    native opt-in flag is asked for the current invocation when it can report one;
+    a host that cannot report it is trusted and fails closed at call time with
+    ``PluginLlmInvocationError``.
+    """
+    if bool(getattr(llm, "invocation_bound", False)):
+        return True
+    if not turn_inherit_kwarg(llm):
+        return False
+    if callable(getattr(llm, "current_invocation", None)):
+        return current_invocation(llm) is not None
+    return True
+
+
+def bound_route_kwargs(llm: Any) -> Dict[str, Any]:
+    """Call kwargs that pin one request to the active turn's route."""
+    if bool(getattr(llm, "invocation_bound", False)):
+        return {}
+    name = turn_inherit_kwarg(llm)
+    return {name: True} if name else {}
 
 
 def _invocation_failure(exc: PluginLlmInvocationError) -> Dict[str, str]:
@@ -864,7 +918,7 @@ def _propose_structured(
             raise TypeError("Refine accepts only text model inputs")
         safe_blocks.append(PluginLlmTextInput(text=scrub_text(str(text))))
     resolved_target = (
-        {} if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
+        bound_route_kwargs(llm) if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
     )
     common = dict(
         instructions=scrub_text(str(instructions)),
@@ -1070,7 +1124,7 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
     _call_meta.value = {}
     safe_evidence = scrub_text(str(evidence_text))
     resolved_target = (
-        {} if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
+        bound_route_kwargs(llm) if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
     )
     instructions = (
         "Assess this trajectory only for a durable lesson worth persisting. "

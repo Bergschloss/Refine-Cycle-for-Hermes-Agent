@@ -101,7 +101,7 @@ def _session_llm() -> Optional[PluginLlm]:
     except Exception as exc:
         logger.warning("Cannot resolve the active refine LLM: %s", core.scrub_text(str(exc)))
         return None
-    return llm if getattr(llm, "invocation_bound", False) else None
+    return llm if core._llm._is_invocation_bound(llm) else None
 
 
 def _assistant_turn_count(conversation_history: Any) -> int:

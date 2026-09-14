@@ -4452,6 +4452,11 @@ def _bound_route_identity(llm: Any) -> Dict[str, str]:
     if route is not None:
         provider = provider or str(getattr(route, "provider", "") or "").strip()
         model = model or str(getattr(route, "model", "") or "").strip()
+    # A host with native turn inheritance reports the route as a value instead.
+    invocation = _llm.current_invocation(llm)
+    if invocation is not None:
+        provider = provider or str(getattr(invocation, "provider", "") or "").strip()
+        model = model or str(getattr(invocation, "model", "") or "").strip()
     return {"provider": provider, "model": model}
 
 
@@ -5285,6 +5290,18 @@ def _refine_once(
             response["message"] += " The skip decision could not be journaled."
         return response
 
+    # A facade whose host inherits the turn route natively reads that route from
+    # the turn itself, not from the facade. Captured in a turn and used off it
+    # (the automatic worker thread), it has no route left, and treating it as an
+    # ordinary unbound facade would send evidence down plain ctx.llm routing: a
+    # model nobody chose for this. It is refused exactly like a missing facade.
+    if (
+        llm is not None
+        and not _llm._is_invocation_bound(llm)
+        and _llm.turn_inherit_kwarg(llm)
+    ):
+        llm = None
+
     if llm is None:
         failure_message = (
             "No invocation-bound host LLM is available; refine did not send "
@@ -5350,7 +5367,7 @@ def _refine_once(
     # is deterministic and attributable. An invocation-bound facade already
     # carries the gateway's exact route, so persisted refine overrides must not
     # be expanded into provider/model kwargs.
-    _invocation_bound = bool(getattr(llm, "invocation_bound", False))
+    _invocation_bound = _llm._is_invocation_bound(llm)
     # The model the plugin *intended* to use. The plugin must ALWAYS run on the
     # CURRENT host route — the model actually active in the session — never a
     # stale config/live default. The facade exposes the current provider/model, so

@@ -102,6 +102,39 @@ class MockLlm:
         return MockResult(response)
 
 
+class NativeInheritLlm:
+    """A host facade with the native turn-inheritance API of hermes-agent#110380:
+    an opt-in flag on the call, and ``current_invocation()`` to read the route."""
+
+    def __init__(self, invocation):
+        self.invocation = invocation
+        self.calls = []
+
+    def current_invocation(self):
+        return self.invocation
+
+    def complete_structured(self, *, inherit_turn_invocation=False, **kwargs):
+        self.calls.append(dict(kwargs, inherit_turn_invocation=inherit_turn_invocation))
+        return MockResult(
+            {"action": "no_op", "reason": "nothing to change"},
+            model="turn-model", provider="turn-provider",
+        )
+
+
+class FlagOnlyInheritLlm:
+    """hermes-agent#110361's shape: the flag, and no way to read the route first."""
+
+    def __init__(self):
+        self.calls = []
+
+    def complete_structured(self, *, inherit_turn=False, **kwargs):
+        self.calls.append(dict(kwargs, inherit_turn=inherit_turn))
+        return MockResult(
+            {"action": "no_op", "reason": "nothing to change"},
+            model="turn-model", provider="turn-provider",
+        )
+
+
 class SchemaUnsupportedError(Exception):
     """Mirror of the real opencode-go 4xx invalid_request rejection.
 
@@ -14230,6 +14263,59 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(result["outcome"], "llm_invocation_unavailable")
         self.assertEqual(journal.entries()[-1]["outcome"], "llm_invocation_unavailable")
         self.assertEqual(journal.entries()[-1]["llm_meta"]["primary_attempts"], 0)
+
+    # -- Native turn inheritance (hermes-agent#110361, #110380) -----------------
+
+    def test_native_inheritance_off_its_turn_is_refused_without_a_model_call(self):
+        """A facade captured in a turn and used off it has no route left. It must
+        not fall through to ordinary ctx.llm routing: that is a model nobody chose."""
+        model = NativeInheritLlm(invocation=None)
+
+        result = core.refine_run(model)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["outcome"], "llm_invocation_unavailable")
+        self.assertEqual(model.calls, [])
+
+    def test_native_inheritance_in_turn_sends_the_flag_and_never_an_override(self):
+        model = NativeInheritLlm(
+            invocation=types.SimpleNamespace(provider="turn-provider", model="turn-model")
+        )
+
+        self.assertTrue(core._llm._is_invocation_bound(model))
+        self.assertEqual(core._bound_route_identity(model),
+                         {"provider": "turn-provider", "model": "turn-model"})
+        result = core.refine_run(model)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(model.calls)
+        for call in model.calls:
+            self.assertIs(call["inherit_turn_invocation"], True)
+            self.assertNotIn("provider", call)
+            self.assertNotIn("model", call)
+        self.assertEqual(result["llm_meta"]["target_source"], "invocation_bound")
+
+    def test_session_llm_takes_native_inheritance_only_with_a_live_invocation(self):
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
+            llm=NativeInheritLlm(invocation=None)
+        )
+        self.assertIsNone(plugin_init._session_llm())
+
+        live = NativeInheritLlm(invocation=types.SimpleNamespace(provider="p", model="m"))
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=live)
+        self.assertIs(plugin_init._session_llm(), live)
+
+    def test_flag_only_inheritance_sends_its_own_flag_name(self):
+        model = FlagOnlyInheritLlm()
+
+        self.assertEqual(core._llm.turn_inherit_kwarg(model), "inherit_turn")
+        self.assertEqual(core._llm.bound_route_kwargs(model), {"inherit_turn": True})
+
+    def test_a_patched_facade_is_unchanged_by_native_detection(self):
+        bound = types.SimpleNamespace(invocation_bound=True)
+
+        self.assertTrue(core._llm._is_invocation_bound(bound))
+        self.assertEqual(core._llm.bound_route_kwargs(bound), {})
 
     def test_bound_model_command_cannot_persist_an_ignored_override(self):
         bound = types.SimpleNamespace(invocation_bound=True)
