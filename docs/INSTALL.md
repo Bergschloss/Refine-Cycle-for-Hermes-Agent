@@ -33,12 +33,17 @@ doctor` still passes, because the plugin itself is untouched — only the host
 capability it depends on is gone. New proposals then fail closed with
 `llm_invocation_unavailable` until the patch is reapplied.
 
-This is not specific to any one release. Expect it after every Hermes update:
+This is not specific to any one release. Expect it after every Hermes update.
+From chat, send `/refine update` and then `/restart`: it installs a newer plugin
+release if there is one, then asks that release's installer for the host state
+and reapplies the patch when it is missing. From a terminal:
 
 ```bash
 python install.py --status      # says `stock` again if the patch was removed
 python install.py --patch-only  # reapplies it
 ```
+
+`python install.py --status --json` prints the same report as one line of JSON.
 
 `--status` is also what tells you the bundled patch no longer fits a new host: it
 reports `incompatible` and names the patch bases it tried, rather than forcing a

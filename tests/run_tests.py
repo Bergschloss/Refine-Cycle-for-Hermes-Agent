@@ -16561,14 +16561,31 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                                              return_value=tree))
         return stack
 
-    def test_update_installs_a_newer_release_with_its_own_installer(self):
-        tree = self._release_tree("99.0.0")
-        calls = []
+    def _installer_runner(self, states, calls, *, patch_rc=0):
+        """A fake installer: --status --json walks through ``states``."""
+        remaining = list(states)
 
         def runner(argv, **kwargs):
             calls.append(argv)
-            out = "State           : patched, all 8 files carry markers" if "--status" in argv else "Done"
-            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+            if "--status" in argv:
+                self.assertIn("--json", argv)
+                state = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+                report = {"state": state, "detail": f"{state} detail"}
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(report) + "\n", stderr="")
+            if "--patch-only" in argv:
+                return types.SimpleNamespace(
+                    returncode=patch_rc,
+                    stdout="Host patch applied and compiled." if patch_rc == 0 else "",
+                    stderr="" if patch_rc == 0 else "ERROR: user-modified patch targets",
+                )
+            return types.SimpleNamespace(returncode=0, stdout="Done", stderr="")
+
+        return runner
+
+    def test_update_installs_a_newer_release_with_its_own_installer(self):
+        tree = self._release_tree("99.0.0")
+        calls = []
+        runner = self._installer_runner(["patched"], calls)
 
         with self._update_env(installed=["1.3.6", "99.0.0"], latest="v99.0.0", tree=tree):
             result = update_check.run_update(runner=runner)
@@ -16576,27 +16593,75 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(result["outcome"], "updated")
         self.assertEqual(calls[0][1:], [str(tree / "install.py"), "--plugin-only",
                                         "--hermes-src", str(self.root / "hermes")])
+        self.assertFalse(any("--patch-only" in argv for argv in calls))
         self.assertIn("/restart", result["message"])
-        self.assertNotIn("--patch-only", result["message"])
 
-    def test_update_warns_when_the_host_patch_needs_attention(self):
+    def test_update_restores_a_wiped_host_patch_with_the_release_installer(self):
         tree = self._release_tree("99.0.0")
-
-        def runner(argv, **kwargs):
-            out = "State           : stock, clean base abc" if "--status" in argv else "Done"
-            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+        calls = []
+        runner = self._installer_runner(["stock", "patched"], calls)
 
         with self._update_env(installed=["1.3.6", "99.0.0"], latest="v99.0.0", tree=tree):
             result = update_check.run_update(runner=runner)
 
         self.assertEqual(result["outcome"], "updated")
-        self.assertIn("install.py --patch-only", result["message"])
+        patch_calls = [argv for argv in calls if "--patch-only" in argv]
+        self.assertEqual(patch_calls, [[sys.executable, str(tree / "install.py"), "--patch-only",
+                                        "--hermes-src", str(self.root / "hermes")]])
+        self.assertIn("Restored the host route patch", result["message"])
+
+    def test_update_on_the_latest_release_still_restores_a_wiped_host_patch(self):
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
+        calls = []
+        runner = self._installer_runner(["stock", "patched"], calls)
+
+        with self._update_env(installed=["1.3.6"], latest="v1.3.6", plugin_dir=plugin_dir):
+            result = update_check.run_update(runner=runner)
+
+        self.assertEqual(result["outcome"], "repaired")
+        self.assertIn([sys.executable, str(plugin_dir / "install.py"), "--patch-only",
+                       "--hermes-src", str(self.root / "hermes")], calls)
+        self.assertIn("/restart", result["message"])
+
+    def test_update_explains_a_hermes_no_bundled_patch_fits(self):
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
+        calls = []
+        runner = self._installer_runner(["incompatible"], calls)
+
+        with self._update_env(installed=["1.3.6"], latest="v1.3.6", plugin_dir=plugin_dir):
+            result = update_check.run_update(runner=runner)
+
+        self.assertEqual(result["outcome"], "already_latest")
+        self.assertFalse(any("--patch-only" in argv for argv in calls))
+        self.assertIn("incompatible detail", result["message"])
+
+    def test_update_reports_the_installer_refusing_to_patch(self):
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
+        calls = []
+        runner = self._installer_runner(["dirty"], calls, patch_rc=1)
+
+        with self._update_env(installed=["1.3.6"], latest="v1.3.6", plugin_dir=plugin_dir):
+            result = update_check.run_update(runner=runner)
+
+        self.assertEqual(result["outcome"], "already_latest")
+        self.assertIn("user-modified patch targets", result["message"])
+        self.assertNotIn("/restart", result["message"])
 
     def test_update_does_nothing_when_already_current(self):
-        with self._update_env(installed=["1.3.6"], latest="v1.3.6"):
-            result = update_check.run_update(
-                runner=lambda *a, **k: self.fail("installer ran"))
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
+        calls = []
+        with self._update_env(installed=["1.3.6"], latest="v1.3.6", plugin_dir=plugin_dir):
+            result = update_check.run_update(runner=self._installer_runner(["patched"], calls))
         self.assertEqual(result["outcome"], "already_latest")
+        self.assertFalse(any("--patch-only" in argv or "--plugin-only" in argv for argv in calls))
 
     def test_update_leaves_a_catalog_install_to_hermes(self):
         plugin_dir = self.root / "catalog-plugin"
@@ -26020,6 +26085,22 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertTrue(any("llm_invocation_unavailable" in message for message in messages))
         self.assertTrue(any("0/8 patch targets" in message for message in messages))
         self.assertFalse(any("Capability verified" in message for message in messages))
+
+    def test_status_json_reports_the_host_state_as_data(self):
+        """/refine update decides from this, so it is data rather than prose to parse."""
+        import contextlib
+        import io
+        import install
+
+        out = io.StringIO()
+        with self._as_stock_host(), \
+                patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False), \
+                contextlib.redirect_stdout(out):
+            install.main(["--status", "--json", "--hermes-src", str(self.src)])
+        report = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(report["state"], "stock")
+        self.assertEqual(Path(report["hermes_src"]), self.src)
+        self.assertIs(report["plugin_installed"], False)
 
     def test_the_same_stock_host_is_patched_without_the_flag(self):
         """Both directions: the fixture really is patchable, so the check above bites."""

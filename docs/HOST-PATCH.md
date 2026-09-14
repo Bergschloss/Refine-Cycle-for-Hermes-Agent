@@ -46,11 +46,13 @@ The plugin reads exactly one thing from this: `llm.invocation_bound`. Everything
 
 Two different failures, often confused.
 
-**The patch was overwritten.** `hermes update` replaces the eight files with clean copies. The patch still applies; it simply is not applied any more. Fix:
+**The patch was overwritten.** `hermes update` replaces the eight files with clean copies. The patch still applies; it simply is not applied any more. Send `/refine update` in chat, then `/restart`, or run:
 
 ```bash
 python install.py --patch-only
 ```
+
+`/refine update` decides nothing itself. It reads `install.py --status --json` from the newest release it has, runs `--patch-only` when the state is anything but `patched` or `incompatible`, and reports what the installer said. The installer keeps its own refusals: a checkout with hand-edited patch targets, and one no bundled patch fits.
 
 **The patch no longer applies.** Upstream moved the surrounding code far enough that the context no longer matches. `install.py --status` says so and names every bundled patch it tried. This needs a rebase.
 

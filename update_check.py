@@ -1,5 +1,9 @@
 """Tell the user when a newer Refine Cycle release exists, and update on request.
 
+``/refine update`` also puts back the host route patch a Hermes update removed,
+by asking the installer shipped in the release, which picks whichever bundled
+patch fits and refuses when none does.
+
 Nothing here installs code on its own. ``update_available`` only reads the tag
 of the latest release. ``run_update`` installs it, and runs only when the user
 sends ``/refine update``: a plugin that pulls and runs its own updates would
@@ -249,24 +253,61 @@ def _tail(text: str) -> str:
     return text[-_OUTPUT_TAIL_CHARS:] if len(text) > _OUTPUT_TAIL_CHARS else text
 
 
-def _host_patch_note(runner: Callable[..., Any], tree: Path, host: Path) -> str:
-    """One sentence when the host route patch is not in place, otherwise ""."""
+def _host_state(runner: Callable[..., Any], installer: Path, host: Path) -> Dict[str, str]:
+    """The host state as the installer classifies it: ``{state, detail}``."""
     try:
         done = runner(
-            [sys.executable, str(tree / "install.py"), "--status", "--hermes-src", str(host)],
-            capture_output=True, text=True, timeout=60, cwd=str(tree),
+            [sys.executable, str(installer), "--status", "--json", "--hermes-src", str(host)],
+            capture_output=True, text=True, timeout=60, cwd=str(installer.parent),
         )
-        state = next(
-            (line for line in (done.stdout or "").splitlines() if line.strip().startswith("State")),
-            "",
+    except Exception as exc:
+        return {"state": "unknown", "detail": f"the installer could not run ({type(exc).__name__})"}
+    lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
+    try:
+        report = json.loads(lines[-1]) if done.returncode == 0 and lines else None
+    except ValueError:
+        report = None
+    if not isinstance(report, dict):
+        return {"state": "unknown",
+                "detail": _tail((done.stdout or "") + (done.stderr or "")) or "no report"}
+    return {"state": str(report.get("state") or "unknown"), "detail": str(report.get("detail") or "")}
+
+
+def _repair_host(runner: Callable[..., Any], installer: Path, host: Path) -> Tuple[bool, str]:
+    """Put the host route patch back when an update removed it.
+
+    The installer decides everything here: which bundled patch fits this Hermes,
+    and whether it is safe to apply. It already refuses a checkout someone edited
+    by hand and one no patch fits, and reverses a half-applied patch with a backup
+    first. This only asks for its state, asks it to patch when the patch is
+    missing, and reports what it said. Returns ``(changed, sentence)``.
+    """
+    before = _host_state(runner, installer, host)
+    if before["state"] == "patched":
+        return False, ""
+    if before["state"] == "incompatible":
+        return False, (
+            " This Hermes has changed and none of the route patches in this release fits it, "
+            f"so proposals stay off until a release that does ({before['detail']}). "
+            "Send /refine update again after the next release."
         )
-    except Exception:
-        return ""
-    if not state or "patched" in state:
-        return ""
-    return (
-        " The host route patch is not in place, so proposals will fail until you run "
-        f"install.py --patch-only from the plugin directory ({state.split(':', 1)[-1].strip()})."
+    if before["state"] == "unknown":
+        return False, f" Could not read the host state: {before['detail']}"
+    try:
+        done = runner(
+            [sys.executable, str(installer), "--patch-only", "--hermes-src", str(host)],
+            capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_SECONDS,
+            cwd=str(installer.parent),
+        )
+    except Exception as exc:
+        return False, f" The host route patch is missing and the installer could not run ({type(exc).__name__})."
+    after = _host_state(runner, installer, host)
+    if done.returncode == 0 and after["state"] == "patched":
+        return True, f" Restored the host route patch: {after['detail']}."
+    output = _tail((done.stdout or "") + "\n" + (done.stderr or ""))
+    return False, (
+        f" The host route patch is missing ({before['state']}) and the installer did not "
+        f"restore it:\n{output}"
     )
 
 
@@ -298,11 +339,18 @@ def run_update(*, runner: Callable[..., Any] = subprocess.run) -> Dict[str, str]
     with _lock:
         _memory.update({"checked_ts": time.time(), "release": release})
     tag = release["tag"]
-    if not _newer(release, installed):
-        return {"outcome": "already_latest",
-                "message": f"Already on the latest release ({installed or tag})."}
-
     host = _host_checkout()
+    if not _newer(release, installed):
+        message = f"Already on the latest release ({installed or tag})."
+        installer = plugin_dir / "install.py"
+        if host is None or not installer.is_file():
+            return {"outcome": "already_latest", "message": message}
+        changed, note = _repair_host(runner, installer, host)
+        if changed:
+            return {"outcome": "repaired",
+                    "message": message + note + " Restart Hermes to load it (in chat: /restart)."}
+        return {"outcome": "already_latest", "message": message + note}
+
     if host is None:
         return {"outcome": "failed",
                 "message": "Could not locate the Hermes checkout this plugin runs in."}
@@ -342,11 +390,12 @@ def run_update(*, runner: Callable[..., Any] = subprocess.run) -> Dict[str, str]
                 f"{now_installed or 'no version'}."
             )
 
+        _changed, note = _repair_host(runner, tree / "install.py", host)
         return {
             "outcome": "updated",
             "message": (
-                f"Updated Refine Cycle {installed} to {tag}. Restart Hermes to load it "
-                "(in chat: /restart)." + _host_patch_note(runner, tree, host)
+                f"Updated Refine Cycle {installed} to {tag}." + note
+                + " Restart Hermes to load it (in chat: /restart)."
             ),
         }
     finally:

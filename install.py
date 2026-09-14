@@ -1246,6 +1246,18 @@ def new_metadata(src: Path, previous: dict, *, mode: str) -> dict:
 def do_status(args) -> None:
     src = find_hermes_src(args.hermes_src)
     state, detail = classify_host(src)
+    if getattr(args, "json", False):
+        # The machine-readable form /refine update decides from. One line, so a
+        # caller never has to parse the prose report below.
+        plugin_dest = plugin_dest_for(src)
+        print(json.dumps({
+            "hermes_src": str(src),
+            "state": state,
+            "detail": detail,
+            "plugin_installed": (plugin_dest / "plugin.yaml").is_file(),
+            "plugin_dest": str(plugin_dest),
+        }))
+        return
     say(f"Hermes checkout : {src}")
     say(f"State           : {state} — {detail}")
     mdir = metadata_dir(src)
@@ -1674,6 +1686,8 @@ def main(argv: list[str]) -> None:
     ap.add_argument("--plugin-only", action="store_true", help="install only plugin files (no host patch)")
     ap.add_argument("--rollback", action="store_true", help="restore host from backup; remove plugin")
     ap.add_argument("--status", action="store_true", help="report detected state without changes")
+    ap.add_argument("--json", action="store_true",
+                    help="with --status, print the report as one line of JSON")
     ap.add_argument("--plugin-mode", choices=["remove", "keep"], default="remove",
                     help="what to do with plugin files during rollback")
     args = ap.parse_args(argv)

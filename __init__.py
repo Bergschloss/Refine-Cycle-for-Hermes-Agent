@@ -1064,7 +1064,7 @@ async def _update_command() -> str:
     except Exception as exc:
         logger.exception("refine update failed")
         return f"\u274c Update failed: {core.scrub_text(str(exc))}"
-    mark = {"updated": "\u2705", "already_latest": "\u2139\ufe0f",
+    mark = {"updated": "\u2705", "repaired": "\u2705", "already_latest": "\u2139\ufe0f",
             "catalog_install": "\u2139\ufe0f"}.get(result.get("outcome"), "\u274c")
     return f"{mark} {core.scrub_text(result.get('message', ''))}"
 
