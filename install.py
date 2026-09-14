@@ -228,7 +228,7 @@ PLUGIN_MANIFEST_EXTRAS = ("plugin.yaml",)
 REQUIRED_PLUGIN_MODULES = (
     "__init__.py", "config.py", "core.py", "journal.py", "ledger.py", "llm.py",
     "notify.py", "patterns.py", "refine_trace.py", "sanitization.py",
-    "plugin.yaml",
+    "update_check.py", "plugin.yaml",
 )
 
 

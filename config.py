@@ -331,6 +331,11 @@ def max_edits_per_day() -> int:
     return get_int("max_edits_per_day", 3, min_val=1)
 
 
+def update_check_enabled() -> bool:
+    """Whether /refine status may ask GitHub, once a day, for the latest release tag."""
+    return get_bool("update_check", True)
+
+
 def max_model_runs_per_day() -> int:
     """Refine passes per UTC day that may reach a model, manual and automatic alike.
 

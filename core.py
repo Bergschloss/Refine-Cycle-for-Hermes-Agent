@@ -16,6 +16,7 @@ from agent.plugin_llm import PluginLlm
 
 try:
     from . import config, journal, ledger, llm as _llm, notify as _notify, patterns
+    from . import update_check as _update_check
     from .sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE, sanitize, scrub_text
     # Renamed from `trace` to refine_trace: the repo root is on sys.path on the
     # server, so `from . import trace` / `import trace` used to resolve to this
@@ -23,6 +24,7 @@ try:
     from . import refine_trace as _trace
 except ImportError:
     import config, journal, ledger, llm as _llm, notify as _notify, patterns  # noqa: F811
+    import update_check as _update_check  # noqa: F811
     from sanitization import (  # noqa: F811
         LINE_BREAK_CHARS,
         LINE_BREAK_RE,
@@ -2529,6 +2531,15 @@ def refine_status() -> Dict[str, Any]:
         })
 
     warnings: List[Dict[str, str]] = []
+    update = _update_check.update_available()
+    if update:
+        warnings.append({
+            "code": "update_available",
+            "message": (
+                f"Refine Cycle {update['latest']} is available "
+                f"(installed {update['installed']}): {update['url']}"
+            ),
+        })
     if not persistence["total_bytes_complete"]:
         warnings.append({
             "code": "persistence_size_unknown",
@@ -2713,6 +2724,7 @@ def refine_status() -> Dict[str, Any]:
         "max_edits_per_day": max_edits,
         "model_runs_today": model_runs_today,
         "max_model_runs_per_day": max_model_runs,
+        "update_available": update,
         "journal_present": journal_present,
         "journal_readable": journal_readable,
         "journal_dir": str(jdir),

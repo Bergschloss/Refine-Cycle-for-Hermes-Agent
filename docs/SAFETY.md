@@ -31,6 +31,10 @@ initiated.
 
 ---
 
+## What else leaves the host
+
+`/refine status` makes one anonymous request to `api.github.com` for the latest Refine Cycle release tag, at most once a day per running process, and only when `update_check` is on (the default). The request carries no session, config or host data. The result is only displayed; nothing is downloaded or installed, because a plugin that updates itself would bypass the review a pinned install exists for.
+
 ## Safety & limits
 
 - **Credential scrubbing** covers evidence, reasons, proposals, reviewer

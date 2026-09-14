@@ -17,6 +17,7 @@ All keys live under `plugins.entries.refine`:
 | `max_edits_per_run` | int | `1` | Maximum proposal passes per run. |
 | `max_edits_per_proposal` | int | `3` | Maximum inseparable edits one proposal may apply as a single transaction. `1` disables transactions. |
 | `max_edits_per_day` | int | `3` | Maximum applied, pending, prepared, rollback-prepared, or pending-rollback **edits** per UTC day. This is the blast-radius limit and is re-checked before every edit. |
+| `update_check` | bool | `true` | Lets `/refine status` ask GitHub for the latest release tag, at most once a day per process, and show a warning when a newer version exists. It never downloads or installs anything. |
 | `max_model_runs_per_day` | int | `30` | Maximum refine passes per UTC day that reach a model, manual, automatic and dry runs together. Checked before a pass collects evidence, so a refused pass sends nothing. Automatic passes do not start once it is used up. This is the spend ceiling: every pass runs on the model the session already uses. |
 | `only_agent_created` | bool | `true` | Only patch agent-created skills. |
 | `journal_dir` | path | `<HERMES_HOME>/refine` | Journal, lock, ledger, backups, prompt notes, and the `/refine model` override. An empty value uses this default. |

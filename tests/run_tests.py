@@ -558,6 +558,10 @@ import sanitization
 import ledger
 import llm
 import patterns
+import update_check
+
+# The suite never reaches the network; tests that exercise the check patch this.
+update_check._fetch_latest_release = lambda: None
 
 
 def load_plugin_init():
@@ -993,6 +997,7 @@ class RefineTests(unittest.TestCase):
         llm._call_transport.preferred_output_mode = ""
         llm._call_meta.value = {}
         config._set_runtime_journal_dir(None)
+        update_check._memory.clear()
         journal._MIGRATION_STATUS.update({
             "outcome": "not_checked", "source": "", "destination": "",
             "active_dir": "", "rename_warning": "", "error": "",
@@ -16434,6 +16439,73 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             self.assertTrue(plugin_init._auto_refine_allowed())
             FakeHost.entry_config()["max_model_runs_per_day"] = 1
             self.assertFalse(plugin_init._auto_refine_allowed())
+
+    # -- Update check -------------------------------------------------------------
+
+    @staticmethod
+    def _release(tag):
+        return {"tag": tag, "url": f"https://example.invalid/{tag}"}
+
+    def test_update_is_reported_only_for_a_newer_release(self):
+        cases = {"v1.3.6": True, "v1.4.0": True, "v1.3.5": False, "v1.2.9": False, "nightly": False}
+        for tag, newer in cases.items():
+            update_check._memory.clear()
+            with patch.object(update_check, "installed_version", return_value="1.3.5"),                     patch.object(update_check, "_fetch_latest_release",
+                                 return_value=self._release(tag)):
+                found = update_check.update_available()
+            self.assertEqual(bool(found), newer, tag)
+            if newer:
+                self.assertEqual(found["latest"], tag)
+                self.assertEqual(found["installed"], "1.3.5")
+
+    def test_update_check_reaches_the_network_at_most_once_a_day(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return self._release("v9.9.9")
+
+        with patch.object(update_check, "_fetch_latest_release", side_effect=fetch):
+            update_check.latest_release(now=1000.0)
+            update_check.latest_release(now=1000.0 + 3600)
+            self.assertEqual(len(calls), 1)
+            update_check.latest_release(now=1000.0 + 24 * 3600 + 1)
+            self.assertEqual(len(calls), 2)
+
+    def test_a_failed_update_check_is_silent_and_not_retried_at_once(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            raise OSError("offline")
+
+        with patch.object(update_check, "_fetch_latest_release", side_effect=fetch):
+            self.assertIsNone(update_check.latest_release(now=1000.0))
+            self.assertIsNone(update_check.latest_release(now=1060.0))
+        self.assertEqual(len(calls), 1)
+
+    def test_update_check_can_be_turned_off(self):
+        FakeHost.entry_config()["update_check"] = False
+        with patch.object(update_check, "_fetch_latest_release",
+                          side_effect=AssertionError("the network was used")):
+            self.assertIsNone(update_check.update_available())
+
+    def test_status_names_an_available_update_as_a_warning(self):
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
+            llm=types.SimpleNamespace(invocation_bound=True)
+        )
+        with patch.object(update_check, "installed_version", return_value="1.3.5"),                 patch.object(update_check, "_fetch_latest_release",
+                             return_value=self._release("v1.3.6")):
+            status = core.refine_status()
+            text = plugin_init._handle_refine_command("status")
+
+        self.assertEqual(status["update_available"]["latest"], "v1.3.6")
+        self.assertIn("update_available", status["warning_codes"])
+        self.assertNotIn("update_available", status["blocker_codes"])
+        self.assertIn("v1.3.6", text)
+
+    def test_installed_version_is_read_from_the_manifest(self):
+        self.assertRegex(update_check.installed_version(), r"^\d+\.\d+\.\d+$")
 
     def test_dry_run_reports_journal_failure(self):
         model = MockLlm({
