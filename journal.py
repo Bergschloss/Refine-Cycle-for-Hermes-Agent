@@ -19,10 +19,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 try:
-    from .config import journal_dir, max_edits_per_day
+    from .config import journal_dir, max_edits_per_day, max_model_runs_per_day
     from .sanitization import LINE_BREAK_CHARS, sanitize, scrub_text
 except ImportError:
-    from config import journal_dir, max_edits_per_day  # noqa: F811
+    from config import journal_dir, max_edits_per_day, max_model_runs_per_day  # noqa: F811
     from sanitization import LINE_BREAK_CHARS, sanitize, scrub_text  # noqa: F811
 
 logger = logging.getLogger(__name__)
@@ -1963,6 +1963,39 @@ def count_today_applied() -> int:
 
 def daily_limit_reached() -> bool:
     return count_today_applied() >= max_edits_per_day()
+
+
+def count_today_model_runs() -> int:
+    """Count today's refine passes that reached a model.
+
+    ``entries()`` holds one logical record per pass, so a pass that went on to
+    apply and roll back is still one. A pass reached a model when it made a
+    primary attempt or its proposer subagent made an API call. Returns the
+    ceiling when the journal is unreadable, so the gate stays closed rather than
+    allowing unlimited calls.
+    """
+    today = datetime.now(timezone.utc).date()
+    try:
+        all_entries = _load_entries()
+    except IOError:
+        return max_model_runs_per_day()
+    count = 0
+    for entry in all_entries:
+        meta = entry.get("llm_meta")
+        if not isinstance(meta, dict):
+            continue
+        if not (meta.get("primary_attempts") or meta.get("subagent_api_calls")):
+            continue
+        try:
+            if datetime.fromtimestamp(entry.get("ts", 0), tz=timezone.utc).date() == today:
+                count += 1
+        except (OSError, OverflowError, ValueError, TypeError):
+            continue
+    return count
+
+
+def model_run_limit_reached() -> bool:
+    return count_today_model_runs() >= max_model_runs_per_day()
 
 
 def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:

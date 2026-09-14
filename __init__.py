@@ -215,7 +215,11 @@ def _forget_turn_marks(session_id: str) -> None:
 
 def _auto_refine_allowed() -> bool:
     """Return whether an automatic attempt may start without mutating state."""
-    return config.auto_enabled() and _cooldown_elapsed()
+    return (
+        config.auto_enabled()
+        and _cooldown_elapsed()
+        and not journal.model_run_limit_reached()
+    )
 
 
 def _run_auto_refine(
@@ -1076,6 +1080,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             f"min messages: {status['auto_min_messages']}",
             f"cooldown: {status['auto_cooldown_minutes']} min",
             f"edits today: {status['edits_today']}/{status['max_edits_per_day']}",
+            f"model runs today: {status['model_runs_today']}/{status['max_model_runs_per_day']}",
             f"session: {status['session_id'] or '(unknown)'}"
             + f" (source: {status['session_id_source']}"
             + f", messages: {status['session_message_count']})",

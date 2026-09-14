@@ -16374,6 +16374,67 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(result["success"])
         self.assertEqual(result["outcome"], "dry_run")
 
+    # -- Daily ceiling on model runs ---------------------------------------------
+
+    def _spend_model_run(self, **meta):
+        return journal.log(
+            trigger="auto", reason="spent", session_id="session",
+            proposal={"action": "no_op"}, outcome="no_op",
+            llm_meta=meta or {"primary_attempts": 1},
+        )
+
+    def test_model_runs_today_count_one_per_pass_that_reached_a_model(self):
+        applied = journal.log(
+            trigger="auto", reason="r", session_id="s",
+            proposal={"action": "create", "kind": "skill", "name": "x"},
+            outcome="prepared", llm_meta={"primary_attempts": 1},
+        )
+        journal.finalize(applied, "applied")
+        self._spend_model_run(primary_attempts=1)
+        self._spend_model_run(primary_attempts=0, subagent_api_calls=4)
+        journal.log(
+            trigger="manual", reason="r", session_id="s",
+            proposal={"action": "no_op"}, outcome="no_applicable_pattern",
+        )
+
+        # The prepared pass that went on to apply is still one pass.
+        self.assertEqual(journal.count_today_model_runs(), 3)
+
+    def test_model_run_ceiling_refuses_before_any_model_call(self):
+        FakeHost.entry_config()["max_model_runs_per_day"] = 1
+        self._spend_model_run()
+
+        for dry_run in (False, True):
+            model = MockLlm()
+            result = core.refine_run(model, session_id="session", dry_run=dry_run)
+            self.assertFalse(result["success"])
+            self.assertEqual(result["outcome"], "model_run_limit_reached")
+            self.assertEqual(model.calls, [])
+        # A refusal reached no model, so it does not spend the ceiling it reports.
+        self.assertEqual(journal.count_today_model_runs(), 1)
+
+    def test_status_reports_the_model_run_ceiling(self):
+        FakeHost.entry_config()["max_model_runs_per_day"] = 1
+        self._spend_model_run()
+
+        status = core.refine_status()
+
+        self.assertEqual(status["model_runs_today"], 1)
+        self.assertEqual(status["max_model_runs_per_day"], 1)
+        self.assertIn("model_run_limit_reached", status["blocker_codes"])
+        plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
+            llm=types.SimpleNamespace(invocation_bound=True)
+        )
+        self.assertIn("model runs today: 1/1", plugin_init._handle_refine_command("status"))
+
+    def test_automatic_pass_does_not_start_at_the_model_run_ceiling(self):
+        self._spend_model_run()
+        with patch.object(plugin_init, "_cooldown_elapsed", return_value=True):
+            FakeHost.entry_config()["max_model_runs_per_day"] = 2
+            self.assertTrue(plugin_init._auto_refine_allowed())
+            FakeHost.entry_config()["max_model_runs_per_day"] = 1
+            self.assertFalse(plugin_init._auto_refine_allowed())
+
     def test_dry_run_reports_journal_failure(self):
         model = MockLlm({
             "action": "no_op", "reason": "nothing", "evidence": [],

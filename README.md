@@ -38,7 +38,7 @@ correctly → **49.6–57.0%** with the plugin.
 
 ## You stay in control
 
-- It makes no more than three changes per day.
+- It makes no more than three changes per day, and reaches a model no more than 30 times a day.
 - Every change is recorded. When it can be safely undone, it gives you one
   command to reverse it.
 - It never rewrites Hermes's base instructions or deletes your skills.

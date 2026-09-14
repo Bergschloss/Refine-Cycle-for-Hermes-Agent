@@ -81,7 +81,7 @@ Recurrence is decided by the plugin, not the model. `patterns.py` normalizes req
 
 Skill and memory content passes an injection check and a resource check. Memory additionally passes a duplicate check against the store.
 
-Defaults that bound the blast radius: `max_edits_per_run = 1`, `auto_cooldown_minutes = 20`. Every applied edit is backed up before the write and is reversible by journal id.
+Defaults that bound the blast radius: `max_edits_per_run = 1`, `max_edits_per_day = 3`, `auto_cooldown_minutes = 20`, and `max_model_runs_per_day = 30` for spend. Every applied edit is backed up before the write and is reversible by journal id.
 
 ## What it stores
 
@@ -104,7 +104,7 @@ python tests/run_tests.py
 
 ## Known gaps
 
-- **No spend ceiling.** The plugin calls the model the user is already running, up to three times an hour on autorun. There is a cooldown and an edit cap, but nothing bounds cost.
+- **The spend ceiling counts passes, not tokens.** `max_model_runs_per_day` (default 30) stops a pass before it reaches the model, but one pass can make more than one call (a json_schema attempt retried as json_mode, a reviewer call, a proposer subagent's own API calls), and passes differ in size.
 - **`_looks_like_cli` classifies against the wrong surface.** A prompt-note rule naming a tool cannot be distinguished from one naming a shell binary at parse time, because `pre_llm_call` carries neither `valid_tool_names` nor the toolset config. A fix that called `get_tool_definitions()` was written and rolled back because a plugin cannot ask that question at parse time. It needs either the host exposing the effective tool surface, or classification deferred to enforcement.
 - **The notification path is undocumented coupling** and is expected to break.
 - **One filler ordering, one model, one route** in every measurement. See the research report.

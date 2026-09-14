@@ -2419,6 +2419,7 @@ def refine_status() -> Dict[str, Any]:
     auto = config.auto_enabled()
     interval = config.auto_turn_interval()
     max_edits = config.max_edits_per_day()
+    max_model_runs = config.max_model_runs_per_day()
     jdir = config.journal_dir()
     jdir_state = _journal_dir_state(jdir)
     migration = journal.migration_status()
@@ -2448,6 +2449,7 @@ def refine_status() -> Dict[str, Any]:
     journal_present = False
     journal_readable = True
     edits_today = 0
+    model_runs_today = 0
     last_ts: Optional[float] = None
     cooldown_remaining = 0.0
     last_model_substituted = False
@@ -2459,6 +2461,7 @@ def refine_status() -> Dict[str, Any]:
             if state != "ok":
                 raise IOError(f"journal state is {state}")
             edits_today = journal.count_today_applied()
+            model_runs_today = journal.count_today_model_runs()
             last_ts = journal.last_attempt_ts()
             cooldown_remaining = auto_cooldown_remaining_minutes()
             # Surface whether the most recent refine pass ran on a substituted
@@ -2495,6 +2498,13 @@ def refine_status() -> Dict[str, Any]:
         blockers.append({
             "code": "budget_exhausted",
             "message": f"Daily edit budget is used up ({edits_today}/{max_edits})",
+        })
+    if model_runs_today >= max_model_runs:
+        blockers.append({
+            "code": "model_run_limit_reached",
+            "message": (
+                f"Daily model-run limit is used up ({model_runs_today}/{max_model_runs})"
+            ),
         })
     cooldown_shown = round(cooldown_remaining, 1)
     if cooldown_remaining > 0:
@@ -2701,6 +2711,8 @@ def refine_status() -> Dict[str, Any]:
         "cooldown_remaining_minutes": cooldown_shown,
         "edits_today": edits_today,
         "max_edits_per_day": max_edits,
+        "model_runs_today": model_runs_today,
+        "max_model_runs_per_day": max_model_runs,
         "journal_present": journal_present,
         "journal_readable": journal_readable,
         "journal_dir": str(jdir),
@@ -5352,6 +5364,28 @@ def _refine_once(
             outcome="daily_limit_reached",
             success=False,
             message=limit_message,
+            trigger=trigger,
+            safe_reason=safe_reason,
+            session=resolved_session,
+            evidence={
+                "session_id": resolved_session,
+                "session_id_source": resolved_source,
+                "session_source": session_db_source,
+                "source_lookup_status": source_lookup_status,
+            },
+        )
+
+    # The spend ceiling. Unlike the edit budget it covers dry runs: a preview
+    # reaches the model exactly as a real pass does.
+    if journal.model_run_limit_reached():
+        return _terminal_result(
+            outcome="model_run_limit_reached",
+            success=False,
+            message=(
+                f"Daily model-run limit reached ({journal.count_today_model_runs()}/"
+                f"{config.max_model_runs_per_day()}); refine did not call the model. "
+                "Raise max_model_runs_per_day to allow more."
+            ),
             trigger=trigger,
             safe_reason=safe_reason,
             session=resolved_session,

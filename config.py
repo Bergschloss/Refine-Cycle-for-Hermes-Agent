@@ -331,6 +331,17 @@ def max_edits_per_day() -> int:
     return get_int("max_edits_per_day", 3, min_val=1)
 
 
+def max_model_runs_per_day() -> int:
+    """Refine passes per UTC day that may reach a model, manual and automatic alike.
+
+    This is the spend ceiling. Every pass runs on the model the user is already
+    paying for, and before it existed a live host logged 204 passes in one day,
+    143 of them failures retried on the main model. Normal active days logged
+    under 35.
+    """
+    return get_int("max_model_runs_per_day", 30, min_val=1)
+
+
 def only_agent_created() -> bool:
     return get_bool("only_agent_created", True)
 
