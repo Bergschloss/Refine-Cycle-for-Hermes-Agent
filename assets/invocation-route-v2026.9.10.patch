@@ -507,7 +507,7 @@ index ccc3772aa..b26edc834 100644
 +                    # yet (first message in a session), which is honest: there is no
 +                    # settled route to borrow.
 +                    with plugin_invocation_scope_for_agent(
-+                        self._plugin_command_agent(_quick_key)
++                        self._plugin_command_agent(self._session_key_for_source(source))
 +                    ):
 +                        result = plugin_handler(event.get_command_args().strip())
 +                        if asyncio.iscoroutine(result):
@@ -696,7 +696,7 @@ new file mode 100644
 index 000000000..aac00f75c
 --- /dev/null
 +++ b/tests/agent/test_plugin_invocation_route.py
-@@ -0,0 +1,458 @@
+@@ -0,0 +1,510 @@
 +"""Regression coverage for invocation-bound plugin LLM routing.
 +
 +A plugin that reasons about the user's private conversation must reach the model
@@ -1155,6 +1155,58 @@ index 000000000..aac00f75c
 +    for thread in threads:
 +        thread.join(timeout=10)
 +    assert seen == {"a": "a-model", "b": "b-model"}
++
++
++# ── Direct command dispatch on the gateway ────────────────────────────────────
++
++
++def test_a_gateway_plugin_command_runs_bound_to_the_session_agent():
++    """The real gateway dispatcher still runs the command, bound to the session agent.
++
++    Rebasing onto v2026.9.14 merged without a conflict into a dispatcher Hermes had
++    split out of a larger method, and the lookup kept a session-key variable that
++    only the old method defined. The NameError was caught by the dispatcher's own
++    handler, so every plugin slash command on the gateway stopped running without
++    an error anyone would see. Only driving the real dispatcher catches that, which
++    is why this names its internals: a rename should fail here, loudly, at rebase.
++    """
++    from collections import OrderedDict
++    from unittest.mock import patch
++
++    from gateway.run_inbound import GatewayInboundMixin
++
++    session_agent = _agent()
++    seen = {}
++
++    def handler(args):
++        binding = hp._plugin_invocation_binding.get()
++        seen["args"] = args
++        seen["route"] = getattr(binding, "route", None)
++        return "handled"
++
++    class Runner(GatewayInboundMixin):
++        _draining = False
++
++        def __init__(self):
++            self._agent_cache = OrderedDict({"session-key": (session_agent, None)})
++            self._agent_cache_lock = threading.Lock()
++
++        def _hm_quick_commands(self):
++            return {}
++
++        def _session_key_for_source(self, source):
++            return "session-key"
++
++    event = SimpleNamespace(get_command_args=lambda: "status")
++    with patch.object(hp, "get_plugin_command_handler", return_value=handler):
++        handled, result, _command = asyncio.run(
++            Runner()._hm_dispatch_quick_and_plugin_commands(event, SimpleNamespace(), "refine")
++        )
++
++    assert (handled, result) == (True, "handled")
++    assert seen["args"] == "status"
++    assert seen["route"] is not None
++    assert (seen["route"].provider, seen["route"].model) == ("custom", "locked-model")
 diff --git a/tui_gateway/methods_tools.py b/tui_gateway/methods_tools.py
 index 0c8058950..062a6cbad 100644
 --- a/tui_gateway/methods_tools.py

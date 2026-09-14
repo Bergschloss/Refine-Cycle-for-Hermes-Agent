@@ -95,6 +95,13 @@ PATCH_MARKERS = {
     # v0.21.0 is the one that fits the 0.21.1 release tag, this one fits main after
     # it. Selection is by applicability, so a host only ever gets the one that fits.
     "invocation-route-v2026.9.10.patch": _V021_MARKERS,
+    # Same nine files and markers again, rebased onto the v2026.9.14 release, where
+    # seven of the eight targets had moved. Upstream split plugin-command dispatch
+    # out of a larger gateway method, so the session-key lookup there is the one
+    # hunk rewritten rather than re-anchored; the patch's own test now drives that
+    # dispatcher. The await-thread context copy it used to add to hermes_cli/plugins
+    # is upstream now and is no longer part of the patch.
+    "invocation-route-v2026.9.14.patch": _V021_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 
@@ -203,6 +210,28 @@ def select_reverse_patch(src: Path) -> Path | None:
         if _git_apply_checks(src, patch, "-R"):
             return patch
     return None
+
+
+def return_patch_targets_to_head(src: Path, patch: Path | None) -> int:
+    """Put back the checkout's own version of every file ``patch`` touches.
+
+    Only for an ``outdated`` host, after its backup is recorded. The route patch is
+    an uncommitted change on top of the checkout, so HEAD holds the stock file; a
+    file the patch created is not in HEAD and is removed. Nothing outside the
+    patch's own files is touched.
+    """
+    count = 0
+    for rel in patch_content_files(patch):
+        tracked = run_git(src, "ls-files", "--error-unmatch", "--", rel).returncode == 0
+        if tracked:
+            r = run_git(src, "checkout", "HEAD", "--", rel)
+            if r.returncode != 0:
+                fail(f"could not restore {rel} from the checkout: {r.stderr.strip()}")
+            count += 1
+        elif (src / rel).is_file():
+            (src / rel).unlink()
+            count += 1
+    return count
 
 # Top-level packages that belong to the Hermes host, not to the plugin. An
 # unresolved one of these during import verification means this environment
@@ -504,7 +533,12 @@ def detected_patch_topology(src: Path) -> tuple[Path | None, list[str], int]:
 
 
 def classify_host(src: Path) -> tuple[str, str]:
-    """Return (state_class, detail). States: stock, patched, partial, dirty, incompatible.
+    """Return (state_class, detail). States: stock, patched, outdated, partial, dirty, incompatible.
+
+    ``outdated`` is a host whose markers are all present but whose patched files
+    no bundled patch reverses out of: it carries an earlier revision of a patch
+    that has since been fixed. Markers alone cannot tell the two apart, so without
+    this state a corrected patch could never reach a host that had the old one.
 
     Each bundled patch owns its topology. A host is patched when any one topology
     is complete, partial when the strongest topology has some but not all markers,
@@ -517,10 +551,19 @@ def classify_host(src: Path) -> tuple[str, str]:
 
     detected, applied, total = detected_patch_topology(src)
     if total and len(applied) == total:
+        applied_revision = select_reverse_patch(src)
+        if applied_revision is None:
+            return (
+                "outdated",
+                f"all {total} files carry {detected.name if detected else 'route'} markers "
+                f"at {head}, but no bundled patch revision reverses out of them: the "
+                "applied revision has been superseded",
+            )
+        # Name the revision that is actually on the host. Patches of one family share
+        # a marker table, so the marker scan alone names the newest of them.
         return (
             "patched",
-            f"all {total} files carry {detected.name if detected else 'a bundled patch'} "
-            f"markers at {head}",
+            f"all {total} files carry {applied_revision.name} markers at {head}",
         )
     if applied:
         return (
@@ -1544,6 +1587,27 @@ def do_install(args) -> None:
         if state == "patched":
             say("Reverse reached fully-patched state; nothing left to apply.")
             return
+    revising = False
+    if state == "outdated":
+        # Recorded first, exactly as the partial path does: everything below
+        # mutates the host. record_host_backup keeps the FIRST backup as the
+        # restore target, so rollback still reaches the tree the user had before
+        # any of our runs, not the superseded revision.
+        detected, _marked, _total = detected_patch_topology(src)
+        ensure_patch_transaction(meta, detected)
+        record_host_backup(src, mdir, meta, detected)
+        host_backup_recorded = True
+        say(f"Superseded patch revision detected; backup recorded: {meta['host']['backup']}")
+        restored = return_patch_targets_to_head(src, detected)
+        say(f"Returned {restored} patch files to the checkout's own versions.")
+        state, detail = classify_host(src)
+        if state != "stock":
+            fail(
+                f"After removing the superseded revision the host is {state} — {detail}. "
+                "Restore it with `python install.py --rollback`."
+            )
+        revising = True
+
     if state == "dirty":
         fail(
             "Patch-target files have user modifications. Commit or stash them, "
@@ -1568,6 +1632,10 @@ def do_install(args) -> None:
         # Persisted by record_host_backup before mutation; keep the explicit write
         # for the partial-then-stock path whose first backup already exists.
         meta.setdefault("host", {}).setdefault("patch", chosen.name)
+        if revising:
+            # The superseded name would make rollback and --status describe a
+            # patch that is no longer on the host.
+            meta["host"]["patch"] = chosen.name
         write_metadata(mdir, meta)
         apply_patch(src, mdir, chosen)
         compile_all(src, chosen)

@@ -12,7 +12,7 @@ This cannot be solved plugin-side. The invocation lives in the agent object that
 
 ## Shape
 
-`assets/invocation-route-v2026.9.10.patch`. Verified applying to base `f364c19775` (the current release channel) and `cbd03e6e4c`.
+`assets/invocation-route-v2026.9.14.patch`, for Hermes v2026.9.14 (0.21.3) and main from `1c671beab2`. Hosts before that take `invocation-route-v2026.9.10.patch` (`f364c19775`, `cbd03e6e4c`) or `invocation-route-v0.21.0.patch` (the 0.21.1 release tag). The numbers below describe the 9.10 revision; the 9.14 one is the same change re-anchored, minus one hunk upstream now carries itself.
 
 **+977 / −14.** Of the additions, 458 lines are a new test file. The core change is about 519 added lines and 13 rewritten call sites. It is close to purely additive: it introduces new symbols and wraps existing dispatch, rather than changing how anything already works.
 
@@ -64,7 +64,23 @@ python install.py --patch-only
 4. Regenerate the patch, name it `invocation-route-v<version>.patch`, and add it to `assets/`. The installer picks by applicability, not by version number, so old patches stay and keep working for old hosts.
 5. Verify: `python install.py --status` should report all 8 targets carrying markers.
 
-Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`.
+Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`.
+
+### A merge without conflicts is not a working patch
+
+Rebasing onto v2026.9.14 produced one conflict and seven clean merges, and every file compiled. One of the clean merges was broken: Hermes had moved plugin-command dispatch into its own method, and the patch's session lookup still read a local variable only the old method defined. The gateway catches exceptions around that dispatch, so the `NameError` meant every plugin slash command on the gateway quietly stopped running, while the CLI and TUI kept working.
+
+The same defect was already in the `v0.21.0` and `v2026.9.10` revisions: Hermes split that method in v2026.9.7, and both patches were re-anchored across the split without anything driving the gateway path. Both are fixed, and all three patches' test files now run the real gateway dispatcher, so the next rebase fails there instead of on a user's host.
+
+Two lessons for the next rebase. Read every merged call site against the new host, not just the conflicts. And run the patch's own test file on the rebased tree before generating the patch.
+
+### When two patches fit one host
+
+The installer takes the newest patch that applies. The 9.14 revision would otherwise also apply to 9.10-era hosts, where it is missing the await-thread `copy_context` hunk that upstream only added later. So it carries a one-line comment next to upstream's own `copy_context` call: on a host without that call the hunk has no context, the patch does not apply, and the host gets the revision that brings the copy itself.
+
+### Replacing a superseded revision
+
+A host that already carries an earlier revision has every marker, so markers alone call it patched and a fixed patch could never reach it. When no bundled patch reverses out of a fully marked host, `--status` reports `outdated`. `--patch-only` (and `/refine update`, which runs it) records a backup, restores only that patch's files from the checkout's HEAD, removes the test file the patch created, and applies the current revision. The first backup stays the rollback target.
 
 ## Verifying a live host
 

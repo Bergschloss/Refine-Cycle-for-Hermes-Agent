@@ -17,6 +17,7 @@ and an invocation-bound smoke test to reach the proposer.
 | 0.21.0 | yes, after confirming a `caution` scan | yes | yes | yes, with `invocation-route-v0.21.0.patch` |
 | 0.21.1 (release tag `2237be3559`) | yes, after confirming a `caution` scan | yes | yes | yes, with the same `invocation-route-v0.21.0.patch` |
 | 0.21.1 main after the release (`a0749d583a` and later) | yes, after confirming a `caution` scan | yes | yes | yes, with `invocation-route-v2026.9.10.patch` |
+| 0.21.3 (release tag `v2026.9.14`), and main from `1c671beab2` | yes | yes | yes | yes, with `invocation-route-v2026.9.14.patch` |
 
 Both 0.21.1 rows carry the same version string, which is why the installer picks
 by applicability instead: upstream inserted lines inside two of the 0.21.0
@@ -44,6 +45,12 @@ python install.py --patch-only  # reapplies it
 ```
 
 `python install.py --status --json` prints the same report as one line of JSON.
+
+`--status` can also report `outdated`: every marker is present, but the files carry an
+earlier revision of a patch that has since been fixed. `--patch-only` and `/refine
+update` replace it: they record a backup, return the patch's own files to the
+checkout's versions, and apply the current revision. Rollback still restores the
+tree you had before the first install.
 
 `--status` is also what tells you the bundled patch no longer fits a new host: it
 reports `incompatible` and names the patch bases it tried, rather than forcing a

@@ -26173,7 +26173,11 @@ class InstallerPluginOnlyTests(unittest.TestCase):
                 f"BASE = True\n{marker} = True\n", encoding="utf-8"
             )
         state, detail = install.classify_host(self.src)
-        self.assertEqual(state, "patched", detail)
+        # Complete, not partial. The markers here are written by hand rather than
+        # by applying a patch, so no bundled revision reverses out of these files
+        # and the host reads as carrying a superseded one; a host a real patch was
+        # applied to classifies patched (test_a_host_carrying_a_superseded_revision_is_outdated).
+        self.assertEqual(state, "outdated", detail)
         self.assertIn(name, detail)
         detected, applied, total = install.detected_patch_topology(self.src)
         self.assertEqual(detected.name, name)
@@ -26829,6 +26833,66 @@ class InstallerPatchSelectionTests(InstallerPluginOnlyTests):
         import install
 
         return [p.name for p in sorted(install.PATCH_DIR.glob(install.PATCH_GLOB))]
+
+    def _generate_revised_patch(self, name: str) -> Path:
+        """Same files and markers as the fixture patch, one added line different.
+
+        A shipped patch revised in place (the 0.21.x gateway session-key fix) looks
+        exactly like this to a host that carries the earlier revision: every marker
+        is present, and the patch that is bundled now no longer reverses out.
+        """
+        import install
+
+        self._write_markers()
+        first = self.src / install.PATCH_FILES[0]
+        first.write_text(first.read_text(encoding="utf-8") + "REVISION = 2\n", encoding="utf-8")
+        diff = self._git("diff").stdout.decode("utf-8")
+        self._git("checkout", "-q", "--", ".")
+        path = self.root / name
+        path.write_text(diff, encoding="utf-8")
+        return path
+
+    def test_a_host_carrying_a_superseded_revision_is_outdated(self):
+        """Markers alone said "patched", so a fixed revision could never reach it."""
+        import install
+
+        revised = self._generate_revised_patch("revised-route.patch")
+        with self._as_stock_host(), \
+                patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+        with patch.object(install, "patch_candidates", lambda: [self.patch_file]):
+            self.assertEqual(install.classify_host(self.src)[0], "patched")
+        with patch.object(install, "patch_candidates", lambda: [revised]):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "outdated", detail)
+
+    def test_patch_only_replaces_a_superseded_revision_and_rollback_still_reaches_stock(self):
+        import install
+
+        before = self._target_snapshot()
+        revised = self._generate_revised_patch("revised-route.patch")
+        env = patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False)
+        with self._as_stock_host(), env:
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+        first_backup = self._read_metadata()["host"]["backup"]
+
+        with patch.object(install, "patch_candidates", lambda: [revised]), env:
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+            state, detail = install.classify_host(self.src)
+
+        self.assertEqual(state, "patched", detail)
+        self.assertTrue(install._git_apply_checks(self.src, revised, "-R"))
+        host = self._read_metadata()["host"]
+        # The first backup still holds the state the user had before any of our runs.
+        self.assertEqual(host["backup"], first_backup)
+        self.assertEqual(host["patch"], revised.name)
+
+        with patch.object(install, "patch_candidates", lambda: [revised]), env:
+            install.do_rollback(types.SimpleNamespace(
+                hermes_src=str(self.src), plugin_mode="remove",
+                patch_only=False, plugin_only=False,
+            ))
+        self.assertEqual(self._target_snapshot(), before)
 
     def test_the_version_prefix_is_not_a_gate(self):
         """A host no bundled patch fits is still refused, but NOT on its commit id.

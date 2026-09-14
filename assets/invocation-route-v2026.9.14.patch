@@ -1,8 +1,8 @@
 diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
-index 8d28c9feb..8214b82a9 100644
+index 8d293f02d..8977a3adf 100644
 --- a/agent/auxiliary_client.py
 +++ b/agent/auxiliary_client.py
-@@ -6970,6 +6970,131 @@ def call_llm(
+@@ -7269,6 +7269,150 @@ def call_llm(
              semaphore.release()
  
  
@@ -73,6 +73,23 @@ index 8d28c9feb..8214b82a9 100644
 +    return request_client, kwargs
 +
 +
++def _route_locked_create(request_client: Any) -> Callable[[Dict[str, Any]], Any]:
++    """The single-request transport for a locked route.
++
++    ``_relay_sync_completion`` defaults to ``_create_with_progress``, which is right
++    for auxiliary tasks and wrong here. That wrapper sends ``stream=True`` whenever a
++    progress hook is installed and falls back to a plain call if the provider rejects
++    the streamed one, and it retries a credit-limited 402 once with a clamped output
++    cap. Both are a second request on a path whose whole contract is exactly one, so
++    this path brings its own ``create`` instead of inheriting the default.
++
++    Consequence, accepted deliberately: a locked call does not tick the auxiliary
++    progress hook. It is one short blocking request carrying its own timeout, and
++    ticking a hook installed for a different task would mask that task's silence.
++    """
++    return lambda request: request_client.chat.completions.create(**request)
++
++
 +def call_llm_route_locked(
 +    *, provider: str, model: str, base_url: str, api_key: Any, api_mode: str, client: Any,
 +    messages: list, temperature: Optional[float] = None, max_tokens: Optional[int] = None,
@@ -100,7 +117,8 @@ index 8d28c9feb..8214b82a9 100644
 +    try:
 +        return _validate_llm_response(
 +            _relay_sync_completion(
-+                request_client, kwargs, provider=provider, api_mode=api_mode), None)
++                request_client, kwargs, provider=provider, api_mode=api_mode,
++                create=_route_locked_create(request_client)), None)
 +    except RouteLockedCallError:
 +        raise
 +    except Exception as exc:
@@ -124,7 +142,8 @@ index 8d28c9feb..8214b82a9 100644
 +        return _validate_llm_response(
 +            await asyncio.to_thread(
 +                _relay_sync_completion, request_client, kwargs,
-+                provider=provider, api_mode=api_mode), None)
++                provider=provider, api_mode=api_mode,
++                create=_route_locked_create(request_client)), None)
 +    except RouteLockedCallError:
 +        raise
 +    except Exception as exc:
@@ -377,10 +396,10 @@ index 1da3ef746..13398668b 100644
                               async_caller: Optional[Callable[..., Awaitable[Any]]] = None) -> PluginLlm:
      """:class:`PluginLlm` with an injected policy and caller (no config.yaml, no
 diff --git a/agent/turn_context.py b/agent/turn_context.py
-index 6dfad44e5..f11efcb5b 100644
+index 27fe703a9..4e5d89a57 100644
 --- a/agent/turn_context.py
 +++ b/agent/turn_context.py
-@@ -389,6 +389,20 @@ def _publish_runtime_main(agent: Any) -> None:
+@@ -439,6 +439,20 @@ def _publish_runtime_main(agent: Any) -> None:
          )
  
  
@@ -401,8 +420,8 @@ index 6dfad44e5..f11efcb5b 100644
  def _refresh_mcp_tools_between_turns(agent: Any) -> None:
      """Late-connecting MCP servers land in THIS turn's snapshot, before the first API
      call assembles ``tools=``. ``preserve_prefix`` keeps the tool array append-only so a
-@@ -806,6 +820,7 @@ def build_turn_context(
-     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
+@@ -898,6 +912,7 @@ def build_turn_context(
+     set_review_attended(getattr(agent, "_review_attended", False))
      agent._restore_primary_runtime()
      _publish_runtime_main(agent)
 +    _publish_plugin_invocation_agent(agent)
@@ -410,34 +429,39 @@ index 6dfad44e5..f11efcb5b 100644
  
      if isinstance(user_message, str):
 diff --git a/agent/turn_facade.py b/agent/turn_facade.py
-index 5f147c62c..3fbb2ce71 100644
+index 5eb2b500d..6cd6391cc 100644
 --- a/agent/turn_facade.py
 +++ b/agent/turn_facade.py
-@@ -49,6 +49,7 @@ class TurnFacadeMixin:
-         from agent.subagent_lifecycle import bind_subagent_parent
+@@ -52,6 +52,7 @@ class TurnFacadeMixin:
+         from agent.interrupt_scope import track_in_interrupt_scope
          from agent.turn_facade_lease import admit_durable_turn_lease
          from hermes_cli.observability.relay_shared_metrics import finish_task_run, start_task_run
 +        from hermes_cli.plugins import plugin_invocation_scope
  
          effective_task_id = task_id or str(uuid.uuid4())
          session_id = str(getattr(self, "session_id", None) or "")
-@@ -115,7 +116,10 @@ class TurnFacadeMixin:
-             )
+@@ -125,7 +126,15 @@ class TurnFacadeMixin:
  
              # Keep the ContextVar scope local (agent tokens may be observed from another thread).
--            with bind_subagent_parent(self), scoped_runtime_main({}):
+             # A host that owns this thread (Hermes Console) may cancel the turn cross-thread.
+-            with bind_subagent_parent(self), scoped_runtime_main({}), track_in_interrupt_scope(self):
 +            # plugin_invocation_scope opens fail-closed and is filled in by turn setup
 +            # once primary restoration has settled the provider route; a plugin hook
-+            # firing before that sees a refusal, not the ambient-config route.
-+            with bind_subagent_parent(self), scoped_runtime_main({}), plugin_invocation_scope():
++            # firing before that sees a refusal, not the ambient-config route. Innermost
++            # so it unwinds first and so the clause stays an append -- the smallest edit
++            # this call site can carry.
++            with (
++                bind_subagent_parent(self), scoped_runtime_main({}),
++                track_in_interrupt_scope(self), plugin_invocation_scope(),
++            ):
                  try:
                      if lease is not None:
                          lease.start()
 diff --git a/cli.py b/cli.py
-index 14bde0d67..7f22d7867 100644
+index 893015244..06b63d236 100644
 --- a/cli.py
 +++ b/cli.py
-@@ -3298,13 +3298,20 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
+@@ -3313,13 +3313,20 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
          return True
  
      def _run_plugin_slash_command(self, base_cmd: str, user_args: str) -> None:
@@ -461,10 +485,10 @@ index 14bde0d67..7f22d7867 100644
                  _cprint(str(result))
          except Exception as e:
 diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
-index 1208221fc..053a0dd68 100644
+index 3c5028cb6..f19a0ebab 100644
 --- a/gateway/run_inbound.py
 +++ b/gateway/run_inbound.py
-@@ -978,17 +978,50 @@ class GatewayInboundMixin:
+@@ -992,17 +992,50 @@ class GatewayInboundMixin:
          # underscored autocomplete form matches plugin commands registered with hyphens.
          if command:
              try:
@@ -520,18 +544,10 @@ index 1208221fc..053a0dd68 100644
          self, event: "MessageEvent", source: SessionSource, _quick_key: str, command: str
      ) -> bool:
 diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
-index da8d7e2c6..48faa607f 100644
+index 000102bab..d162fa92c 100644
 --- a/hermes_cli/plugins.py
 +++ b/hermes_cli/plugins.py
-@@ -11,6 +11,7 @@ and an ``__init__.py`` exposing ``register(ctx)``. Plugins register callbacks fo
- from __future__ import annotations
- 
- import asyncio
-+import contextvars
- import importlib.metadata
- import inspect
- import json
-@@ -21,7 +22,7 @@ import re
+@@ -22,7 +22,7 @@ import re
  import sys
  import threading
  import types
@@ -540,7 +556,7 @@ index da8d7e2c6..48faa607f 100644
  from dataclasses import dataclass, field
  from functools import cached_property
  from pathlib import Path
-@@ -104,6 +105,84 @@ def _install_plugin_debug_handler(force: bool = False) -> None:
+@@ -105,6 +105,84 @@ def _install_plugin_debug_handler(force: bool = False) -> None:
  
  _install_plugin_debug_handler()
  
@@ -625,7 +641,7 @@ index da8d7e2c6..48faa607f 100644
  VALID_HOOKS: Set[str] = {
      "pre_tool_call", "post_tool_call", "transform_terminal_output", "transform_tool_result",
      # transform_llm_output: return a replacement string (first non-None wins) or None.
-@@ -379,7 +458,25 @@ class PluginContext:
+@@ -390,7 +468,25 @@ class PluginContext:
          if self._llm is None:
              from agent.plugin_llm import PluginLlm
              self._llm = PluginLlm(plugin_id=self.plugin_id)
@@ -652,27 +668,20 @@ index da8d7e2c6..48faa607f 100644
  
      @cached_property
      def subagent_lifecycle(self) -> Any:
-@@ -2002,7 +2099,13 @@ def resolve_plugin_command_result(result: Any) -> Any:
-         finally:
-             done.set()
+@@ -2015,6 +2111,7 @@ def resolve_plugin_command_result(result: Any) -> Any:
  
--    threading.Thread(target=_runner, name="hermes-plugin-command-await", daemon=True).start()
-+    # Carry the caller's Context into the helper thread. A bare thread starts with
-+    # an empty one, so an async plugin command awaited here would lose the
-+    # invocation binding and see an unbound facade -- the same command working
-+    # synchronously and failing asynchronously, for no reason the author could see.
-+    invocation_context = contextvars.copy_context()
-+    threading.Thread(target=lambda: invocation_context.run(_runner),
-+                     name="hermes-plugin-command-await", daemon=True).start()
+     # copy_context: the helper thread must see the caller's profile/secret scope, else an
+     # async hook under a running loop reads the default HERMES_HOME and get_secret raises.
++    # The same copy carries the plugin invocation binding into an awaited plugin command.
+     threading.Thread(target=contextvars.copy_context().run, args=(_runner,),
+                      name="hermes-plugin-command-await", daemon=True).start()
      if not done.wait(timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS):
-         raise TimeoutError("Plugin command async handler did not complete within "
-                            f"{_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS:.0f}s")
 diff --git a/tests/agent/test_plugin_invocation_route.py b/tests/agent/test_plugin_invocation_route.py
 new file mode 100644
-index 000000000..d85d59c7a
+index 000000000..8c65d4239
 --- /dev/null
 +++ b/tests/agent/test_plugin_invocation_route.py
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,510 @@
 +"""Regression coverage for invocation-bound plugin LLM routing.
 +
 +A plugin that reasons about the user's private conversation must reach the model
@@ -965,6 +974,37 @@ index 000000000..d85d59c7a
 +    assert len(client.calls) == 1, "the locked route retried or fell back"
 +
 +
++def test_an_installed_progress_hook_does_not_restream_a_locked_call():
++    """The host's progress wrapper substitutes a streamed request; a locked route may not.
++
++    Regression guard. The relay seam's default ``create`` is ``_create_with_progress``,
++    which sends ``stream=True`` whenever a progress hook is installed and falls back to
++    a plain call if the provider rejects the streamed one -- two requests on a path
++    whose contract is exactly one. This path therefore passes its own ``create``.
++    """
++    from agent.auxiliary_client import aux_progress_hook
++
++    client = _RecordingClient()
++    llm = PluginLlm(plugin_id="p").bind_invocation(_route(client=client))
++    with aux_progress_hook(lambda *_a, **_kw: None):
++        result = llm.complete(messages=[{"role": "user", "content": "hi"}])
++    assert len(client.calls) == 1, "the locked route was re-sent as a stream"
++    assert "stream" not in client.calls[0], "a locked route must go out as captured"
++    assert result.text == "ok"
++
++
++def test_a_credit_limited_402_is_not_retried_with_a_smaller_cap():
++    """``_create_with_progress`` retries this once with a clamped cap; a locked route does not."""
++    payment_error = RuntimeError("402: credit limit reached, can only afford 7117 tokens")
++    payment_error.status_code = 402  # type: ignore[attr-defined]
++    client = _RecordingClient(raises=payment_error)
++    llm = PluginLlm(plugin_id="p").bind_invocation(_route(client=client))
++    with pytest.raises(PluginLlmInvocationError) as excinfo:
++        llm.complete(messages=[{"role": "user", "content": "hi"}])
++    assert len(client.calls) == 1, "the locked route retried with a clamped output cap"
++    assert excinfo.value.code == "payment_error"
++
++
 +def test_a_provider_error_never_carries_its_message_into_the_code():
 +    """The code is journaled; a provider message can hold a URL or key fragment."""
 +    secret = "".join(["https://leak.example/v1?key=", "abcdef1234567890"])
@@ -991,11 +1031,16 @@ index 000000000..d85d59c7a
 +    recording = _RecordingClient()
 +    captured: dict = {}
 +
-+    def _adapter(client, *_args, **_kwargs):
-+        captured["client"] = client
-+        return recording
++    # A class, not a factory function: the host uses these module globals as types
++    # (``isinstance(client, (CodexAuxiliaryClient, ...))`` decides whether an adapter
++    # streams internally), so substituting a function here breaks unrelated host code
++    # with a TypeError and the failure looks like the route, not like the double.
++    class _Adapter:
++        def __new__(cls, client, *_args, **_kwargs):
++            captured["client"] = client
++            return recording
 +
-+    monkeypatch.setattr(ac, adapter_name, _adapter)
++    monkeypatch.setattr(ac, adapter_name, _Adapter)
 +    llm = PluginLlm(plugin_id="p").bind_invocation(
 +        _route(client=bound_client, api_mode=api_mode))
 +    result = llm.complete(messages=[{"role": "user", "content": "hi"}])
@@ -1148,10 +1193,10 @@ index 000000000..d85d59c7a
 +    assert seen["route"] is not None
 +    assert (seen["route"].provider, seen["route"].model) == ("custom", "locked-model")
 diff --git a/tui_gateway/methods_tools.py b/tui_gateway/methods_tools.py
-index a7ea1e550..983c89b48 100644
+index 9a9df6b4a..276e5416e 100644
 --- a/tui_gateway/methods_tools.py
 +++ b/tui_gateway/methods_tools.py
-@@ -485,8 +485,15 @@ def _plugin_command_handler(name: str):
+@@ -510,8 +510,15 @@ def _plugin_command_handler(name: str):
          return None
  
  
@@ -1169,7 +1214,7 @@ index a7ea1e550..983c89b48 100644
  
  
  def _is_profile_skill_command(session: dict, base: str) -> bool:
-@@ -856,7 +863,8 @@ def _(rid, params: dict) -> dict:
+@@ -864,7 +871,8 @@ def _(rid, params: dict) -> dict:
          return _err(rid, 4018, f"skill command: use command.dispatch for /{base}")
      if plugin_handler := _plugin_command_handler(base) if base else None:
          try:
