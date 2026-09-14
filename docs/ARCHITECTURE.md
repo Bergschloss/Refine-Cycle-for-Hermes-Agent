@@ -171,7 +171,6 @@ Refine-Cycle-for-Hermes-Agent/
 ├── notify.py            # failure-isolated applied-edit notification delivery
 ├── refine_trace.py      # synthetic trace helper shipped with the plugin
 ├── install.py           # cross-platform full installer, status, and rollback
-├── install.sh           # Linux host-route patch helper only
 ├── assets/              # bundled invocation-route patches and README media
 └── tests/
     └── run_tests.py     # hermetic regression and cross-process proof

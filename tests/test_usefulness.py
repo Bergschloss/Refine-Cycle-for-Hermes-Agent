@@ -445,7 +445,19 @@ class TestResolutionAndBilingualOperationalRules(UsefulnessBase):
             "duplicate",
         )
 
-    def test_permission_token_and_jules_internal_error_stop_rules_match(self):
+    def test_an_internal_error_subject_names_no_tool(self):
+        """The subject is the failure. A tag named after one tool from an experiment
+        also matched any text mentioning that tool, internal error or not."""
+        self.assertIn(
+            "internal_error",
+            core._operational_rule_signature("When Jules reports an internal error, stop.")[0],
+        )
+        self.assertEqual(
+            core._operational_rule_signature("When Jules is slow, stop and ask.")[0],
+            frozenset(),
+        )
+
+    def test_permission_token_and_internal_error_stop_rules_match(self):
         self.assertEqual(
             core._operational_rule_relation(
                 "After repeated permission failures, stop and ask for access.",

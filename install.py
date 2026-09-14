@@ -270,15 +270,20 @@ def _is_shipped(p: Path) -> bool:
     return p.is_file() and (not p.name.startswith("_") or p.name.startswith("__"))
 
 
+# Kept in the repository, never installed. The frozen grader of the lesson-effect
+# experiment is research, not plugin code: nothing in the plugin imports it. The
+# test suite runs from a checkout, and at 1.4 MB it was the largest thing in
+# every install.
+NOT_INSTALLED = ("lesson_effect_checker.py",)
+
+
 def plugin_files() -> list[str]:
     """Every file to copy into the installed plugin, derived from the checkout."""
-    rels = [p.name for p in sorted(PLUGIN_DIR.glob("*.py")) if _is_shipped(p)]
-    rels += [n for n in PLUGIN_MANIFEST_EXTRAS if (PLUGIN_DIR / n).is_file()]
-    rels += [
-        f"tests/{p.name}"
-        for p in sorted((PLUGIN_DIR / "tests").glob("*.py"))
-        if _is_shipped(p)
+    rels = [
+        p.name for p in sorted(PLUGIN_DIR.glob("*.py"))
+        if _is_shipped(p) and p.name not in NOT_INSTALLED
     ]
+    rels += [n for n in PLUGIN_MANIFEST_EXTRAS if (PLUGIN_DIR / n).is_file()]
     # The route patches travel with install.py, because install.py travels with
     # the plugin. The SUCCESS banner tells the operator to run
     # `python install.py --rollback` from the installed tree, and a re-install or
@@ -832,6 +837,7 @@ def install_plugin(meta: dict, src: Path | None = None) -> str:
             f"{PLUGIN_DIR}. Installing without them yields a plugin that cannot "
             "be imported at all."
         )
+    previous = list(meta.get("plugin_files") or [])
     copied = []
     for rel in files:
         s = PLUGIN_DIR / rel
@@ -841,9 +847,40 @@ def install_plugin(meta: dict, src: Path | None = None) -> str:
             continue
         shutil.copy2(s, d)
         copied.append(str(d))
+    remove_files_no_longer_shipped(dest, previous, copied)
     meta["plugin_dest"] = str(dest)
     meta["plugin_files"] = copied
     return str(dest)
+
+
+def remove_files_no_longer_shipped(dest: Path, previous: list, current: list) -> None:
+    """Delete what an earlier install copied and this one no longer ships.
+
+    An update copies over the old tree, so a file dropped from the install stays
+    in every existing one unless something removes it. Only paths the earlier
+    install recorded, and only inside ``dest``; a directory left holding nothing
+    but a ``__pycache__`` goes with it.
+    """
+    root = dest.resolve()
+    keep = {str(Path(p).resolve()) for p in current}
+    emptied = set()
+    for value in previous:
+        path = Path(value)
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if str(resolved) in keep or not resolved.is_file():
+            continue
+        resolved.unlink()
+        emptied.add(resolved.parent)
+    for directory in sorted(emptied, key=lambda d: len(d.parts), reverse=True):
+        if directory == root or not directory.is_dir():
+            continue
+        leftovers = [child for child in directory.iterdir() if child.name != "__pycache__"]
+        if not leftovers:
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 def verify_plugin_imports(dest: Path, python: str, src: Path) -> str:

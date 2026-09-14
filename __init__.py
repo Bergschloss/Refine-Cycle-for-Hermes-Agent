@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import asyncio
+import inspect
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -1052,6 +1053,21 @@ def _mistyped_subcommand_error(args: str) -> Optional[str]:
     )
 
 
+async def _refine_command_entry(raw_args: str) -> Optional[str]:
+    """The /refine handler the host calls: every subcommand runs on a worker thread.
+
+    The gateway calls command handlers on its event loop and awaits a coroutine
+    when one is returned. /refine reads the journal and can call the model for
+    minutes, and run inline it froze every chat on that gateway for as long.
+    asyncio.to_thread copies the context, so the invocation binding and chat
+    identity the host set up for this command are still visible in the worker.
+    """
+    result = await asyncio.to_thread(_handle_refine_command, raw_args)
+    if inspect.iscoroutine(result):
+        result = await result
+    return result
+
+
 async def _update_command() -> str:
     """Download and install the latest release on a worker thread.
 
@@ -1137,7 +1153,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 else (
                     "route: MISSING — Hermes core lacks the invocation-route "
                     "patch; refine_run will stop with llm_invocation_unavailable. "
-                    "Run install.sh from the plugin directory."
+                    "Run install.py --patch-only from the plugin directory."
                     if status.get("route_present") is False
                     else "route: unknown (host plugin module not importable here)"
                 )
@@ -1662,7 +1678,7 @@ def register(ctx) -> None:
     command_name = _resolve_command_name()
     ctx.register_command(
         command_name,
-        _handle_refine_command,
+        _refine_command_entry,
         description=(
             "Self-improve skills/memory. "
             f"Usage: /{command_name} [reason|audit|status|update|dry-run [session <session_id>|reason]|"
@@ -1777,8 +1793,8 @@ def _warn_if_core_patch_missing() -> None:
         return
     logger.warning(
         "Refine: Hermes core lacks the invocation-route patch; refine_run "
-        "will stop with llm_invocation_unavailable. Run install.sh from the "
-        "plugin directory (or set plugins.entries.refine.auto_apply_core_patch=true)."
+        "will stop with llm_invocation_unavailable. Run install.py --patch-only from "
+        "the plugin directory, or /refine update from the CLI."
     )
 
 

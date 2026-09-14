@@ -13093,7 +13093,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         """Phase B: /refine status must say whether the invocation-route core
         patch is on this host. Both directions: a patched host sees
         'route: present'; an unpatched host sees the MISSING line with the
-        install.sh fix hint; an import failure reports 'unknown', never a
+        install.py fix hint; an import failure reports 'unknown', never a
         guessed present/missing."""
         fake_host = types.ModuleType("hermes_cli.plugins")
         fake_host.plugin_invocation_scope = lambda *a, **k: None
@@ -13125,7 +13125,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             self.assertIs(status["route_present"], False)
             text = plugin_init._handle_refine_command("status")
             self.assertIn("route: MISSING", text)
-            self.assertIn("install.sh", text)
+            self.assertIn("install.py --patch-only", text)
 
             # import failure -> unknown, honestly
             # import failure -> unknown, honestly
@@ -16742,6 +16742,104 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
         self.assertIn("v99.0.0", text)
         self.assertIsNot(seen["thread"], threading.main_thread())
+
+    # -- The host-facing /refine handler and what an install ships --------------
+
+    def _registered_refine_handler(self):
+        """The handler register() gives the host, without leaving register's globals set.
+
+        register() also installs the subagent lifecycle provider in core; a mock
+        context left there made later proposer tests take the subagent path.
+        """
+        captured = {}
+
+        class Context:
+            llm = object()
+            subagent_lifecycle = None
+
+            def register_command(self, name, handler, **kwargs):
+                captured["handler"] = handler
+
+            def register_tool(self, *args, **kwargs):
+                return None
+
+            def register_hook(self, *args, **kwargs):
+                return None
+
+        saved = (plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider)
+        try:
+            plugin_init.register(Context())
+        finally:
+            plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider = saved
+        return captured["handler"]
+
+    def test_the_registered_refine_command_runs_off_the_event_loop(self):
+        """The gateway awaits the handler on its event loop. /refine can call the
+        model for minutes, and run inline it froze every chat on that gateway."""
+        handler = self._registered_refine_handler()
+        host_binding = ContextVar("host_binding", default=None)
+        seen = {}
+
+        def work(raw):
+            seen["thread"] = threading.current_thread()
+            seen["binding"] = host_binding.get()
+            return f"ran {raw}"
+
+        async def gateway_dispatch():
+            # What the host does: bind, call the handler, await what it returns.
+            host_binding.set("bound-by-host")
+            pending = handler("status")
+            self.assertTrue(inspect.iscoroutine(pending))
+            return threading.current_thread(), await pending
+
+        with patch.object(plugin_init, "_handle_refine_command", side_effect=work):
+            loop_thread, text = asyncio_run(gateway_dispatch())
+
+        self.assertEqual(text, "ran status")
+        self.assertIsNot(seen["thread"], loop_thread)
+        # The route and chat the host bound for this command stay visible.
+        self.assertEqual(seen["binding"], "bound-by-host")
+
+    def test_the_registered_refine_command_still_completes_update(self):
+        handler = self._registered_refine_handler()
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "updated", "message": "Updated to v99.0.0."}):
+            text = asyncio_run(handler("update"))
+        self.assertIn("v99.0.0", text)
+
+    def test_an_install_ships_no_tests_and_no_research_checker(self):
+        import install
+
+        files = install.plugin_files()
+        self.assertEqual([f for f in files if f.startswith("tests/")], [])
+        self.assertNotIn("lesson_effect_checker.py", files)
+        for required in install.REQUIRED_PLUGIN_MODULES:
+            self.assertIn(required, files)
+
+    def test_reinstall_removes_files_an_earlier_install_shipped(self):
+        """Stopping shipping a file is not enough: an update copies over the old
+        tree, and the 1.4 MB test suite would stay in every existing install."""
+        import install
+
+        dest = self.root / "installed-refine"
+        stale = dest / "tests" / "run_tests.py"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("old suite\n", encoding="utf-8")
+        cache = dest / "tests" / "__pycache__"
+        cache.mkdir()
+        (cache / "run_tests.cpython-312.pyc").write_bytes(b"\0")
+        outside = self.root / "not-ours.py"
+        outside.write_text("keep\n", encoding="utf-8")
+        meta = {"plugin_files": [str(stale), str(outside)]}
+
+        with patch.object(install, "plugin_dest_for", return_value=dest):
+            install.install_plugin(meta, None)
+
+        self.assertFalse(stale.exists())
+        self.assertFalse((dest / "tests").exists())
+        # Never anything outside the plugin's own directory.
+        self.assertTrue(outside.exists())
+        self.assertTrue((dest / "core.py").is_file())
 
     def test_dry_run_reports_journal_failure(self):
         model = MockLlm({
@@ -23879,492 +23977,6 @@ class TraceBoundaryScrubTests(unittest.TestCase):
         self.assertIn("result=ok", line)
 
 
-def _working_bash() -> str:
-    """Return a bash that actually runs, or "" so these tests skip.
-
-    ``shutil.which("bash")`` is not enough on Windows. A default install carries
-    ``C:\\Windows\\System32\\bash.exe`` -- the WSL launcher -- which is on PATH
-    whether or not a distribution exists behind it. Without one it exits
-    non-zero with ``execvpe(/bin/bash) failed``, and the UTF-16 relay error it
-    prints is not even the output the assertions are looking for, so all six
-    install.sh tests failed for a reason that has nothing to do with install.sh.
-
-    A suite that goes red because the environment lacks a capability teaches the
-    reader to ignore red. Absent capability is a skip; the presence of a launcher
-    is not the capability, so this probes it once, at class-definition time.
-    """
-    path = shutil.which("bash")
-    if not path:
-        return ""
-    try:
-        probe = subprocess.run(
-            [path, "-c", "exit 0"], capture_output=True, timeout=30
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return path if probe.returncode == 0 else ""
-
-
-class InstallScriptTests(unittest.TestCase):
-    """Hermetic tests for install.sh (task C of the clean-install fix).
-
-    install.sh patches a Hermes checkout. These tests rebuild a tiny fake
-    checkout (git repo + stub Python files), generate a matching patch, and
-    assert the four behaviours the rework was built for:
-      1. already applied  -> no-op, touches nothing;
-      2. applies -> symbol present, touched files compile;
-      3. applies but fails verification -> byte-for-byte restore;
-      4. cannot apply -> honest refusal naming host HEAD + patch base.
-    No real Hermes state is touched; everything lives in a TemporaryDirectory.
-    """
-
-    BASH = _working_bash()
-    GIT = shutil.which("git")
-    # install.sh is POSIX-only and deliberately NOT shipped into an installed
-    # plugin, so the suite that ships with the plugin must skip these rather than
-    # fail. Measured on a real clean install: six of these errored with
-    # FileNotFoundError purely because the script was not there to copy.
-    SCRIPT = (ROOT / "install.sh") if (ROOT / "install.sh").is_file() else None
-
-    @unittest.skipUnless(
-        BASH and GIT and SCRIPT,
-        "install.sh tests need a working bash, git, and install.sh in the tree",
-    )
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="installsh-")
-        self.addCleanup(self.tmp.cleanup)
-        self.base = Path(self.tmp.name)
-        self.hermes_src = self._make_fake_checkout(self.base / "hermes-src")
-        self.repo_dir = self.base / "plugin-repo"
-        self.repo_dir.mkdir()
-        shutil.copy2(
-            Path(__file__).resolve().parent.parent / "install.sh",
-            self.repo_dir / "install.sh",
-        )
-
-    # -- helpers ------------------------------------------------------------
-
-    def _make_fake_checkout(self, path: Path, with_route: bool = False) -> Path:
-        path.mkdir()
-        for sub in ("agent", "gateway", "hermes_cli", "run_agent_dir"):
-            (path / sub).mkdir()
-        (path / "agent" / "plugin_llm.py").write_text("MODEL_LLM = True\n", encoding="utf-8")
-        (path / "agent" / "auxiliary_client.py").write_text("AUX = True\n", encoding="utf-8")
-        (path / "gateway" / "run.py").write_text("GATEWAY = True\n", encoding="utf-8")
-        plugins = "PLUGIN_MARKER = 1\n"
-        if with_route:
-            plugins += "# plugin_invocation_scope = True  (route already present)\n"
-        (path / "hermes_cli" / "plugins.py").write_text(plugins, encoding="utf-8")
-        (path / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
-        (path / "agent" / "__init__.py").write_text("", encoding="utf-8")
-        (path / "gateway" / "__init__.py").write_text("", encoding="utf-8")
-        subprocess.run(
-            [self.GIT or "git", "init", "-q", "-b", "main"], cwd=path, check=True
-        )
-        subprocess.run([self.GIT or "git", "config", "user.email", "t@t.t"], cwd=path, check=True)
-        subprocess.run([self.GIT or "git", "config", "user.name", "t"], cwd=path, check=True)
-        subprocess.run([self.GIT or "git", "add", "-A"], cwd=path, check=True)
-        subprocess.run([self.GIT or "git", "commit", "-qm", "base"], cwd=path, check=True)
-        return path
-
-    def _write_patch_and_generate(self, plugin_llm: str, plugins: str) -> Path:
-        """Modify the two files, git-diff them into a patch, restore the tree."""
-        src = self.hermes_src
-        (src / "agent" / "plugin_llm.py").write_text(plugin_llm, encoding="utf-8")
-        (src / "hermes_cli" / "plugins.py").write_text(plugins, encoding="utf-8")
-        diff = subprocess.run(
-            [self.GIT or "git", "diff"], cwd=src, capture_output=True, check=True
-        ).stdout
-        subprocess.run([self.GIT or "git", "checkout", "-q", "--", "."], cwd=src, check=True)
-        patch = self.repo_dir / "assets"
-        patch.mkdir()
-        file_name = "invocation-route-v2026.8.16.patch"
-        (patch / file_name).write_bytes(diff)
-        return patch / file_name
-
-    def _run_install(self) -> subprocess.CompletedProcess:
-        env = {
-            "HERMES_SRC": str(self.hermes_src),
-            "PYTHON": sys.executable,
-            "TMPDIR": str(self.base),
-            "PATH": os.environ.get("PATH", ""),
-        }
-        return subprocess.run(
-            [self.BASH or "bash", str(self.repo_dir / "install.sh")],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(self.repo_dir),
-        )
-
-    def _snapshot(self) -> dict:
-        out = {}
-        for f in ("agent/plugin_llm.py", "hermes_cli/plugins.py", "agent/auxiliary_client.py"):
-            out[f] = (self.hermes_src / f).read_bytes()
-        return out
-
-    # -- cases --------------------------------------------------------------
-
-    def test_already_applied_is_a_noop(self):
-        # Route already present: exit 0, and nothing changed on disk.
-        src = self._make_fake_checkout(self.base / "hermes-src-route", with_route=True)
-        self.hermes_src = src
-        env = {
-            "HERMES_SRC": str(src),
-            "PYTHON": sys.executable,
-            "TMPDIR": str(self.base),
-            "PATH": os.environ.get("PATH", ""),
-        }
-        before = self._snapshot()
-        done = subprocess.run(
-            [self.BASH or "bash", str(self.repo_dir / "install.sh")],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(self.repo_dir),
-        )
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("already applied", done.stdout)
-        self.assertEqual(self._snapshot(), before, "no-op must not modify files")
-
-    def test_apply_verifies_symbol_and_compiles(self):
-        self._write_patch_and_generate(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
-            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
-        )
-        done = self._run_install()
-        self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
-        self.assertIn("applied + verified", done.stdout)
-        self.assertIn(
-            "plugin_invocation_scope",
-            (self.hermes_src / "hermes_cli" / "plugins.py").read_text(encoding="utf-8"),
-        )
-        self.assertIn(
-            "ROUTE_BINDING",
-            (self.hermes_src / "agent" / "plugin_llm.py").read_text(encoding="utf-8"),
-        )
-
-    def test_verification_failure_restores_byte_for_byte(self):
-        # Applies cleanly, but the inserted line is not valid Python: the
-        # compile check must fail and the host must be restored exactly.
-        self._write_patch_and_generate(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",   # syntax error
-            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
-        )
-        before = self._snapshot()
-        done = self._run_install()
-        self.assertNotEqual(done.returncode, 0)
-        self.assertIn("restored", done.stdout + done.stderr)
-        self.assertEqual(self._snapshot(), before, "host must be restored byte-for-byte")
-
-    def test_verify_tolerates_decorative_equals_banner(self):
-        """A decorative `=====` banner must not be mistaken for a conflict marker.
-
-        Real core files (agent/plugin_llm.py, hermes_cli/plugins.py) open with a
-        banner of `====` characters. A loose `^(<<<<<<<|=======|>>>>>>>)` conflict
-        check matched that banner on a clean apply and wrongly triggered a
-        restore. The marker check must match the git conflict lines
-        (`<<<<<<< HEAD` / `>>>>>>> branch`), which always carry a trailing space.
-        """
-        banner = '"""\nPlugin docs\n==============\ndecorative banner\n"""\nPLUGIN_MARKER = 1\n'
-        self._write_patch_and_generate(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
-            plugins=banner + "plugin_invocation_scope = True\n",
-        )
-        done = self._run_install()
-        self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
-        self.assertIn("applied + verified", done.stdout)
-        self.assertNotIn("restored", done.stdout + done.stderr)
-
-    def test_verify_still_catches_a_real_conflict_marker(self):
-        """A genuine `<<<<<<< HEAD` conflict marker must still fail and restore."""
-        self._write_patch_and_generate(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",
-            plugins="PLUGIN_MARKER = 1\n<<<<<<< HEAD\nplugin_invocation_scope = True\n=======\nSTALE = 1\n>>>>>>> base\n",
-        )
-        before = self._snapshot()
-        done = self._run_install()
-        self.assertNotEqual(done.returncode, 0)
-        self.assertIn("conflict markers", done.stdout + done.stderr)
-        self.assertIn("restored", done.stdout + done.stderr)
-        self.assertEqual(self._snapshot(), before, "host must be restored byte-for-byte")
-
-    def test_cannot_apply_refuses_honestly(self):
-        # A patch with no index lines and a guard line that does not match
-        # anything: selection fails and the refusal names the host, every
-        # candidate, and the no-mutation result. There is no single patch base
-        # to report once selection spans patch-specific host topologies.
-        patch = self.repo_dir / "assets"
-        patch.mkdir()
-        (patch / "invocation-route-v2026.8.16.patch").write_text(
-            "diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py\n"
-            "index 1111111..2222222 100644\n"
-            "--- a/hermes_cli/plugins.py\n"
-            "+++ b/hermes_cli/plugins.py\n"
-            "@@ -1,3 +1,4 @@\n"
-            "+# this guard text does not exist anywhere in the file\n"
-            "+plugin_invocation_scope = True\n",
-            encoding="utf-8",
-        )
-        head = subprocess.run(
-            [self.GIT or "git", "rev-parse", "--short=10", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=str(self.hermes_src),
-        ).stdout.strip()
-        before = self._snapshot()
-        done = self._run_install()
-        self.assertNotEqual(done.returncode, 0)
-        self.assertIn("does not apply", done.stderr)
-        self.assertIn(head, done.stderr, "refusal must name the host HEAD")
-        self.assertIn("Tried", done.stderr)
-        for candidate in (
-            "invocation-route-v2026.8.31.patch",
-            "invocation-route-v2026.8.16.patch",
-            "invocation-route-v0.21.0.patch",
-        ):
-            self.assertIn(candidate, done.stderr)
-        self.assertIn("Nothing was modified", done.stderr)
-        self.assertEqual(self._snapshot(), before, "refusal must not modify files")
-
-    # -- restore fidelity: created files, the index, and the recovery copy ---
-
-    def _write_patch_that_also_creates(
-        self, plugin_llm: str, plugins: str, new_path: str, new_content: str
-    ) -> Path:
-        """Like _write_patch_and_generate, but the patch also CREATES new_path.
-
-        The created file is captured with `git add -N` (intent-to-add) so
-        `git diff` emits a real `new file` hunk for it, then the working tree
-        and index are put back so the patch applies against the base commit.
-        """
-        src = self.hermes_src
-        (src / "agent" / "plugin_llm.py").write_text(plugin_llm, encoding="utf-8")
-        (src / "hermes_cli" / "plugins.py").write_text(plugins, encoding="utf-8")
-        created = src / new_path
-        created.parent.mkdir(parents=True, exist_ok=True)
-        created.write_text(new_content, encoding="utf-8")
-        subprocess.run([self.GIT or "git", "add", "-N", new_path], cwd=src, check=True)
-        diff = subprocess.run(
-            [self.GIT or "git", "diff"], cwd=src, capture_output=True, check=True
-        ).stdout
-        # Put the tree AND the index back to the base commit: -N left an
-        # intent-to-add entry staged, which git checkout alone does not clear.
-        subprocess.run([self.GIT or "git", "reset", "-q", "--", "."], cwd=src, check=True)
-        subprocess.run([self.GIT or "git", "checkout", "-q", "--", "."], cwd=src, check=True)
-        created.unlink(missing_ok=True)
-        patch = self.repo_dir / "assets"
-        patch.mkdir(exist_ok=True)
-        file_name = "invocation-route-v2026.8.16.patch"
-        (patch / file_name).write_bytes(diff)
-        return patch / file_name
-
-    def _backup_dirs(self):
-        return sorted(self.base.glob("refine-route-patch.*"))
-
-    def _index_is_clean(self) -> bool:
-        """No staged changes in the host checkout (index == HEAD)."""
-        return subprocess.run(
-            [self.GIT or "git", "diff", "--cached", "--quiet"],
-            cwd=str(self.hermes_src),
-        ).returncode == 0
-
-    def test_preexisting_staged_touched_path_refuses_before_mutation(self):
-        """The installer cannot reset a user-owned staged entry to HEAD.
-
-        A backup preserves only working-tree bytes, not arbitrary index stages.
-        Refusing before mutation is therefore the only fail-closed behavior for
-        a touched path that already differs between HEAD and the index.
-        """
-        self._write_patch_and_generate(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
-            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
-        )
-        touched = self.hermes_src / "agent" / "plugin_llm.py"
-        touched.write_text("MODEL_LLM = True\nUSER_STAGED = True\n", encoding="utf-8")
-        subprocess.run(
-            [self.GIT or "git", "add", "agent/plugin_llm.py"],
-            cwd=self.hermes_src,
-            check=True,
-        )
-        staged_before = subprocess.run(
-            [self.GIT or "git", "diff", "--cached", "--binary"],
-            cwd=self.hermes_src,
-            capture_output=True,
-            check=True,
-        ).stdout
-        # Keep the user-owned index entry staged while making the worktree match
-        # HEAD, so git apply --check can reach the installer's staged-state gate.
-        base_bytes = subprocess.run(
-            [self.GIT or "git", "show", "HEAD:agent/plugin_llm.py"],
-            cwd=self.hermes_src,
-            capture_output=True,
-            check=True,
-        ).stdout
-        touched.write_bytes(base_bytes)
-        worktree_before = self._snapshot()
-
-        done = self._run_install()
-
-        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("staged changes", done.stderr)
-        self.assertEqual(self._snapshot(), worktree_before)
-        staged_after = subprocess.run(
-            [self.GIT or "git", "diff", "--cached", "--binary"],
-            cwd=self.hermes_src,
-            capture_output=True,
-            check=True,
-        ).stdout
-        self.assertEqual(staged_after, staged_before, "refusal must preserve the user's index")
-        self.assertEqual(self._backup_dirs(), [], "refusal happens before creating a backup")
-
-    def test_reset_failure_is_reported_and_keeps_recovery_copy(self):
-        """A failed scoped reset is a failed restore, not a clean recovery.
-
-        BASH_ENV installs a git function in the non-interactive installer shell.
-        Every git command delegates to the real binary except the exact restore
-        reset, which fails after verification has already forced restoration.
-        """
-        self._write_patch_and_generate(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",
-            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
-        )
-        bash_env = self.base / "fail-reset.bash"
-        bash_env.write_text(
-            "git() {\n"
-            "  if [ \"${1:-}\" = \"-C\" ] && [ \"${3:-}\" = \"reset\" ]; then\n"
-            "    return 73\n"
-            "  fi\n"
-            "  command git \"$@\"\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        env = {
-            "HERMES_SRC": str(self.hermes_src),
-            "PYTHON": sys.executable,
-            "TMPDIR": str(self.base),
-            "PATH": os.environ.get("PATH", ""),
-            "BASH_ENV": bash_env.as_posix(),
-        }
-
-        done = subprocess.run(
-            [self.BASH or "bash", str(self.repo_dir / "install.sh")],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(self.repo_dir),
-        )
-
-        self.assertNotEqual(done.returncode, 0)
-        output = done.stdout + done.stderr
-        self.assertIn("RESTORE FAILED", output)
-        self.assertNotIn("pre-patch state fully restored", output)
-        self.assertEqual(len(self._backup_dirs()), 1, "failed restore must retain recovery")
-
-    def test_verification_failure_undoes_created_file_and_index(self):
-        """A verification failure must undo a file the patch CREATED and leave
-        the index clean — not just copy pre-existing files back.
-
-        On the parent install.sh the created file survives restore (its backup
-        loop only copies pre-existing files back) and the index stays staged
-        from `git apply`, so the tree reads clean-but-staged."""
-        created_rel = "hermes_cli/route_helper.py"
-        # plugin_llm.py carries a syntax error so py_compile fails verification.
-        self._write_patch_that_also_creates(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = (\n",
-            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
-            new_path=created_rel,
-            new_content="ROUTE_HELPER = True\n",
-        )
-        done = self._run_install()
-        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
-        # (a) the created file is gone after restore.
-        self.assertFalse(
-            (self.hermes_src / created_rel).exists(),
-            "restore must delete a file the patch created",
-        )
-        # (b) the index is clean: git apply's staging was undone.
-        self.assertTrue(self._index_is_clean(), "restore must leave the index clean")
-        # A restore that SUCCEEDED (undid everything) removes its recovery copy.
-        self.assertEqual(
-            self._backup_dirs(), [],
-            "a successful restore removes its recovery copy on exit",
-        )
-
-    # A full install cannot force a genuine `cp` restore failure, because git
-    # apply recreates each touched file with fresh permissions and leaves no
-    # read-only file for restore's cp to trip over. The behaviour that regressed
-    # is the trap's conditionality, so the test asserts the shipped trap's two
-    # branches directly.
-    def _extract_trap_line(self) -> str:
-        """Read the EXIT trap out of the shipped install.sh so the test breaks
-        if the trap is edited back to an unconditional `rm -rf`."""
-        text = (Path(__file__).resolve().parent.parent / "install.sh").read_text(
-            encoding="utf-8"
-        )
-        for line in text.splitlines():
-            if line.startswith("trap ") and "BACKUP_DIR" in line:
-                return line
-        self.fail("no EXIT trap referencing BACKUP_DIR found in install.sh")
-
-    def _run_trap(self, restore_failed: int) -> bool:
-        """Run the shipped trap body with the given RESTORE_FAILED and report
-        whether $BACKUP_DIR survived."""
-        trap_line = self._extract_trap_line()
-        backup = self.base / f"trap-backup-{restore_failed}"
-        backup.mkdir()
-        # Reproduce the trap: install RESTORE_FAILED + BACKUP_DIR, register the
-        # shipped trap, exit, then check the dir. Written to a file so the trap's
-        # own quoting is exercised verbatim.
-        script = (
-            "set -u\n"
-            f'RESTORE_FAILED={restore_failed}\n'
-            f'BACKUP_DIR="{backup.as_posix()}"\n'
-            f"{trap_line}\n"
-            "exit 0\n"
-        )
-        sf = self.base / f"trap-{restore_failed}.sh"
-        sf.write_text(script, encoding="utf-8")
-        subprocess.run([self.BASH or "bash", str(sf)], capture_output=True, text=True)
-        return backup.exists()
-
-    def test_trap_keeps_recovery_only_when_restore_failed(self):
-        """The recovery copy must survive a FAILED restore and be removed on a
-        clean one. On the parent the trap was `rm -rf "$BACKUP_DIR"` with no
-        guard, so it deleted the directory the 'recovery copy remains' message
-        had just pointed the user at."""
-        self.assertTrue(
-            self._run_trap(restore_failed=1),
-            "a failed restore (RESTORE_FAILED=1) must keep the recovery copy",
-        )
-        self.assertFalse(
-            self._run_trap(restore_failed=0),
-            "a clean run (RESTORE_FAILED=0) must remove the recovery copy",
-        )
-
-    def test_clean_install_removes_its_backup(self):
-        """The mirror direction: a clean install must clean up its own backup,
-        and must never touch a file that existed before the install."""
-        created_rel = "hermes_cli/route_helper.py"
-        self._write_patch_that_also_creates(
-            plugin_llm="MODEL_LLM = True\nROUTE_BINDING = True\n",
-            plugins="PLUGIN_MARKER = 1\nplugin_invocation_scope = True\n",
-            new_path=created_rel,
-            new_content="ROUTE_HELPER = True\n",
-        )
-        done = self._run_install()
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("applied + verified", done.stdout)
-        # The created file stays; a successful install keeps what the patch adds.
-        self.assertTrue((self.hermes_src / created_rel).exists())
-        # No recovery copy is left behind on the happy path.
-        self.assertEqual(
-            self._backup_dirs(), [],
-            "a clean install must remove its own backup dir",
-        )
-
-
 class SubagentProposerTests(unittest.TestCase):
     """The proposer subagent: preferred path, fallbacks, read-only contract."""
 
@@ -27295,12 +26907,15 @@ class InstallerPluginContentTests(unittest.TestCase):
         (anything leading with an underscore that is not a dunder) must not be
         dragged along.
         """
+        import install
+
         dest = self._install_into_temp()
         installed = {p.name for p in dest.glob("*.py")}
         expected = {
             p.name
             for p in ROOT.glob("*.py")
-            if not p.name.startswith("_") or p.name.startswith("__")
+            if (not p.name.startswith("_") or p.name.startswith("__"))
+            and p.name not in install.NOT_INSTALLED
         }
         missing = sorted(expected - installed)
         self.assertEqual(

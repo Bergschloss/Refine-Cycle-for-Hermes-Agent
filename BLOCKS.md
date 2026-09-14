@@ -27,7 +27,7 @@ the block's boundary. "Dependents" lists blocks that break if this one breaks.
 | 19 | **Hooks** | `__init__.py`: `pre_llm_call`, `pre_tool_call`, `on_session_end`, reset | hook API → notes reset, auto-run | notes store, autorun |
 | 20 | **Block-rule parsing & matching** | `core.py` block-rule parsing + matcher | rule text → matcher | hooks, guardrails |
 | 21 | **Recurrence verdict (D1)** | `ledger.py`: horizon logic around `no recurrence window` | audit rows + horizon → `recurred` | audit |
-| 22 | **Install & route patch** | `install.sh`, `assets/*.patch` | host checkout → verified route or honest refusal | plugin LLM route |
+| 22 | **Install & route patch** | `install.py`, `assets/*.patch` | host checkout → verified route or honest refusal | plugin LLM route |
 | 23 | **CLI commands** | `__init__.py`: `/refine status|audit|rollback`; status names proposer arm + route presence (Phase B) | user args → output | user |
 | 24 | **Trace emission** | `trace.py`: `build_trace`, `finalize_trace`, `emit_trace`, `_ensure_trace_handler` (A3) | call-sites → `~/.hermes/logs/refine-trace.log` (plugin-owned RotatingFileHandler) | none (diagnostic sink) |
 

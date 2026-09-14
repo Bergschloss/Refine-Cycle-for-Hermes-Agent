@@ -312,23 +312,21 @@ a patch still applies exactly.
 - **With the patch:** proposal runs reach the exact active route (subject to the
   configured trust policy).
 
-Both installers require a clean patch and never weaken context or use a
-three-way merge after `git apply --check` fails. `install.sh` then verifies route
-symbols, rejects conflict markers, compiles every touched Python file, and
-imports the core module. `install.py` performs those checks and additionally runs
-a synthetic invocation-bound proposer smoke in a disposable `HERMES_HOME`. If a
+The installer requires a clean patch and never weakens context or uses a
+three-way merge after `git apply --check` fails. It verifies route symbols,
+compiles every touched Python file, imports the core module, and runs a
+synthetic invocation-bound proposer smoke in a disposable `HERMES_HOME`. If a
 check fails, the pre-patch state is restored. Backups are bound to the selected
 patch and topology so a later run cannot reuse them for a different host
 transaction.
 
 ```bash
 # from the plugin directory
-./install.sh            # apply and verify the host route patch, with backup
+python install.py --patch-only   # apply and verify the host route patch, with backup
 ```
 
-`install.sh` has no command-line mode flags; use `install.py --patch-only` when
-installing through the Python entry point. On hosts that already carry a complete
-known route, the installer reports `patched` and makes no route change. Use
+On hosts that already carry a complete known route, the installer reports
+`patched` and makes no route change. Use
 `install.py --rollback` to restore the recorded pre-install state.
 
 ### The memory budget the install raises

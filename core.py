@@ -4354,7 +4354,7 @@ def _operational_rule_signature(content: str) -> Tuple[frozenset, frozenset, str
         # while adding the shared, deliberately narrow subject for comparison.
         "authorization": ("permission", "access", "доступ", "дозвіл", "token", "токен"),
         "gateway": ("gateway", "шлюз"),
-        "jules_internal_error": ("jules", "internal error", "internal-error"),
+        "internal_error": ("internal error", "internal-error"),
     }.items():
         if any(word in text for word in words):
             subjects.add(tag)
@@ -5336,7 +5336,7 @@ def _refine_once(
         failure_message = (
             "No invocation-bound host LLM is available; refine did not send "
             "trajectory evidence. If this host lacks the invocation-route "
-            "core patch, run install.sh from the plugin directory."
+            "core patch, run install.py --patch-only from the plugin directory."
         )
         entry_id = _journal_nonmutation(
             trigger=trigger,
