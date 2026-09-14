@@ -26099,7 +26099,9 @@ class InstallerPluginOnlyTests(unittest.TestCase):
             install.main(["--status", "--json", "--hermes-src", str(self.src)])
         report = json.loads(out.getvalue().strip().splitlines()[-1])
         self.assertEqual(report["state"], "stock")
-        self.assertEqual(Path(report["hermes_src"]), self.src)
+        # resolve() on both sides: a Windows runner names the same temp folder
+        # RUNNER~1 in the fixture and runneradmin in the installer's answer.
+        self.assertEqual(Path(report["hermes_src"]).resolve(), self.src.resolve())
         self.assertIs(report["plugin_installed"], False)
 
     def test_the_same_stock_host_is_patched_without_the_flag(self):
