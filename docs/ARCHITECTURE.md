@@ -98,7 +98,7 @@ Everything under the Hermes home, nothing in the plugin install directory (migra
 python tests/run_tests.py
 ```
 
-1,261 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
+1,263 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
 
 `install.py --status` reports host state without changing anything: which patch applies, whether all 8 targets carry markers, and whether the plugin is installed.
 
@@ -136,8 +136,13 @@ fallback to `json_mode` and then raw-text JSON salvage for providers that reject
 Two arms produce the proposal. **The subagent arm is the default**: a read-only
 child that can open skill bodies (`skills_list`/`skill_view`) before deciding,
 which measurably produces fewer unusable proposals than judging from
-name+description alone. It requires a bound parent turn — on hosts or in call
-forms where the subagent route is unavailable (no parent turn bound, launch
+name+description alone. It requires a bound parent turn. Hermes binds the
+parent through a ContextVar for the agent's turn only, and the automatic pass
+runs on a worker thread after the hook returns, so `post_llm_call` and
+`on_session_end` capture the parent (as a weak reference) and the worker binds
+it for the pass. Before that, the live host refused every automatic launch with
+"No active Hermes parent session is available". Where the subagent route is
+still unavailable (no parent turn bound, the agent already gone, launch
 refused, answer unparsable), the run falls back to the **structured call**,
 which judges from bounded name+description overviews. The structured path is a
 documented fallback, not the primary route: on long sessions it does not keep

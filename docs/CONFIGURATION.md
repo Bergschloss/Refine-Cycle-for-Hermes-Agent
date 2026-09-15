@@ -31,7 +31,7 @@ All keys live under `plugins.entries.refine`:
 | `reviewer_fallback_enabled` | bool | `true` | Allow one reviewer call when the mechanical gate finds nothing; its approved proposal is advisory and is never applied. |
 | `reviewer_min_messages` | int | `20` | Minimum session size for reviewer fallback. |
 | `reviewer_cooldown_minutes` | int | `60` | Minimum durable gap between reviewer decisions. |
-| `proposer_subagent_enabled` | bool | `true` | Produce proposals via a read-only subagent that can open skill bodies before deciding. Requires a bound parent turn; without one the structured call is the fallback either way. |
+| `proposer_subagent_enabled` | bool | `true` | Produce proposals via a read-only subagent that can open skill bodies before deciding. Manual and automatic passes both run it under the turn that triggered them; if that agent is already gone, the structured call is the fallback either way. |
 | `proposer_subagent_strict` | bool | `false` | Make a subagent failure a journaled `subagent_strict_error` instead of silently downgrading to the structured call. |
 | `proposer_subagent_timeout_seconds` | int | `180` | Wall-clock bound on the subagent proposal wait (minimum 5). The structured-call and reviewer timeouts are constants in `llm.py` (`_PROPOSAL_TIMEOUT_SECONDS`, `_REVIEW_TIMEOUT_SECONDS`, both 180 s) and are not configurable. All three describe the same piece of work and are deliberately the same number. |
 | `prompt_notes_enabled` | bool | `true` | Permit `prompt` proposals and note injection. |

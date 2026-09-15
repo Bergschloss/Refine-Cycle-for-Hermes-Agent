@@ -8,7 +8,9 @@ import asyncio
 import inspect
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+import weakref
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from agent.plugin_llm import PluginLlm
 
@@ -22,9 +24,10 @@ _ROLLBACK_COMMAND = re.compile(r"^rollback\s+([0-9a-fA-F]{12})$")
 
 
 _AUTO_THREAD_GUARD = threading.Lock()
-# A deferred session-end must retain the invocation-bound facade AND the active
-# chat captured by its host callback. Bare worker threads do not inherit either
-# ContextVar, so both travel by value: {session_id: (llm, active_chat)}.
+# A deferred session-end must retain the invocation-bound facade, the active
+# chat and the subagent parent captured by its host callback. Bare worker threads
+# inherit none of those ContextVars, so all three travel by value:
+# {session_id: (llm, active_chat, subagent_parent)}.
 _AUTO_PENDING_SESSION_ENDS: dict = {}
 _AUTO_PENDING_LOCK = threading.Lock()
 _REGISTERED_CONTEXT: Optional[Any] = None
@@ -44,12 +47,13 @@ def _defer_or_claim_session_end(
     session_id: str,
     llm: Optional[PluginLlm],
     active_chat: Optional[Tuple[str, str, str]] = None,
+    subagent_parent: Optional[Callable[[], Any]] = None,
 ) -> bool:
     """Atomically claim the worker slot or publish one deferred fallback."""
     with _AUTO_PENDING_LOCK:
         if _AUTO_THREAD_GUARD.acquire(blocking=False):
             return True
-        _AUTO_PENDING_SESSION_ENDS[session_id] = (llm, active_chat)
+        _AUTO_PENDING_SESSION_ENDS[session_id] = (llm, active_chat, subagent_parent)
         return False
 
 
@@ -67,7 +71,7 @@ def _finish_auto_worker() -> None:
             if pending is None:
                 _AUTO_THREAD_GUARD.release()
                 return
-            session_id, (llm, pending_chat) = pending
+            session_id, (llm, pending_chat, pending_parent) = pending
             del _AUTO_PENDING_SESSION_ENDS[session_id]
         if not config.auto_enabled():
             # Auto is disabled — clean up prompt notes and continue draining
@@ -80,6 +84,7 @@ def _finish_auto_worker() -> None:
                 _bound_llm=llm,
                 _worker_claimed=True,
                 _active_chat=pending_chat,
+                _subagent_parent=pending_parent,
             )
         except Exception:
             logger.exception("deferred refine session-end hook failed")
@@ -162,6 +167,54 @@ def _capture_active_chat() -> Optional[Tuple[str, str, str]]:
         return None
 
 
+def _capture_subagent_parent() -> Optional[Callable[[], Any]]:
+    """Read the turn's subagent parent. MUST be called from a hook callback.
+
+    Hermes lets a plugin launch a subagent only while a parent agent is bound to
+    the current turn, through a ContextVar a worker thread does not inherit. The
+    automatic pass runs on that worker, so every proposer launch there was refused
+    with "No active Hermes parent session is available" (1,246 refusals in the
+    live host's log) and fell back to the structured call. Captured here and
+    handed down by value, like the LLM facade and the active chat.
+
+    A weak reference, as the host stores it: holding the agent would keep a
+    finished session in memory for as long as a worker waits on it.
+    """
+    try:
+        from agent.subagent_lifecycle import get_active_subagent_parent  # type: ignore
+
+        parent = get_active_subagent_parent()
+    except Exception:
+        logger.debug("refine: subagent parent unavailable", exc_info=True)
+        return None
+    if parent is None:
+        return None
+    try:
+        return weakref.ref(parent)
+    except TypeError:
+        return lambda: parent
+
+
+@contextmanager
+def _subagent_parent_bound(subagent_parent: Optional[Callable[[], Any]]):
+    """Bind a captured parent for the worker's pass; bind nothing once it is gone."""
+    parent = subagent_parent() if subagent_parent is not None else None
+    bind = None
+    if parent is not None:
+        try:
+            from agent.subagent_lifecycle import bind_subagent_parent  # type: ignore
+
+            bind = bind_subagent_parent(parent)
+        except Exception:
+            logger.debug("refine: cannot bind subagent parent", exc_info=True)
+    del parent
+    if bind is None:
+        yield
+        return
+    with bind:
+        yield
+
+
 def _cooldown_elapsed() -> bool:
     # One owner for the arithmetic, so the gate and /refine status cannot drift.
     return core.auto_cooldown_remaining_minutes() <= 0
@@ -230,11 +283,13 @@ def _run_auto_refine(
     *,
     cleanup_session_notes: bool = False,
     active_chat: Optional[Tuple[str, str, str]] = None,
+    subagent_parent: Optional[Callable[[], Any]] = None,
 ) -> None:
     """Run one guarded automatic pass with the callback-captured LLM facade.
 
-    ``active_chat`` travels by value for the same reason ``llm`` does: this runs
-    on a worker thread that cannot be trusted to have inherited the turn context.
+    ``active_chat`` and ``subagent_parent`` travel by value for the same reason
+    ``llm`` does: this runs on a worker thread that cannot be trusted to have
+    inherited the turn context.
     """
     try:
         if not _auto_refine_allowed():
@@ -251,15 +306,16 @@ def _run_auto_refine(
                     logger.warning(message)
                     core.note_auto_event("mutation_lock_busy", message)
                 elif _cooldown_elapsed():
-                    core.refine_run(
-                        llm=llm,
-                        session_id=session_id,
-                        auto=True,
-                        # The same worker clears this session's notes below, so a
-                        # session-scoped note written here would not survive the call.
-                        session_ending=cleanup_session_notes,
-                        active_chat=active_chat,
-                    )
+                    with _subagent_parent_bound(subagent_parent):
+                        core.refine_run(
+                            llm=llm,
+                            session_id=session_id,
+                            auto=True,
+                            # The same worker clears this session's notes below, so a
+                            # session-scoped note written here would not survive the call.
+                            session_ending=cleanup_session_notes,
+                            active_chat=active_chat,
+                        )
             finally:
                 # Cleanup must always run, even if refine_run raised above.
                 # Kept inside the ``with`` block deliberately: the mutation lock
@@ -285,6 +341,7 @@ def _start_auto_refine(
     assistant_turns: int,
     llm: Optional[PluginLlm],
     active_chat: Optional[Tuple[str, str, str]] = None,
+    subagent_parent: Optional[Callable[[], Any]] = None,
 ) -> None:
     """Start one pass with the bound facade captured in the host callback."""
     if (
@@ -302,7 +359,7 @@ def _start_auto_refine(
             args=(session_id, llm),
             # kwargs, not args: a positional here would land on
             # cleanup_session_notes and both break notes and mis-route the chat.
-            kwargs={"active_chat": active_chat},
+            kwargs={"active_chat": active_chat, "subagent_parent": subagent_parent},
             daemon=True,
             name="refine-auto",
         ).start()
@@ -895,6 +952,7 @@ def _on_post_llm_call(
             _assistant_turn_count(conversation_history),
             llm,
             _capture_active_chat(),
+            _capture_subagent_parent(),
         )
     except Exception as exc:
         safe_error = core.scrub_text(str(exc))
@@ -1517,6 +1575,7 @@ def _on_session_end(
     _bound_llm: Any = _BOUND_LLM_UNSET,
     _worker_claimed: bool = False,
     _active_chat: Any = _ACTIVE_CHAT_UNSET,
+    _subagent_parent: Any = _ACTIVE_CHAT_UNSET,
     **kwargs,
 ) -> None:
     """Run the session-end fallback without blocking or losing its bound route."""
@@ -1530,6 +1589,11 @@ def _on_session_end(
     active_chat = (
         _capture_active_chat() if _active_chat is _ACTIVE_CHAT_UNSET else _active_chat
     )
+    subagent_parent = (
+        _capture_subagent_parent()
+        if _subagent_parent is _ACTIVE_CHAT_UNSET
+        else _subagent_parent
+    )
     core.note_session_id(session_id)
     _forget_turn_marks(session_id)
     if not config.auto_enabled() or interrupted:
@@ -1538,7 +1602,7 @@ def _on_session_end(
             _finish_auto_worker()
         return
     if not _worker_claimed and not _defer_or_claim_session_end(
-        session_id, bound_llm, active_chat
+        session_id, bound_llm, active_chat, subagent_parent
     ):
         return
 
@@ -1555,7 +1619,7 @@ def _on_session_end(
                 handed_off = True
                 _run_auto_refine(
                     session_id, bound_llm, cleanup_session_notes=True,
-                    active_chat=active_chat,
+                    active_chat=active_chat, subagent_parent=subagent_parent,
                 )
                 return
             # Session-end only gates on ``auto_min_messages``. Count at most that
@@ -1591,7 +1655,7 @@ def _on_session_end(
             handed_off = True
             _run_auto_refine(
                 session_id, bound_llm, cleanup_session_notes=True,
-                active_chat=active_chat,
+                active_chat=active_chat, subagent_parent=subagent_parent,
             )
         except Exception:
             logger.exception("refine auto session-end hook failed")

@@ -26,6 +26,8 @@ import time
 import types
 import unittest
 import uuid
+import weakref
+import gc
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8974,7 +8976,8 @@ class RefineTests(unittest.TestCase):
             self.assertTrue(called.wait(1))
         self.assertEqual(limits, [4])
         run_auto.assert_called_once_with(
-            "session", None, cleanup_session_notes=True, active_chat=None
+            "session", None, cleanup_session_notes=True, active_chat=None,
+            subagent_parent=None,
         )
         self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
 
@@ -9277,6 +9280,87 @@ class RefineTests(unittest.TestCase):
         self.assertNotEqual(sending_thread, callback_thread)
         self.assertEqual(body, "\u267e\ufe0f Refine Cycle \u2014 new lesson learned")
         self.assertEqual(core._notify.target_for_chat(seen_chat), "telegram:6667956926")
+
+    @staticmethod
+    def _host_subagent_parent_module():
+        """The host's parent binding, as agent.subagent_lifecycle implements it:
+        a ContextVar holding a weak reference, set only for the agent's turn."""
+        module = types.ModuleType("agent.subagent_lifecycle")
+        active = ContextVar("hermes_subagent_lifecycle_parent", default=None)
+
+        @contextmanager
+        def bind_subagent_parent(parent_agent):
+            token = active.set(weakref.ref(parent_agent))
+            try:
+                yield
+            finally:
+                active.reset(token)
+
+        def get_active_subagent_parent():
+            ref = active.get()
+            return ref() if ref is not None else None
+
+        module.bind_subagent_parent = bind_subagent_parent
+        module.get_active_subagent_parent = get_active_subagent_parent
+        return module
+
+    def test_the_automatic_pass_runs_with_the_turns_subagent_parent(self):
+        """Hermes refuses a subagent launch unless a parent agent is bound to the
+        calling context. The pass runs on a worker thread that does not inherit
+        the turn's binding, so the live host refused every automatic proposer
+        launch ("No active Hermes parent session is available"). The hook must
+        capture the parent and the worker must bind it for the pass."""
+        FakeHost.entry_config().update({"auto_enabled": True, "auto_turn_interval": 1})
+        self._observe_session_from_its_start()
+        host = self._host_subagent_parent_module()
+
+        class Agent:
+            session_id = "session"
+
+        agent = Agent()
+        seen = []
+        ran = threading.Event()
+
+        def run(**_kwargs):
+            seen.append((host.get_active_subagent_parent(), threading.current_thread().name))
+            ran.set()
+            return {"success": True}
+
+        callback_thread = threading.current_thread().name
+        with patch.dict(sys.modules, {"agent.subagent_lifecycle": host}), \
+                patch.object(plugin_init.core, "refine_run", side_effect=run):
+            with host.bind_subagent_parent(agent):
+                plugin_init._on_post_llm_call("session", [{"role": "assistant"}])
+            self.assertTrue(ran.wait(5), "the automatic pass never ran")
+            self._await_idle_auto_worker()
+            self.assertIsNone(host.get_active_subagent_parent(), "binding leaked past the turn")
+
+        self.assertEqual(len(seen), 1)
+        parent, worker_thread = seen[0]
+        self.assertIs(parent, agent)
+        self.assertNotEqual(worker_thread, callback_thread)
+
+    def test_a_captured_subagent_parent_does_not_keep_the_agent_alive(self):
+        """The capture is a weak reference, as the host's own binding is. Once
+        the agent is gone the worker binds nothing and the proposer falls back."""
+        host = self._host_subagent_parent_module()
+
+        class Agent:
+            session_id = "session"
+
+        agent = Agent()
+        with patch.dict(sys.modules, {"agent.subagent_lifecycle": host}):
+            with host.bind_subagent_parent(agent):
+                captured = plugin_init._capture_subagent_parent()
+            with plugin_init._subagent_parent_bound(captured):
+                self.assertIs(host.get_active_subagent_parent(), agent)
+            del agent
+            gc.collect()
+            self.assertIsNone(captured())
+            with plugin_init._subagent_parent_bound(captured):
+                self.assertIsNone(host.get_active_subagent_parent())
+            with plugin_init._subagent_parent_bound(None):
+                self.assertIsNone(host.get_active_subagent_parent())
 
     def test_deferred_session_end_delivers_to_the_chat_its_own_callback_captured(self):
         """A drained session-end keeps the address its deferring callback read.
@@ -21241,8 +21325,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         with plugin_init._AUTO_PENDING_LOCK:
             plugin_init._AUTO_PENDING_SESSION_ENDS.clear()
             # Value is (llm, active_chat) since N1.
-            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_a"] = (None, None)
-            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_b"] = (None, None)
+            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_a"] = (None, None, None)
+            plugin_init._AUTO_PENDING_SESSION_ENDS["deferred_b"] = (None, None, None)
         # Simulate auto disabled
         original = config.auto_enabled
         config.auto_enabled = lambda: False
