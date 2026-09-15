@@ -98,7 +98,9 @@ Everything under the Hermes home, nothing in the plugin install directory (migra
 python tests/run_tests.py
 ```
 
-1,263 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
+1,265 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
+
+`PathTraceTests` runs every way a pass starts (the `refine_run` tool, `post_llm_call`, `on_session_end`, a deferred session end drained later, the slash command) through the real entry points, against a host double that enforces Hermes's ContextVar rules for the model route and the subagent parent. It asserts the whole trace as one table: trigger, outcome, which proposer ran, why it fell back, which parent the launch saw, and how many structured calls were made.
 
 `install.py --status` reports host state without changing anything: which patch applies, whether all 8 targets carry markers, and whether the plugin is installed.
 

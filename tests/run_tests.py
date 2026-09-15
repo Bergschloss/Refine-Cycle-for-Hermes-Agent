@@ -24107,6 +24107,316 @@ class TraceBoundaryScrubTests(unittest.TestCase):
         self.assertIn("result=ok", line)
 
 
+class PathTraceTests(unittest.TestCase):
+    """Every way a refine pass starts, traced from the host's entry to the journal.
+
+    The bugs that reached production were in the wiring between Hermes and the
+    pass, not in the pass itself: a worker thread that lost the model route, a
+    gateway handler that blocked the event loop, an automatic proposer whose
+    subagent launch Hermes refused 1,246 times. Unit tests of each piece passed
+    through all of them. This class runs the real plugin entry points against a
+    host double that enforces the rules Hermes enforces, and asserts the whole
+    trace as one table, so a regression shows which path changed and how.
+
+    The host rules, as Hermes implements them:
+    - the plugin's model route is a ContextVar, set for an agent turn
+      (``plugin_invocation_scope``) and for a slash command
+      (``plugin_invocation_scope_for_agent``);
+    - the subagent parent is a ContextVar holding a weak reference, set only for
+      an agent turn (``turn_facade``: ``bind_subagent_parent(self)``); a slash
+      command does not bind it;
+    - ``SubagentLifecycleService.launch`` refuses with "No active Hermes parent
+      session is available." when no parent is bound in the calling context;
+    - a bare ``threading.Thread`` inherits neither ContextVar.
+    """
+
+    PARENT_REFUSAL = "No active Hermes parent session is available."
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
+        FakeHost.reset(self.root)
+        entry = FakeHost.entry_config()
+        entry.update({
+            "auto_enabled": True,
+            "auto_turn_interval": 1,
+            # Every path below writes an attempt record; the cooldown between
+            # automatic attempts is its own gate and is tested elsewhere.
+            "auto_cooldown_minutes": 0,
+            "proposer_subagent_enabled": True,
+            "proposer_subagent_strict": False,
+        })
+        plugin_init._AUTO_TURN_MARKS.clear()
+        plugin_init._AUTO_PENDING_SESSION_ENDS.clear()
+        plugin_init._BLOCK_RULES = []
+        core._AUTO_EVENTS.clear()
+        llm._call_transport.preferred_output_mode = ""
+        llm._call_meta.value = {}
+        config._set_runtime_journal_dir(None)
+        update_check._memory.clear()
+
+        self.route = ContextVar("plugin_invocation_binding", default=None)
+        self.parent = ContextVar("hermes_subagent_lifecycle_parent", default=None)
+        self.launches = []
+        self.structured_calls = []
+        self.lifecycle_module = self._lifecycle_module()
+        modules = patch.dict(sys.modules, {"agent.subagent_lifecycle": self.lifecycle_module})
+        modules.start()
+        self.addCleanup(modules.stop)
+
+        test = self
+
+        class Context:
+            @property
+            def llm(self):
+                # The host facade: bound while a route is set, fail-closed otherwise.
+                return test.route.get() or test._facade(bound=False)
+
+        saved = (plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider)
+        plugin_init._REGISTERED_CONTEXT = Context()
+        core._set_subagent_lifecycle_provider(lambda: self._Lifecycle(self))
+
+        def restore():
+            plugin_init._REGISTERED_CONTEXT = saved[0]
+            core._set_subagent_lifecycle_provider(saved[1])
+            core._PROPOSER_SUBAGENT_IDS.clear()
+            plugin_init._PROPOSER_CHILD_SESSIONS.clear()
+        self.addCleanup(restore)
+        # Registered last so it runs first: no worker may outlive the sandbox.
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self._await_idle_auto_worker)
+
+    # --- the host double -------------------------------------------------
+
+    def _lifecycle_module(self):
+        module = types.ModuleType("agent.subagent_lifecycle")
+        active = self.parent
+
+        @contextmanager
+        def bind_subagent_parent(parent_agent):
+            token = active.set(weakref.ref(parent_agent))
+            try:
+                yield
+            finally:
+                active.reset(token)
+
+        def get_active_subagent_parent():
+            ref = active.get()
+            return ref() if ref is not None else None
+
+        module.bind_subagent_parent = bind_subagent_parent
+        module.get_active_subagent_parent = get_active_subagent_parent
+        return module
+
+    class _Lifecycle:
+        def __init__(self, test):
+            self.test = test
+
+        def launch(self, request):
+            parent = self.test.lifecycle_module.get_active_subagent_parent()
+            self.test.launches.append(getattr(parent, "session_id", None))
+            if parent is None:
+                raise RuntimeError(PathTraceTests.PARENT_REFUSAL)
+            return types.SimpleNamespace(
+                subagent_id=f"sa-{len(self.test.launches)}-trace",
+                provider="turn-provider", model="turn-model",
+            )
+
+        def wait(self, handle, timeout_seconds=None):
+            return types.SimpleNamespace(completed=True)
+
+        def cancel(self, handle, reason=""):
+            return None
+
+        def result(self, handle):
+            return types.SimpleNamespace(
+                terminal_state=types.SimpleNamespace(
+                    state=types.SimpleNamespace(name="SUCCEEDED"), completed=True),
+                summary=json.dumps({"action": "no_op", "reason": "already covered"}),
+                usage_metadata={"api_calls": 2},
+            )
+
+    def _facade(self, *, bound):
+        test = self
+
+        class Facade(MockLlm):
+            def complete_structured(self, **kwargs):
+                test.structured_calls.append(threading.current_thread().name)
+                return super().complete_structured(**kwargs)
+
+        facade = Facade(MockResult(
+            {"action": "no_op", "reason": "already covered"},
+            model="turn-model", provider="turn-provider",
+        ))
+        facade.invocation_bound = bound
+        if bound:
+            facade._bound_route = types.SimpleNamespace(
+                provider="turn-provider", model="turn-model")
+        return facade
+
+    class Agent:
+        def __init__(self, session_id):
+            self.session_id = session_id
+
+    @contextmanager
+    def turn(self, agent):
+        """``AIAgent.run_conversation``: route and subagent parent, both bound."""
+        route = self.route.set(self._facade(bound=True))
+        try:
+            with self.lifecycle_module.bind_subagent_parent(agent):
+                yield
+        finally:
+            self.route.reset(route)
+
+    @contextmanager
+    def slash_command(self, agent):
+        """``plugin_invocation_scope_for_agent``: the route only."""
+        route = self.route.set(self._facade(bound=True))
+        try:
+            yield
+        finally:
+            self.route.reset(route)
+
+    def _await_idle_auto_worker(self, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while plugin_init._AUTO_THREAD_GUARD.locked() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked(), "an auto worker never finished")
+
+    # --- tracing ---------------------------------------------------------
+
+    def _trace(self, path, run):
+        """Run one entry path and reduce what it left behind to one trace row."""
+        before = {entry.get("id") for entry in journal.entries()}
+        self.launches.clear()
+        self.structured_calls.clear()
+        run()
+        self._await_idle_auto_worker()
+        new = [entry for entry in journal.entries() if entry.get("id") not in before]
+        latest = {}
+        for entry in new:
+            latest[entry.get("id")] = entry
+        rows = list(latest.values())
+        self.assertEqual(len(rows), 1, f"{path}: expected one journal record, got {len(rows)}")
+        meta = rows[0].get("llm_meta") or {}
+        return {
+            "path": path,
+            "trigger": rows[0].get("trigger"),
+            "outcome": rows[0].get("outcome"),
+            "proposer": meta.get("proposal_source"),
+            "fallback": meta.get("subagent_fallback_reason"),
+            "launch_parent": self.launches[0] if self.launches else "-",
+            "structured_calls": len(self.structured_calls),
+        }
+
+    def _session_end_ready(self):
+        return patch.object(core, "count_session_messages", return_value={
+            "count": config.auto_min_messages(), "collection_status": "ok"})
+
+    def test_every_entry_path_reaches_the_journal_on_the_route_hermes_gave_it(self):
+        agent = self.Agent("session")
+        trace = []
+
+        def tool_call():
+            with self.turn(agent):
+                plugin_init._handle_refine_run({"dry_run": True})
+        trace.append(self._trace("tool refine_run, inside a turn", tool_call))
+
+        def post_llm_call():
+            plugin_init._mark_turn_attempt("session", 0)
+            with self.turn(agent):
+                plugin_init._on_post_llm_call("session", [{"role": "assistant"}])
+        trace.append(self._trace("post_llm_call -> auto worker", post_llm_call))
+
+        def session_end():
+            with self._session_end_ready(), self.turn(agent):
+                plugin_init._on_session_end(session_id="session", completed=True)
+            with self._session_end_ready():
+                self._await_idle_auto_worker()
+        trace.append(self._trace("on_session_end -> auto worker", session_end))
+
+        def deferred_session_end():
+            # The worker slot is busy, so the hook queues its capture; the drain
+            # runs later on another thread, long after the turn is gone.
+            self.assertTrue(plugin_init._claim_auto_worker())
+            with self.turn(agent):
+                plugin_init._on_session_end(session_id="session", completed=True)
+            self.assertIn("session", plugin_init._AUTO_PENDING_SESSION_ENDS)
+            with self._session_end_ready():
+                drain = threading.Thread(target=plugin_init._finish_auto_worker)
+                drain.start()
+                drain.join(5)
+                self._await_idle_auto_worker()
+        trace.append(self._trace("on_session_end deferred -> drained later", deferred_session_end))
+
+        def slash_dry_run():
+            with self.slash_command(agent):
+                asyncio_run(plugin_init._refine_command_entry("dry-run"))
+        trace.append(self._trace("/refine dry-run, slash command", slash_dry_run))
+
+        def slash_reason():
+            with self.slash_command(agent):
+                asyncio_run(plugin_init._refine_command_entry("the endpoint keeps failing"))
+        trace.append(self._trace("/refine <reason>, slash command", slash_reason))
+
+        def hook_without_route():
+            # A hook that fires with no invocation scope open: nothing may reach a model.
+            plugin_init._mark_turn_attempt("session", 0)
+            plugin_init._on_post_llm_call("session", [{"role": "assistant"}])
+        trace.append(self._trace("post_llm_call with no route bound", hook_without_route))
+
+        expected = [
+            {"path": "tool refine_run, inside a turn", "trigger": "manual",
+             "outcome": "dry_run", "proposer": "subagent", "fallback": None,
+             "launch_parent": "session", "structured_calls": 0},
+            {"path": "post_llm_call -> auto worker", "trigger": "auto",
+             "outcome": "no_op", "proposer": "subagent", "fallback": None,
+             "launch_parent": "session", "structured_calls": 0},
+            {"path": "on_session_end -> auto worker", "trigger": "auto",
+             "outcome": "no_op", "proposer": "subagent", "fallback": None,
+             "launch_parent": "session", "structured_calls": 0},
+            {"path": "on_session_end deferred -> drained later", "trigger": "auto",
+             "outcome": "no_op", "proposer": "subagent", "fallback": None,
+             "launch_parent": "session", "structured_calls": 0},
+            # Hermes binds no subagent parent for a slash command, so the proposer
+            # launch is refused and the pass falls back to the structured call on
+            # the command's own route.
+            {"path": "/refine dry-run, slash command", "trigger": "manual",
+             "outcome": "dry_run", "proposer": "structured", "fallback": "launch_failed",
+             "launch_parent": None, "structured_calls": 1},
+            {"path": "/refine <reason>, slash command", "trigger": "manual",
+             "outcome": "no_op", "proposer": "structured", "fallback": "launch_failed",
+             "launch_parent": None, "structured_calls": 1},
+            {"path": "post_llm_call with no route bound", "trigger": "auto",
+             "outcome": "llm_invocation_unavailable", "proposer": None, "fallback": None,
+             "launch_parent": "-", "structured_calls": 0},
+        ]
+        self.maxDiff = None
+        self.assertEqual(trace, expected)
+
+    def test_a_worker_whose_agent_is_gone_falls_back_instead_of_launching(self):
+        """The capture is weak. An agent released before the worker runs leaves
+        no parent to bind, and the pass takes the structured call honestly."""
+        agent = self.Agent("session")
+        self.assertTrue(plugin_init._claim_auto_worker())
+        with self.turn(agent):
+            plugin_init._on_session_end(session_id="session", completed=True)
+        del agent
+        gc.collect()
+
+        def drain():
+            with self._session_end_ready():
+                worker = threading.Thread(target=plugin_init._finish_auto_worker)
+                worker.start()
+                worker.join(5)
+                self._await_idle_auto_worker()
+        row = self._trace("deferred, agent released", drain)
+        self.assertEqual(
+            (row["proposer"], row["fallback"], row["launch_parent"], row["structured_calls"]),
+            ("structured", "launch_failed", None, 1),
+        )
+
+
 class SubagentProposerTests(unittest.TestCase):
     """The proposer subagent: preferred path, fallbacks, read-only contract."""
 
