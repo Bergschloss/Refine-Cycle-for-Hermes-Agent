@@ -675,6 +675,13 @@ def _on_pre_tool_call(
                 continue
             rt = rule.get("type", "")
             target = rule.get("target", "")
+            # The validator refuses a reroute away from these when a note is
+            # proposed. A note stored before that check, or edited by hand, still
+            # reaches this loop, so the same names are never vetoed here either.
+            if rt in ("block_binary", "block_tool") and (
+                target in core._PROTECTED_CORE_TOOLS or target in core._LOAD_BEARING_BINARIES
+            ):
+                continue
 
             # --- Block a specific CLI binary ---
             if rt == "block_binary" and tool_name == "terminal":
@@ -685,7 +692,11 @@ def _on_pre_tool_call(
                         return {"action": "block", "message": rule["action"]}
 
             # --- Block a specific tool name ---
-            if rt == "block_tool":
+            # A bare name ("use X instead of my_tool") is parsed as block_binary
+            # by its shape, because the hook cannot see this turn's tool list. The
+            # note still names something the agent should stop calling, so the
+            # rule closes the tool of that exact name as well as the binary.
+            if rt in ("block_tool", "block_binary"):
                 if _tool_matches(tool_name, target):
                     return {"action": "block", "message": rule["action"]}
 

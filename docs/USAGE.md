@@ -169,6 +169,13 @@ out-of-scope note stores inject nothing and do not raise on the user path.
 Injection prefers the mutation lock but does not depend on it: the store is only
 ever replaced atomically, so a running refine pass never costs a turn its notes.
 
+A note of the form `When <condition>, use X instead of Y.` also becomes a block
+rule: a tool call named `Y` and a terminal command running `Y` are refused with
+the note's text. Hermes does not tell the plugin which tools a turn has, so a
+bare name closes both. Core tools (`read_file`, `terminal`, `memory`, …) and
+load-bearing binaries (`git`, `python`, the shells, package managers) are never
+blocked, whether the note is new, old, or edited by hand.
+
 New prompt notes use `prompt_notes_default_scope`:
 
 - `global` (the default) is injected in every session.

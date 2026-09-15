@@ -5668,12 +5668,17 @@ class RefineTests(unittest.TestCase):
         self.assertIsNotNone(rule)
         self.assertEqual(rule["type"], "block_tool")
         self.assertEqual(rule["target"], "terminal")
+        # terminal itself is protected at enforcement; the same phrasing on an
+        # ordinary tool is what must reach the tool.
+        note = "When scraping pages, use web_extract instead of the browser_navigate tool."
+        rule = plugin_init._parse_prompt_note_rule(note)
+        self.assertEqual((rule["type"], rule["target"]), ("block_tool", "browser_navigate"))
         plugin_init._update_block_rules(
             [{"content": note, "scope": "global", "session_id": ""}]
         )
         with patch.object(config, "prompt_notes_enabled", return_value=True):
             blocked = plugin_init._on_pre_tool_call(
-                tool_name="terminal", args={"command": "python -c pass"},
+                tool_name="browser_navigate", args={"url": "https://x"},
                 session_id="sid-test",
             )
             other = plugin_init._on_pre_tool_call(
@@ -5748,7 +5753,7 @@ class RefineTests(unittest.TestCase):
         plugin_init._update_block_rules([
             {"content": "When calling curl, use wget instead of curl.",
              "scope": "global", "session_id": ""},
-            {"content": "When reading files, use cat instead of read_file tool.",
+            {"content": "When searching tickets, use jira_search instead of ticket_lookup tool.",
              "scope": "global", "session_id": ""},
         ])
         with patch.object(config, "prompt_notes_enabled", return_value=True):
@@ -5757,7 +5762,7 @@ class RefineTests(unittest.TestCase):
                 session_id="sid-test",
             )
             tool = plugin_init._on_pre_tool_call(
-                tool_name="read_file", args={"path": "x"}, session_id="sid-test",
+                tool_name="ticket_lookup", args={}, session_id="sid-test",
             )
         self.assertIsNotNone(binary, "block_binary must still fire")
         self.assertIsNotNone(tool, "block_tool must still fire")
@@ -5808,6 +5813,47 @@ class RefineTests(unittest.TestCase):
             different, {command: None for command in different},
             "a one-letter target must match only that executable",
         )
+
+    def test_a_bare_name_rule_closes_the_tool_as_well_as_the_binary(self):
+        """"use X instead of my_tool" parses as block_binary by shape. It must
+        still stop a call to the tool of that exact name, or the note is inert."""
+        note = "When searching tickets, use jira_search instead of ticket_lookup."
+        rule = plugin_init._parse_prompt_note_rule(note)
+        self.assertEqual((rule["type"], rule["target"]), ("block_binary", "ticket_lookup"))
+        self.addCleanup(plugin_init._update_block_rules, [])
+        plugin_init._update_block_rules([{"content": note, "scope": "global", "session_id": ""}])
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            tool = plugin_init._on_pre_tool_call(
+                tool_name="ticket_lookup", args={}, session_id="sid-test")
+            binary = plugin_init._on_pre_tool_call(
+                tool_name="terminal", args={"command": "ticket_lookup 42"}, session_id="sid-test")
+            other = plugin_init._on_pre_tool_call(
+                tool_name="ticket_lookup_v2", args={}, session_id="sid-test")
+        self.assertEqual(tool["action"], "block")
+        self.assertEqual(binary["action"], "block")
+        self.assertIsNone(other)
+
+    def test_a_stored_note_never_vetoes_a_core_tool_or_load_bearing_binary(self):
+        """The validator refuses these reroutes at proposal time. A note that was
+        stored earlier or edited by hand skips that check, so enforcement must
+        refuse to veto the same names."""
+        self.addCleanup(plugin_init._update_block_rules, [])
+        plugin_init._update_block_rules([
+            {"content": "When reading files, use cat instead of read_file tool.",
+             "scope": "global", "session_id": ""},
+            {"content": "When passing Python code to terminal, use execute_code instead of terminal.",
+             "scope": "global", "session_id": ""},
+            {"content": "When calling git, use echo instead of git.",
+             "scope": "global", "session_id": ""},
+        ])
+        self.assertEqual(len(plugin_init._BLOCK_RULES), 3, "precondition: all three parse")
+        with patch.object(config, "prompt_notes_enabled", return_value=True):
+            results = [
+                plugin_init._on_pre_tool_call(tool_name="read_file", args={"path": "x"}, session_id="s"),
+                plugin_init._on_pre_tool_call(tool_name="terminal", args={"command": "ls"}, session_id="s"),
+                plugin_init._on_pre_tool_call(tool_name="terminal", args={"command": "git status"}, session_id="s"),
+            ]
+        self.assertEqual(results, [None, None, None])
 
     def test_reroute_kind_stays_on_the_previous_deterministic_fallback(self):
         """Hermes does not expose this turn's effective ``valid_tool_names`` to
@@ -11451,13 +11497,13 @@ class RefineTests(unittest.TestCase):
             plugin_init._extract_binaries("git commit -m msg=1"), ["git"])
         # The whole point: the block rule now fires through the prefix.
         plugin_init._update_block_rules([
-            {"content": "When calling git, use echo instead of git.",
+            {"content": "When calling curl, use wget instead of curl.",
              "scope": "global", "session_id": ""}
         ])
         try:
             blocked = plugin_init._on_pre_tool_call(
-                tool_name="terminal", args={"command": "FOO=1 git status"})
-            self.assertIsNotNone(blocked, "env-prefixed git must still be blocked")
+                tool_name="terminal", args={"command": "FOO=1 curl http://x"})
+            self.assertIsNotNone(blocked, "env-prefixed curl must still be blocked")
         finally:
             plugin_init._update_block_rules([])
 
