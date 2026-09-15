@@ -4,24 +4,9 @@
 
 **Your agent keeps repeating the same mistake. This makes it stop.**
 
-**Refine Cycle** looks across recent sessions, finds those repeating problems, and
-saves one small lesson when the evidence is strong enough. Later, it checks
-whether the same problem came back.
+Refine Cycle watches your Hermes sessions for the failures that come back: the same broken command, the same wrong assumption, the workaround you keep explaining. When one repeats, it saves one small lesson, then checks in later sessions whether the failure stopped.
 
-**Cross-session by design.** Hermes can learn from the conversation in front of
-it, but some problems return across different sessions: the same failed command,
-the same wrong assumption, the same workaround you have to explain twice.
-
-Underneath: errors are fingerprinted into comparable shapes, recurrence is
-counted **within and across sessions**, and every mutation is journaled before it
-runs.
-
-It adapts the `/refine` concept from
-[Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
-(Continual Harness) to the Hermes plugin system.
-
-**Measured:** Hermes on its own handles **8.9–21.1%** of its repeating mistakes
-correctly → **49.6–57.0%** with the plugin.
+**Measured:** Hermes on its own handles **8.9–21.1%** of its repeating mistakes correctly → **49.6–57.0%** with the plugin.
 
 [**Install on your Hermes host →**](#install)
 
@@ -49,21 +34,6 @@ correctly → **49.6–57.0%** with the plugin.
 
 ![A Telegram notification reading "Refine Cycle — new lesson learned (memory 3222/4400)", followed by the review line naming the skill it created](assets/notification.gif)
 
-## What it changes on your host
-
-Three things, and they do not all happen at the same moment.
-
-**The installer does two**, and `--plugin-only` declines both:
-
-- Connects the plugin to the model already serving your session, so it never calls a model you did not choose. Without this, proposals fail closed.
-- Raises the long-term memory limit to a floor of 4,400 characters. A floor: a higher value you set yourself is never lowered.
-
-**Enabling the plugin does the third**, so `--plugin-only` does not opt you out of it. Hermes can queue every memory and skill write, the agent's own as much as this plugin's, until a person approves each one. With that queue on, lessons never land: no error, no output, writes piling up where nobody looks. So the plugin turns it off on load. One `write_approval: true` line inside the `memory:` or `skills:` block becomes `false`; comments, ordering and every other value are left alone, and your config is copied beside itself as `config.yaml.refine-bak` first. A config your administrator manages is detected and never touched.
-
-All three are reversible with `python install.py --rollback`.
-
-**If you actually use that approval queue** — you drain it, and you want to see every write before it lands — this plugin works against how you have set Hermes up, and you should not enable it. That is a good reason to pass.
-
 ## How it works
 
 ![How the Refine Cycle plugin works: a session ends, repeated failures are found across sessions, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](assets/refine-cycle.gif)
@@ -72,62 +42,48 @@ After a session, the plugin reads the errors in it and in earlier sessions and t
 
 Stage by stage: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## How this differs from Hermes's built-in self-improvement
+## How it differs from Hermes's own learning
 
-Hermes ships its own background review: after a turn or a session it looks at the
-current conversation and saves what is worth keeping — a useful tactic, a user
-preference, a correction. It answers **"is there something here worth
-remembering?"**
+Hermes saves what is worth keeping from the conversation in front of it. Refine Cycle looks across many sessions for the failures that keep coming back, and afterwards reports whether its fix held: working, did not help, unused, or too early to tell. They run side by side. The full comparison is in [docs/USAGE.md](docs/USAGE.md).
 
-**Refine Cycle** answers a different question, over a different window, and then
-checks its own work:
+## What it changes on your host
 
-| | Hermes background review | **Refine Cycle** |
-|---|---|---|
-| **Trigger** | anything worth keeping | proposal signal at 2 repeats; application only at 2 sessions **or** 5 occurrences |
-| **Window** | the current session | many sessions |
-| **Evidence** | the conversation as written | errors normalized to invariant shapes and fingerprinted, so `HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` count as one failure |
-| **Threshold** | qualitative judgement | a cheap proposal gate followed by an application bar: distinct-session count **or** occurrence count |
-| **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning`, or names honestly why no verdict exists yet (`too early`, `no recurrence window`, `unreliable`) |
-| **Blast radius** | host policy | 3 edits/day, dedup window, cooldown, per-edit journal, per-edit rollback |
+- Connects the plugin to the model your session already uses, so it never calls a model you did not pick.
+- Raises Hermes's memory limit to at least 4,400 characters. A higher value you set yourself stays.
+- Turns off Hermes's approval queue for memory and skill writes, because with it on no lesson ever lands. Your config is backed up first.
 
-The two are complementary, not alternatives. Hermes captures fresh experience;
-**Refine Cycle** hunts chronic failures and measures whether its own fixes held.
-
-Both can write to the same skills and memory, so the plugin is built to notice
-that: a skill patch is refused outright when the target changed after planning,
-and `/refine audit` reports when an entry it created was modified by something
-else, because an effectiveness verdict on a file someone else edited is not a
-verdict worth trusting.
-
----
-
-
-## Why
-
-An agent that fixes the same problem every week is not learning. The hard part is not noticing a failure; it is knowing which failures are *chronic*, and knowing whether a fix worked.
-
-Fingerprinting is what carries that. Raw error strings never repeat exactly, so volatile parts (ids, paths, ports, timestamps) have to collapse before "again" means anything, while genuinely different errors must stay apart. Those two requirements pull against each other, and every serious defect in this plugin so far has been one of them winning too hard. An edit is then treated as a hypothesis with a falsifiable `expected_outcome`, which is what makes a verdict afterwards possible at all.
-
-The base system prompt is never touched. Only **agent-created** skills and memory entries are editable; built-in, pinned and hub-installed skills remain off-limits. Prompt notes live only in Refine Cycle's own store, never in host memory or a skill.
+`python install.py --rollback` undoes all three. If you approve every memory write by hand and want to keep doing that, this plugin is not for you.
 
 ## What the testing shows
 
-A pre-registered experiment ran 133 probes across four arms, every probe in all four. With the lesson in memory the agent did the graded thing 66 times; with memory empty, 28. Both placebos sat flat: a topical sentence naming the failure domain scored 28, and a scramble of the lesson's own vocabulary scored 30. The gain comes from what the lesson says rather than from the fact that something was written. Risk difference +28.6 points, and all 38 discordant pairs ran the same way.
-
-Read it with its bounds. Nine of the fifteen lessons pass by making the escalation call their own text names, so what is measured is instructed compliance on a matched trigger, not learning. It ran on one route, and the same lessons produced an opposite-sign effect on a different route in an earlier pilot. Two lessons passed in every arm and four failed in every arm, so 41% of the probes could not discriminate at all.
-
-The full report carries the frozen decider's output, the per-lesson table, both pre-registered decision rules with their hashes, and a sign error we found in our own analysis script: [`docs/RESEARCH-REPORT-2026-09-12.md`](docs/RESEARCH-REPORT-2026-09-12.md), with the artifacts in [`docs/evidence/`](docs/evidence/).
+In a pre-registered test on 133 probes, the agent handled the repeated mistake correctly 66 times with the lesson and 28 times without it. Two placebo notes scored 28 and 30, so the gain comes from what the lesson says. The test ran on one model and one route. Method, raw data and limits: [docs/RESEARCH-REPORT-2026-09-12.md](docs/RESEARCH-REPORT-2026-09-12.md).
 
 ## Install
 
-Requires a Hermes host the route patch applies to. Check before installing:
+Tested on Hermes 0.19 through 0.21.3.
+
+**1. Install the plugin.** Hermes may ask you to confirm its security scan.
 
 ```bash
-python install.py --status
+hermes plugins install Bergschloss/Refine-Cycle-for-Hermes-Agent
 ```
 
-Then follow [docs/INSTALL.md](docs/INSTALL.md), which covers version support, the host patch, the memory budget, and what to do when a Hermes update removes the patch.
+**2. Connect it to Hermes.** Run this from the plugin folder: `~/.hermes/plugins/refine` on Linux and macOS, `%LOCALAPPDATA%\hermes\plugins\refine` on Windows.
+
+```bash
+python install.py
+```
+
+**3. Enable it and restart.**
+
+```bash
+hermes plugins enable refine
+hermes gateway restart
+```
+
+**4. Check it.** Send `/refine status` in chat. If your Hermes already has its own `/refine`, the plugin answers to `/refine-cycle status`.
+
+To update later, send `/refine update` and restart. Version support, troubleshooting and everything the installer changes: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Documentation
 
@@ -138,17 +94,11 @@ Then follow [docs/INSTALL.md](docs/INSTALL.md), which covers version support, th
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Settings, defaults, known integration gaps |
 | [ROLLBACK.md](docs/ROLLBACK.md) | Undoing an edit or a transaction |
 | [SAFETY.md](docs/SAFETY.md) | What leaves the host, and what the plugin will not do |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | For maintainers: host couplings, pipeline, modules, known gaps |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | For maintainers: host couplings, pipeline, modules, tests, known gaps |
 | [HOST-PATCH.md](docs/HOST-PATCH.md) | What the route patch adds, and how to rebase it |
 | [RESEARCH-REPORT-2026-09-12.md](docs/RESEARCH-REPORT-2026-09-12.md) | The measurement programme, pre-registrations, raw data |
 
-## Tests
-
-```bash
-python tests/run_tests.py
-```
-
-1,233 tests, standard library only, no network.
+It adapts the `/refine` idea from [Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent) to the Hermes plugin system.
 
 ## License
 

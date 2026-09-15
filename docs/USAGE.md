@@ -19,6 +19,34 @@ after refine touched it*, so no verdict is possible. Expect exactly that mix:
 most passes doing nothing, some edits reverting, and very few edits surviving
 to a `working` verdict.
 
+### How this differs from Hermes's built-in self-improvement
+
+Hermes ships its own background review: after a turn or a session it looks at the
+current conversation and saves what is worth keeping — a useful tactic, a user
+preference, a correction. It answers **"is there something here worth
+remembering?"**
+
+**Refine Cycle** answers a different question, over a different window, and then
+checks its own work:
+
+| | Hermes background review | **Refine Cycle** |
+|---|---|---|
+| **Trigger** | anything worth keeping | proposal signal at 2 repeats; application only at 2 sessions **or** 5 occurrences |
+| **Window** | the current session | many sessions |
+| **Evidence** | the conversation as written | errors normalized to invariant shapes and fingerprinted, so `HTTP 429 for /users/8821` and `HTTP 429 for /users/9134` count as one failure |
+| **Threshold** | qualitative judgement | a cheap proposal gate followed by an application bar: distinct-session count **or** occurrence count |
+| **After the edit** | — | grades it: `working`, `did not help`, `unused`, `churning`, or names honestly why no verdict exists yet (`too early`, `no recurrence window`, `unreliable`) |
+| **Blast radius** | host policy | 3 edits/day, dedup window, cooldown, per-edit journal, per-edit rollback |
+
+The two are complementary, not alternatives. Hermes captures fresh experience;
+**Refine Cycle** hunts chronic failures and measures whether its own fixes held.
+
+Both can write to the same skills and memory, so the plugin is built to notice
+that: a skill patch is refused outright when the target changed after planning,
+and `/refine audit` reports when an entry it created was modified by something
+else, because an effectiveness verdict on a file someone else edited is not a
+verdict worth trusting.
+
 ### Manual
 
 The examples below use `/refine`. If the Hermes host already owns a built-in

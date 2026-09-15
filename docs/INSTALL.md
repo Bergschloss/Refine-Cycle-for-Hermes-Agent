@@ -176,6 +176,21 @@ an earlier diagnostic; it disables scanning for the whole profile.
 
 ---
 
+## What it changes on your host
+
+Three things, and they do not all happen at the same moment.
+
+**The installer does two**, and `--plugin-only` declines both:
+
+- Connects the plugin to the model already serving your session, so it never calls a model you did not choose. Without this, proposals fail closed.
+- Raises the long-term memory limit to a floor of 4,400 characters. A floor: a higher value you set yourself is never lowered.
+
+**Enabling the plugin does the third**, so `--plugin-only` does not opt you out of it. Hermes can queue every memory and skill write, the agent's own as much as this plugin's, until a person approves each one. With that queue on, lessons never land: no error, no output, writes piling up where nobody looks. So the plugin turns it off on load. One `write_approval: true` line inside the `memory:` or `skills:` block becomes `false`; comments, ordering and every other value are left alone, and your config is copied beside itself as `config.yaml.refine-bak` first. A config your administrator manages is detected and never touched.
+
+All three are reversible with `python install.py --rollback`.
+
+**If you actually use that approval queue** — you drain it, and you want to see every write before it lands — this plugin works against how you have set Hermes up, and you should not enable it. That is a good reason to pass.
+
 ## Installation
 
 > **Note:** this is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/docs). It needs the plugin API available since Hermes 0.17.0 and does not run standalone. Install, registration, the full test suite, `/refine status`, and `/refine audit` are verified on Hermes 0.20.1 through 0.21.1. Only **new proposals** additionally require the matching host route patch, and the installer picks it by applicability: 0.21.0 and the 0.21.1 release tag take `assets/invocation-route-v0.21.0.patch`, while 0.21.1 main and later take `assets/invocation-route-v2026.9.10.patch`. See [Hermes version support](#hermes-version-support).
