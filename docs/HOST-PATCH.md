@@ -12,7 +12,7 @@ This cannot be solved plugin-side. The invocation lives in the agent object that
 
 ## Shape
 
-`assets/invocation-route-v2026.9.14.patch`, for Hermes v2026.9.14 (0.21.3) and main from `1c671beab2`. Hosts before that take `invocation-route-v2026.9.10.patch` (`f364c19775`, `cbd03e6e4c`) or `invocation-route-v0.21.0.patch` (the 0.21.1 release tag). The numbers below describe the 9.10 revision; the 9.14 one is the same change re-anchored, minus one hunk upstream now carries itself.
+`assets/invocation-route-v2026.9.16.patch`, for Hermes main from `4e9d3c713a`: the 9.14 revision re-anchored, with identical added and removed lines. `assets/invocation-route-v2026.9.14.patch` covers Hermes v2026.9.14 (0.21.3) and main from `1c671beab2`. Hosts before that take `invocation-route-v2026.9.10.patch` (`f364c19775`, `cbd03e6e4c`) or `invocation-route-v0.21.0.patch` (the 0.21.1 release tag). The numbers below describe the 9.10 revision; the 9.14 one is the same change re-anchored, minus one hunk upstream now carries itself.
 
 **+977 / −14.** Of the additions, 458 lines are a new test file. The core change is about 519 added lines and 13 rewritten call sites. It is close to purely additive: it introduces new symbols and wraps existing dispatch, rather than changing how anything already works.
 
@@ -64,7 +64,7 @@ python install.py --patch-only
 4. Regenerate the patch, name it `invocation-route-v<version>.patch`, and add it to `assets/`. The installer picks by applicability, not by version number, so old patches stay and keep working for old hosts.
 5. Verify: `python install.py --status` should report all 8 targets carrying markers.
 
-Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`.
+Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`, `v2026.9.16`.
 
 ### A merge without conflicts is not a working patch
 
