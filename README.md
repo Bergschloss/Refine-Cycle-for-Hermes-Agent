@@ -4,9 +4,24 @@
 
 **Your agent keeps repeating the same mistake. This makes it stop.**
 
-Refine Cycle watches your Hermes sessions for the failures that come back: the same broken command, the same wrong assumption, the workaround you keep explaining. When one repeats, it saves one small lesson, then checks in later sessions whether the failure stopped.
+**Refine Cycle** looks across recent sessions, finds those repeating problems, and
+saves one small lesson when the evidence is strong enough. Later, it checks
+whether the same problem came back.
 
-**Measured:** Hermes on its own handles **8.9–21.1%** of its repeating mistakes correctly → **49.6–57.0%** with the plugin.
+**Cross-session by design.** Hermes can learn from the conversation in front of
+it, but some problems return across different sessions: the same failed command,
+the same wrong assumption, the same workaround you have to explain twice.
+
+Underneath: errors are fingerprinted into comparable shapes, recurrence is
+counted **within and across sessions**, and every mutation is journaled before it
+runs.
+
+It adapts the `/refine` concept from
+[Prime Intellect's Prime Agent](https://www.primeintellect.ai/blog/prime-agent)
+(Continual Harness) to the Hermes plugin system.
+
+**Measured:** Hermes on its own handles **8.9–21.1%** of its repeating mistakes
+correctly → **49.6–57.0%** with the plugin.
 
 [**Install on your Hermes host →**](#install)
 
