@@ -102,6 +102,12 @@ PATCH_MARKERS = {
     # dispatcher. The await-thread context copy it used to add to hermes_cli/plugins
     # is upstream now and is no longer part of the patch.
     "invocation-route-v2026.9.14.patch": _V021_MARKERS,
+    # Same nine files and markers again, rebased onto main at 4e9d3c713a
+    # (post-v2026.9.14): regenerated from a three-way apply of v2026.9.14,
+    # with the conflict in tui_gateway/methods_tools.py resolved in favor of
+    # the host's newer _session_home_scope (the patch only deletes it because
+    # its base predates it; the patch's own additions are unchanged).
+    "invocation-route-v2026.9.16.patch": _V021_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 
