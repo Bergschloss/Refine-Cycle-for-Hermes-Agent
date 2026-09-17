@@ -6,7 +6,7 @@ For someone deciding whether to adopt this, or who has to keep it alive. Not a u
 
 A Hermes plugin that reads the agent's own trajectory, finds failures that recur across sessions, and writes one small skill, memory or prompt edit so the agent stops repeating them. Every edit is journaled and reversible.
 
-22,122 lines of Python, standard library plus Hermes. One tool (`refine_run`), one slash command, seven hooks.
+22,122 lines of Python, standard library plus Hermes. One tool (`refine_run`), three slash commands (`/refine` and the one-tap `/refine-update`, `/refine-fix`), seven hooks.
 
 ## What it touches in your host
 

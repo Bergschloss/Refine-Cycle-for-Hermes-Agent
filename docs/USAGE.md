@@ -125,6 +125,8 @@ Every message starts with `♾️ Refine Cycle` and is sent once per event, to t
 
 **In the Hermes desktop app** the plugin's desktop half (`desktop/plugin.js`) puts one item in the status bar: `♾️ Refine Cycle 1.3.12 · working`, `· update available: 1.3.13` with an **Update** button, or `· not working` with a **Fix** button. While the app is in the background, the same event arrives as a system notification with the same button. Pressing it starts the work in the plugin's backend (Hermes stops waiting for a plugin command after 30 seconds, and an install takes longer), shows `♾️ Refine Cycle updated to 1.3.13. Restarting Hermes…` when it is done, and restarts the desktop backend, as Settings ▸ Restart backend does. Hermes loads a plugin's desktop half switched off; turn it on once on the Plugins page.
 
+The button is the supported way to update from the desktop app or a TUI, because the 30-second bound applies to a *typed* `/refine-update` too: Hermes stops waiting for the answer, the session reports a timeout, and the update itself carries on and restarts Hermes without ever printing its reply. In a chat the command is awaited for as long as it needs, so the one-tap message path is unaffected.
+
 What was already said lives in `notices.json` in the journal directory. `update_check_enabled: false` turns the release check off.
 
 ### Automatic refinement

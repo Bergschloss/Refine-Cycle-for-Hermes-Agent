@@ -2304,6 +2304,15 @@ def _memory_offer_exclusions(
     Nothing here is a guessed threshold: room is compared with the room the
     host itself reported when it refused. The refusal text is the durable
     ``error`` the journal keeps for every apply.
+
+    Two mechanisms cover the full store on purpose, and they are not redundant.
+    ``_memory_capacity_line`` is advice to the proposer -- "the store is full, use
+    a skill or a prompt note" -- and on the live host that motivated this the
+    proposer ignored it and re-proposed the same lesson 6-7 times a day, every one
+    refused at apply. ``backed_off`` is the enforcement, and it costs what the
+    docstring of ``_memory_backoff_count`` says it costs: the fingerprint gets no
+    skill and no prompt note either while the store stays full. That cost is
+    reported by ``/refine status`` rather than left to the journal.
     """
     covered = set()
     latest: Dict[str, Tuple[str, Dict[str, Any]]] = {}
@@ -2347,6 +2356,13 @@ def _memory_backoff_count() -> int:
     appears. That is refine going quiet, and the user hears about it once,
     through a notifier that is undeliverable on a host without a chat. Counted
     here so ``/refine status`` can say it where the user actually looks.
+
+    Counts the whole journal, not the current window: a fingerprint last seen
+    months ago still counts, because whether it recurs again is not knowable
+    without collecting evidence, and this report neither calls a model nor spends
+    a budget. The message it feeds says what is true of all of them -- these are
+    not offered while the store has no more room than when the lesson was
+    refused -- rather than claiming they are recurring right now.
     """
     try:
         used, limit = _memory_usage()
@@ -2720,10 +2736,11 @@ def refine_status() -> Dict[str, Any]:
             warnings.append({
                 "code": "memory_full_backoff",
                 "message": (
-                    f"{held_back} repeated failure(s) are no longer offered to the "
-                    "proposer: a memory lesson for them was refused by a full store "
-                    "and there is no more room now, so refine proposes nothing for "
-                    "them at all. Remove memory entries or raise memory_char_limit"
+                    f"{held_back} repeated failure(s) had a memory lesson refused by "
+                    "a full store and are not offered to the proposer while it has no "
+                    "more room than it had then -- so refine proposes nothing for "
+                    "them, not even a skill. Remove memory entries or raise "
+                    "memory_char_limit"
                 ),
             })
     invalid_prompt_notes = persistence["prompt_notes"].get("not_injected_count")
@@ -5826,10 +5843,11 @@ def _refine_once(
     # override that. ``all_error_patterns`` stays the full observed set either
     # way: grounding (``_observed_fps``) and the apply check measure against
     # everything seen; only the OFFERED set narrows.
-    # Memory is read once, before any model call, for three uses below: the
-    # offer filter, the capacity line in the proposer prompt, and the history
-    # the proposer is shown. MEMORY.md has other writers, so the journal alone
-    # cannot say what the store holds or how much room is left.
+    # Memory is read here, before any model call, for three uses below: the offer
+    # filter, the capacity line in the proposer prompt, and the history the
+    # proposer is shown. MEMORY.md has other writers, so the journal alone cannot
+    # say what the store holds or how much room is left. Read once per use, not
+    # once in total: the entries and the usage numbers come from two host calls.
     _live_memory = _live_memory_entries()
     _memory_used, _memory_limit = _memory_usage()
     _memory_capacity = _memory_capacity_line(
