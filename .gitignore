@@ -12,6 +12,7 @@ skill_stats.json
 skill_stats.json.pre-update-*
 prompt_notes.json
 model_override.json
+notices.json
 backups/
 *.bak
 
