@@ -81,25 +81,6 @@ session after confirming it through the read-only Hermes sessions table.
 
 `update` installs the latest release when it is newer than the installed one. It downloads the commit the release tag points at, not a branch tip, runs the `install.py` shipped in that release with `--plugin-only`, and checks that the plugin directory now reports the new version. If anything fails, the previous files are put back. When the plugin is already current, the command still checks the host: if a Hermes update removed the route patch, it asks the installer to put it back, and says so when no bundled patch fits this Hermes. After an update or a repair it restarts Hermes itself: inside the gateway through the gateway's own restart (the same one `/restart` uses), scheduled a few seconds after the reply; from a CLI it runs `hermes gateway restart` when a gateway is running. An install from the Hermes plugin catalog is left alone and the reply points to `hermes plugins update refine-cycle`. The plugin never runs this on its own. `/refine_update` and `/refine_fix` run the same command in one tap.
 
-### Messages from Refine Cycle
-
-Every message starts with `♾️ Refine Cycle` and is sent once per event, to the last chat you talked to Hermes from (or `notify_target`):
-
-| When | Message |
-|---|---|
-| A new release is out (checked once a day across all Hermes processes) | `♾️ Refine Cycle — update available: 1.3.12.` + `/refine_update` |
-| A Hermes update stopped the plugin | `♾️ Refine Cycle stopped working after the Hermes update.` + `/refine_fix` |
-| No bundled patch fits the new Hermes | `♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.` |
-| Hermes restarted on the new version | `♾️ Refine Cycle 1.3.12 is running.` |
-| Hermes restarted after a fix | `♾️ Refine Cycle is working again.` |
-| A lesson was refused because memory is full | `♾️ Refine Cycle: memory is full (7998/8000). Lesson not saved. Remove old entries or raise memory_char_limit.` |
-
-`/refine status` starts with one line in the same words: `working` with memory use, `update available` with `/refine_update`, or `not working` with `/refine_fix`. On Telegram a command written with underscores is one tap; the gateway maps it to the registered `refine-update` / `refine-fix`.
-
-**In the Hermes desktop app** the plugin's desktop half (`desktop/plugin.js`) puts one item in the status bar: `♾️ Refine Cycle 1.3.12 · working`, `· update available: 1.3.13` with an **Update** button, or `· not working` with a **Fix** button. While the app is in the background, the same event arrives as a system notification with the same button. Pressing it starts the work in the plugin's backend (Hermes stops waiting for a plugin command after 30 seconds, and an install takes longer), shows `♾️ Refine Cycle updated to 1.3.13. Restarting Hermes…` when it is done, and restarts the desktop backend, as Settings ▸ Restart backend does. Hermes loads a plugin's desktop half switched off; turn it on once on the Plugins page.
-
-What was already said lives in `notices.json` in the journal directory. `update_check_enabled: false` turns the release check off.
-
 `model` shows or sets the model refine asks for. Bare `model` prints the
 effective target and whether host trust allows it; `model <name>` or
 `model <provider>/<name>` pins one; `model auto` removes the override. `auto`
@@ -126,6 +107,25 @@ text beginning with a subcommand word, with one deliberate exception: after
 `model`, a single token shaped like an identifier (`deepseek-v4`, `a/b`) is
 treated as a target, so `/refine model drift` pins a model rather than asking for
 a refinement about drift. Use `/refine drift` or `/refine model auto` to undo.
+
+### Messages from Refine Cycle
+
+Every message starts with `♾️ Refine Cycle` and is sent once per event, to the last chat you talked to Hermes from (or `notify_target`):
+
+| When | Message |
+|---|---|
+| A new release is out (checked once a day across all Hermes processes) | `♾️ Refine Cycle — update available: 1.3.12.` + `/refine_update` |
+| A Hermes update stopped the plugin | `♾️ Refine Cycle stopped working after the Hermes update.` + `/refine_fix` |
+| No bundled patch fits the new Hermes | `♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.` |
+| Hermes restarted on the new version | `♾️ Refine Cycle 1.3.12 is running.` |
+| Hermes restarted after a fix | `♾️ Refine Cycle is working again.` |
+| A lesson was refused because memory is full | `♾️ Refine Cycle: memory is full (7998/8000). Lesson not saved. Remove old entries or raise memory_char_limit.` |
+
+`/refine status` starts with one line in the same words: `working` with memory use, `update available` with `/refine_update`, or `not working` with `/refine_fix`. On Telegram a command written with underscores is one tap; the gateway maps it to the registered `refine-update` / `refine-fix`.
+
+**In the Hermes desktop app** the plugin's desktop half (`desktop/plugin.js`) puts one item in the status bar: `♾️ Refine Cycle 1.3.12 · working`, `· update available: 1.3.13` with an **Update** button, or `· not working` with a **Fix** button. While the app is in the background, the same event arrives as a system notification with the same button. Pressing it starts the work in the plugin's backend (Hermes stops waiting for a plugin command after 30 seconds, and an install takes longer), shows `♾️ Refine Cycle updated to 1.3.13. Restarting Hermes…` when it is done, and restarts the desktop backend, as Settings ▸ Restart backend does. Hermes loads a plugin's desktop half switched off; turn it on once on the Plugins page.
+
+What was already said lives in `notices.json` in the journal directory. `update_check_enabled: false` turns the release check off.
 
 ### Automatic refinement
 
