@@ -2338,6 +2338,27 @@ def _memory_offer_exclusions(
     return frozenset(covered), frozenset(backed_off)
 
 
+def _memory_backoff_count() -> int:
+    """How many repeated failures the full-store backoff is holding back now.
+
+    The backoff is the right call for a memory lesson -- proposing it again walks
+    into the same wall -- but it takes the whole fingerprint out of the offered
+    set, so those failures get no skill and no prompt note either until room
+    appears. That is refine going quiet, and the user hears about it once,
+    through a notifier that is undeliverable on a host without a chat. Counted
+    here so ``/refine status`` can say it where the user actually looks.
+    """
+    try:
+        used, limit = _memory_usage()
+        _covered, backed_off = _memory_offer_exclusions(
+            _live_memory_entries(), used, limit
+        )
+        return len(backed_off)
+    except Exception as exc:
+        logger.debug("Cannot count the memory backoff: %s", scrub_text(str(exc)))
+        return 0
+
+
 def _history_against_live_memory(
     records: List[Dict[str, Any]], live: Optional[List[str]],
 ) -> List[Dict[str, Any]]:
@@ -2692,6 +2713,18 @@ def refine_status() -> Dict[str, Any]:
             warnings.append({
                 "code": f"{store_name}_unreadable",
                 "message": f"The refine {store_name.replace('_', '-')} store is unreadable",
+            })
+    if journal_present and journal_readable:
+        held_back = _memory_backoff_count()
+        if held_back:
+            warnings.append({
+                "code": "memory_full_backoff",
+                "message": (
+                    f"{held_back} repeated failure(s) are no longer offered to the "
+                    "proposer: a memory lesson for them was refused by a full store "
+                    "and there is no more room now, so refine proposes nothing for "
+                    "them at all. Remove memory entries or raise memory_char_limit"
+                ),
             })
     invalid_prompt_notes = persistence["prompt_notes"].get("not_injected_count")
     if isinstance(invalid_prompt_notes, int) and invalid_prompt_notes:

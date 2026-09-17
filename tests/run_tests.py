@@ -16320,6 +16320,32 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             _third, third_model = self._run_with_patterns(lesson, repeated)
         self.assertEqual(len(third_model.calls), 1, "room appeared, the lesson is eligible again")
 
+    def test_the_backoff_is_visible_in_status_not_only_in_the_journal(self):
+        """A pattern refine will not offer again is refine going quiet for it.
+
+        The one-off message goes through notify, which is undeliverable on a host
+        with no chat on record, so the state has to be readable where the user
+        looks. Without this the only trace is a journal counter.
+        """
+        fp = "aeaeaeaeaeae"
+        repeated = [{"fingerprint": fp, "count": 5, "sessions_seen": 2,
+                     "tool": "http", "sample": "request failed"}]
+        lesson = memory_edit("When the endpoint 429s, wait for Retry-After.", name="m")
+        lesson["pattern_fingerprint"] = fp
+        FakeHost.memory_entries = ["an entry that fills the store"]
+        with patch.object(core, "_memory_usage", return_value=(7998, 8000)), \
+             patch.object(core, "_apply_memory",
+                          return_value={"success": False, "error": self._FULL_REFUSAL}):
+            self._run_with_patterns(lesson, repeated)
+            codes = [w["code"] for w in core.refine_status()["warnings"]]
+            self.assertIn("memory_full_backoff", codes)
+            rendered = plugin_init._handle_refine_command("status")
+        self.assertIn("no longer offered to the proposer", rendered)
+        self.assertIn("memory_char_limit", rendered)
+        with patch.object(core, "_memory_usage", return_value=(7000, 8000)):
+            codes = [w["code"] for w in core.refine_status()["warnings"]]
+        self.assertNotIn("memory_full_backoff", codes, "room appeared, nothing is held back")
+
     def test_a_raised_limit_also_ends_the_backoff(self):
         fp = "acacacacacac"
         repeated = [{"fingerprint": fp, "count": 5, "sessions_seen": 2,
