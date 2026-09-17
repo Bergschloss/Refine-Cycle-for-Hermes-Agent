@@ -22,6 +22,9 @@ const ID = 'refine'
 const COMMAND = 'refine-update'
 const IDLE_POLL_MS = 10 * 60 * 1000
 const BUSY_POLL_MS = 2000
+// How long a restart may take before this stops waiting for its confirmation. A
+// backend that never comes back must not leave the poll running at BUSY forever.
+const RESTART_WAIT_MS = 2 * 60 * 1000
 
 const listeners = new Set()
 let current = null
@@ -56,7 +59,10 @@ function recycleBackend() {
 }
 
 function announce(state) {
-  if (!pluginCtx || !state || state.job) return
+  // Only a job that is still running silences this. A finished one stays in the
+  // backend's state for the life of the process, and treating that as "busy"
+  // muted every later release notification after the first press.
+  if (!pluginCtx || !state || (state.job && state.job.status === 'running')) return
   const key = state.working ? (state.latest ? `update:${state.latest}` : '') : `fix:${state.version}`
   if (!key || pluginCtx.storage.get('announced', '') === key) return
   pluginCtx.storage.set('announced', key)
@@ -71,11 +77,34 @@ function announce(state) {
   })
 }
 
+function forgetRestart() {
+  pluginCtx?.storage.remove('restartingTo')
+  pluginCtx?.storage.remove('restartingFrom')
+  pluginCtx?.storage.remove('restartingAt')
+}
+
+function waitingForRestart() {
+  if (!pluginCtx || !pluginCtx.storage.get('restartingTo', '')) return false
+  const since = Number(pluginCtx.storage.get('restartingAt', 0)) || 0
+  if (since && Date.now() - since > RESTART_WAIT_MS) {
+    // The backend never came back. The reply already said what happened, so stop
+    // polling fast and stop waiting for a confirmation that is not coming.
+    forgetRestart()
+    return false
+  }
+  return true
+}
+
 function afterRestart(state) {
   if (!pluginCtx || !state) return
   const expected = pluginCtx.storage.get('restartingTo', '')
   if (!expected) return
-  pluginCtx.storage.remove('restartingTo')
+  // The backend that ran the update keeps answering until it is actually gone,
+  // and it reads the new version straight off disk. Confirm only once a different
+  // backend process answers, or this says "is running" about the old code.
+  const from = pluginCtx.storage.get('restartingFrom', '')
+  if (from && state.backend === from) return
+  forgetRestart()
   host.notify({
     kind: 'success',
     message: state.working ? `${state.brand} ${state.version} is running.` : `${state.brand} is working again.`
@@ -97,7 +126,13 @@ async function refresh() {
       host.notify({ kind: job.restart ? 'success' : 'info', message: job.reply })
       if (job.restart) {
         pluginCtx?.storage.set('restartingTo', state.version)
+        pluginCtx?.storage.set('restartingFrom', state.backend || '')
+        pluginCtx?.storage.set('restartingAt', Date.now())
         setTimeout(recycleBackend, 1500)
+        // Keep polling. Recycling the backend leaves this renderer mounted, so
+        // nothing else would ever call refresh() again, and the confirmation
+        // ("… is running.") is only sent once the new backend answers.
+        schedule(BUSY_POLL_MS)
         return
       }
     }
@@ -105,7 +140,7 @@ async function refresh() {
   } catch {
     // Plugin not loaded on the backend yet, or the backend is restarting.
   }
-  schedule(IDLE_POLL_MS)
+  schedule(waitingForRestart() ? BUSY_POLL_MS : IDLE_POLL_MS)
 }
 
 async function start() {
