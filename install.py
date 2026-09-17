@@ -262,8 +262,8 @@ PLUGIN_MANIFEST_EXTRAS = ("plugin.yaml",)
 # guard for derivation itself going wrong.
 REQUIRED_PLUGIN_MODULES = (
     "__init__.py", "config.py", "core.py", "journal.py", "ledger.py", "llm.py",
-    "notify.py", "patterns.py", "refine_trace.py", "sanitization.py",
-    "update_check.py", "plugin.yaml",
+    "notices.py", "notify.py", "patterns.py", "refine_trace.py",
+    "sanitization.py", "update_check.py", "plugin.yaml",
 )
 
 

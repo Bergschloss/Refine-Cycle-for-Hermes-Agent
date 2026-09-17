@@ -16340,7 +16340,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             codes = [w["code"] for w in core.refine_status()["warnings"]]
             self.assertIn("memory_full_backoff", codes)
             rendered = plugin_init._handle_refine_command("status")
-        self.assertIn("no longer offered to the proposer", rendered)
+        self.assertIn("not offered to the proposer", rendered)
         self.assertIn("memory_char_limit", rendered)
         with patch.object(core, "_memory_usage", return_value=(7000, 8000)):
             codes = [w["code"] for w in core.refine_status()["warnings"]]
@@ -24768,6 +24768,33 @@ class NoticesTests(unittest.TestCase):
         self.assertEqual([t for t, _ in self.sent],
                          [self.notices.update_available_text("v1.3.12")])
 
+    def test_a_release_check_that_answered_nothing_usable_still_holds_the_day(self):
+        """A draft, a prerelease or a tag this version cannot parse is an answer.
+
+        ``_fetch_latest_release`` returns None for both "GitHub is unreachable"
+        and "nothing usable is published". Treating the second as a failure made
+        every process on the host ask GitHub every hour forever, against a
+        docstring and a USAGE page that both promise once a day.
+        """
+        with patch.object(update_check, "_fetch_latest_release", return_value=None) as fetch:
+            for hour in range(6):
+                self.notices.check_update(now=1000.0 + hour * 3600)
+        self.assertEqual(fetch.call_count, 1, "an answer of 'nothing usable' lasts the day")
+        with patch.object(update_check, "_fetch_latest_release", return_value=None) as fetch:
+            self.notices.check_update(now=1000.0 + 25 * 3600)
+        self.assertEqual(fetch.call_count, 1, "and the day after, it asks again")
+
+    def test_an_update_that_landed_is_never_reported_as_a_failure(self):
+        """The files are already replaced; a state file that would not write only
+        costs the confirmation after the restart."""
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "updated", "tag": "v1.3.12", "message": ""}), \
+             patch.object(self.notices, "_save", side_effect=OSError("disk full")), \
+             self._working(True):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(reply, "♾️ Refine Cycle updated to 1.3.12.")
+        self.assertEqual(restart_head, reply)
+
     def test_a_confirmation_that_could_not_be_delivered_is_kept_for_the_next_start(self):
         with patch.object(update_check, "run_update",
                           return_value={"outcome": "updated", "tag": "v1.3.12", "message": ""}), \
@@ -24913,6 +24940,19 @@ class NoticesTests(unittest.TestCase):
     def test_an_install_ships_the_desktop_half(self):
         import install
         self.assertIn("desktop/plugin.js", install.plugin_files())
+        # core.py imports notices at module level, so an install without it is a
+        # dead install. The guard for derivation going wrong has to name it.
+        self.assertIn("notices.py", install.REQUIRED_PLUGIN_MODULES)
+        self.assertIn("notices.py", install.plugin_files())
+
+    def test_the_desktop_state_names_the_hermes_the_plugin_runs_on(self):
+        """The desktop notification is once per event, and "stopped working" is an
+        event about a Hermes version -- the same key the chat path latches on."""
+        with self._working(False), patch.object(self.notices, "check_update"), \
+             patch.object(self.notices, "hermes_version", return_value="0.22.0"):
+            state = self.notices.desktop_state()
+        self.assertEqual(state["hermes"], "0.22.0")
+        self.assertFalse(state["working"])
 
     def test_register_offers_the_one_tap_commands_and_starts_the_checks(self):
         captured = {}

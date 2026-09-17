@@ -77,19 +77,15 @@ def _load() -> Dict[str, Any]:
 
 
 def _save(state: Dict[str, Any]) -> None:
-    path = _state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".notices-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Write the state file the way every other store in this plugin writes.
+
+    Its own ``mkstemp`` + ``os.replace`` was the only write here without the
+    bounded retry the others have: on Windows a concurrent read denies a replace
+    for a moment, and its temp files used a prefix the interrupted-artifact
+    cleanup does not recognise, so a process killed mid-write left one behind
+    forever.
+    """
+    journal._atomic_write_text(_state_path(), json.dumps(state))
 
 
 @contextmanager
@@ -272,17 +268,24 @@ def check_update(now: Optional[float] = None) -> None:
                     claimed = True
             if claimed:
                 release = None
+                answered = True
                 try:
                     release = update_check._fetch_latest_release()
                 except Exception:
                     # Not silent: the attempt stamp above is what a later process
                     # reads, and it must not look like a check that answered.
+                    answered = False
                     logger.debug("refine notices: release lookup failed", exc_info=True)
-                if release:
+                if answered:
                     with _mutation() as fresh:
                         if fresh is not None:
+                            # An answer of "nothing usable" -- a draft, a
+                            # prerelease, a tag this version cannot parse -- is
+                            # still an answer, and holds the slot for the day.
+                            # Only a check that failed retries within the hour.
                             fresh["update_checked_ts"] = now
-                            fresh["latest_tag"] = release["tag"]
+                            if release:
+                                fresh["latest_tag"] = release["tag"]
             state = _load()
         latest = latest_known(state)
         if latest and state.get("update_notified") != latest:
@@ -417,8 +420,10 @@ def restart_hermes(loop: Any = None) -> bool:
     command's reply is delivered first. Elsewhere: ``hermes gateway restart`` when a
     gateway is running; a CLI process itself loads the new code on its next start.
     """
-    runner = _gateway_runner()
-    if runner is not None and loop is not None:
+    # The loop check first: without one the runner cannot be used at all, and
+    # finding it walks the whole heap. Every desktop and CLI call passes None.
+    runner = _gateway_runner() if loop is not None else None
+    if runner is not None:
         try:
             from gateway.restart import is_container_restart_context, is_gateway_supervisor_process
             via_service = bool(is_gateway_supervisor_process() or is_container_restart_context())
@@ -473,10 +478,17 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
     message = scrub_text(str(result.get("message") or "")).strip()
     if outcome in ("updated", "repaired"):
         new_version = str(result.get("tag") or update_check.installed_version())
-        with _mutation() as state:
-            if state is not None:
-                state["pending"] = {"kind": "update" if outcome == "updated" else "fix",
-                                    "version": new_version}
+        try:
+            with _mutation() as state:
+                if state is not None:
+                    state["pending"] = {"kind": "update" if outcome == "updated" else "fix",
+                                        "version": new_version}
+        except Exception:
+            # The update is already on disk. A state file that could not be
+            # written costs the confirmation after the restart, and nothing else;
+            # reporting a failure here would be a lie about what happened.
+            logger.warning("refine notices: cannot record the pending confirmation",
+                           exc_info=True)
         head = (f"{BRAND} updated to {plain_version(new_version)}." if outcome == "updated"
                 else f"{BRAND} fixed.")
         return head, head
@@ -528,6 +540,11 @@ def desktop_state() -> Dict[str, Any]:
         "latest": plain_version(latest) if latest else None,
         "job": job,
         "backend": _BACKEND_ID,
+        # The desktop notification is said once per event, like the chat one, and
+        # "the plugin stopped working" is an event about a Hermes version, not
+        # about the plugin's. Keyed on the plugin version alone, a second Hermes
+        # update that broke it again said nothing.
+        "hermes": hermes_version(),
     }
 
 
