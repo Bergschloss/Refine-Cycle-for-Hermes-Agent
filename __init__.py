@@ -1813,12 +1813,22 @@ def register(ctx) -> None:
         ),
     )
     for tap_command in (notices.UPDATE_COMMAND, notices.FIX_COMMAND):
-        if not _built_in_command_exists(tap_command):
-            ctx.register_command(
+        if _built_in_command_exists(tap_command):
+            # Loud, not skipped quietly: the plugin's own messages, /refine status
+            # and the desktop status bar all tell the user to tap this command, and
+            # a registration that silently did not happen makes all three lie.
+            logger.warning(
+                "Refine plugin: this Hermes already owns /%s, so the one-tap "
+                "command is not registered; use /%s update instead.",
                 tap_command,
-                _update_command_entry,
-                description="Update Refine Cycle, or fix it after a Hermes update.",
+                command_name,
             )
+            continue
+        ctx.register_command(
+            tap_command,
+            _update_command_entry,
+            description="Update Refine Cycle, or fix it after a Hermes update.",
+        )
     ctx.register_tool(
         "refine_run",
         "refine",

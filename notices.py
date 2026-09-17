@@ -18,19 +18,24 @@ failures, as ``notify`` does.
 import json
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 try:
-    from . import config, update_check
+    from . import config, journal, update_check
     from . import notify as _notify
+    from .sanitization import scrub_text
 except ImportError:  # bare-module import
     import config  # type: ignore  # noqa: F811
+    import journal  # type: ignore  # noqa: F811
     import update_check  # type: ignore  # noqa: F811
     import notify as _notify  # type: ignore  # noqa: F811
+    from sanitization import scrub_text  # type: ignore  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +44,21 @@ UPDATE_COMMAND = "refine-update"
 FIX_COMMAND = "refine-fix"
 _STATE_FILE = "notices.json"
 _CHECK_INTERVAL_SECONDS = 24 * 3600
+# A check that started and never answered (no network, a short-lived CLI process
+# killed mid-fetch) holds the slot for an hour, not for the whole day: otherwise
+# one dead process costs every process on the host a day of release checks.
+_CHECK_RETRY_SECONDS = 3600
 _RESTART_DELAY_SECONDS = 3.0
-_lock = threading.RLock()
+# Every Hermes process on the host writes this one file, so the write is
+# serialized by the cross-process lock prompt notes and the model override
+# already use -- one lock for threads and processes both, rather than a second
+# one here that only threads of this process would respect. Both waits are short
+# by design: writing the file takes microseconds, so a longer wait means refine
+# itself is mid-mutation, and a message nobody asked for must never be the reason
+# anything else waits. ``remember_chat`` runs on the agent's own turn and so
+# waits not at all.
+_STATE_LOCK_TIMEOUT = 0.5
+_TURN_LOCK_TIMEOUT = 0.0
 
 
 # -- State ------------------------------------------------------------------------
@@ -74,17 +92,53 @@ def _save(state: Dict[str, Any]) -> None:
         raise
 
 
+@contextmanager
+def _mutation(timeout: float = _STATE_LOCK_TIMEOUT) -> Iterator[Optional[Dict[str, Any]]]:
+    """Read, change and write the state file as one transaction, or yield None.
+
+    ``_save`` is atomic on its own, but load-change-save is not, and the writers
+    are separate processes: the gateway, a CLI, cron. Without a cross-process
+    lock one process's ``chat`` or ``update_notified`` is overwritten by another's
+    older snapshot, which either sends the next message to a stale chat or repeats
+    a message this module promises to send once.
+
+    Only the read and the write happen in here. A GitHub fetch, the installer
+    subprocess and every ``notify`` run outside it, against a snapshot taken
+    before them, with the result latched afterwards -- the lock used to be held
+    across a 60-second subprocess while the agent's turn waited on it.
+
+    ``None`` means the lock was busy and nothing was written. Callers must treat
+    that as "not recorded" -- at worst a message is said again later -- because
+    the alternative is making refine wait on a cosmetic notice.
+    """
+    stack = ExitStack()
+    try:
+        stack.enter_context(journal.mutation_lock(timeout=timeout))
+    except TimeoutError:
+        stack.close()
+        logger.debug("refine notices: state file busy, nothing recorded")
+        yield None
+        return
+    with stack:
+        state = _load()
+        yield state
+        _save(state)
+
+
 def remember_chat(chat: Optional[Tuple[str, str, str]]) -> None:
-    """Keep the last chat the user talked from, for messages nobody asked for."""
+    """Keep the last chat the user talked from, for messages nobody asked for.
+
+    Called from the post-LLM hook, on the agent's own turn: it reads first and
+    only takes a lock when the chat actually changed.
+    """
     if not chat or not chat[0] or not chat[1]:
         return
     try:
-        with _lock:
-            state = _load()
-            if state.get("chat") == list(chat):
-                return
-            state["chat"] = list(chat)
-            _save(state)
+        if _load().get("chat") == list(chat):
+            return
+        with _mutation(_TURN_LOCK_TIMEOUT) as state:
+            if state is not None:
+                state["chat"] = list(chat)
     except Exception:
         logger.debug("refine notices: cannot remember chat", exc_info=True)
 
@@ -183,59 +237,102 @@ def latest_known(state: Optional[Dict[str, Any]] = None) -> Optional[str]:
 # -- Events -----------------------------------------------------------------------
 
 
+def _check_due(state: Dict[str, Any], now: float) -> bool:
+    """Whether this process should ask GitHub for a release now.
+
+    Two stamps, because a check that answered and a check that only started are
+    not the same fact: the first is good for a day, the second holds the slot for
+    an hour so a failed or killed process does not silence the host until
+    tomorrow.
+    """
+    checked = state.get("update_checked_ts")
+    if isinstance(checked, (int, float)) and now - checked < _CHECK_INTERVAL_SECONDS:
+        return False
+    attempted = state.get("update_check_attempt_ts")
+    if isinstance(attempted, (int, float)) and now - attempted < _CHECK_RETRY_SECONDS:
+        return False
+    return True
+
+
 def check_update(now: Optional[float] = None) -> None:
     """Once a day across every process: look for a release, and say so once per release."""
     if not config.update_check_enabled():
         return
     now = time.time() if now is None else now
     try:
-        with _lock:
-            state = _load()
-            checked = state.get("update_checked_ts")
-            if not (isinstance(checked, (int, float)) and now - checked < _CHECK_INTERVAL_SECONDS):
-                state["update_checked_ts"] = now
-                _save(state)
+        state = _load()
+        if _check_due(state, now):
+            claimed = False
+            with _mutation() as fresh:
+                # Claimed under the lock so two processes starting together do not
+                # both call GitHub; re-checked inside because the first one may
+                # have claimed it while this one waited. No claim, no fetch.
+                if fresh is not None and _check_due(fresh, now):
+                    fresh["update_check_attempt_ts"] = now
+                    claimed = True
+            if claimed:
+                release = None
                 try:
                     release = update_check._fetch_latest_release()
                 except Exception:
-                    release = None
+                    # Not silent: the attempt stamp above is what a later process
+                    # reads, and it must not look like a check that answered.
+                    logger.debug("refine notices: release lookup failed", exc_info=True)
                 if release:
-                    state["latest_tag"] = release["tag"]
-                    _save(state)
-            latest = latest_known(state)
-            if latest and state.get("update_notified") != latest:
-                if _send(state, update_available_text(latest)):
-                    state["update_notified"] = latest
-                    _save(state)
+                    with _mutation() as fresh:
+                        if fresh is not None:
+                            fresh["update_checked_ts"] = now
+                            fresh["latest_tag"] = release["tag"]
+            state = _load()
+        latest = latest_known(state)
+        if latest and state.get("update_notified") != latest:
+            if _send(state, update_available_text(latest)):
+                with _mutation() as fresh:
+                    if fresh is not None:
+                        fresh["update_notified"] = latest
     except Exception:
         logger.debug("refine notices: update check failed", exc_info=True)
 
 
 def startup_check() -> None:
-    """At process start: say whether the plugin works, once per change."""
+    """At process start: say whether the plugin works, once per change.
+
+    Every message is latched only after it was delivered. A process that starts
+    without any way to reach the user (a CLI with no chat on record) must not
+    consume the confirmation the gateway would have sent.
+    """
     try:
-        with _lock:
-            state = _load()
-            pending = state.pop("pending", None)
-            version = update_check.installed_version()
-            if plugin_working():
-                if isinstance(pending, dict) and pending.get("kind") == "update":
-                    _send(state, running_text(version))
-                elif state.get("broken") or isinstance(pending, dict):
-                    _send(state, working_again_text())
-                state.pop("broken", None)
-                _save(state)
+        state = _load()
+        pending = state.get("pending")
+        version = update_check.installed_version()
+        if plugin_working():
+            if isinstance(pending, dict) and pending.get("kind") == "update":
+                text = running_text(version)
+            elif state.get("broken") or isinstance(pending, dict):
+                text = working_again_text()
             else:
-                if isinstance(pending, dict):
-                    _save(state)
-                supported = _host_supported()
-                kind = "paused" if supported is False else "stopped"
-                key = [kind, hermes_version()]
-                if state.get("broken") != key:
-                    text = paused_text(hermes_version()) if kind == "paused" else stopped_text()
-                    if _send(state, text):
-                        state["broken"] = key
-                        _save(state)
+                text = ""
+            if text and _send(state, text):
+                with _mutation() as fresh:
+                    if fresh is not None:
+                        fresh.pop("broken", None)
+                        fresh.pop("pending", None)
+        else:
+            supported = _host_supported()
+            kind = "paused" if supported is False else "stopped"
+            key = [kind, hermes_version()]
+            text = "" if state.get("broken") == key else (
+                paused_text(hermes_version()) if kind == "paused" else stopped_text()
+            )
+            delivered = bool(text) and _send(state, text)
+            if delivered or isinstance(pending, dict):
+                with _mutation() as fresh:
+                    if fresh is not None:
+                        # A confirmation still pending on a plugin that does not
+                        # work is stale: the update landed and did not fix it.
+                        fresh.pop("pending", None)
+                        if delivered:
+                            fresh["broken"] = key
         check_update()
     except Exception:
         logger.debug("refine notices: startup check failed", exc_info=True)
@@ -250,14 +347,14 @@ def memory_full(used: Optional[int], limit: Optional[int]) -> None:
     if used is None or limit is None:
         return
     try:
-        with _lock:
-            state = _load()
-            key = [int(used), int(limit)]
-            if state.get("memory_full") == key:
-                return
-            if _send(state, memory_full_text(int(used), int(limit))):
-                state["memory_full"] = key
-                _save(state)
+        state = _load()
+        key = [int(used), int(limit)]
+        if state.get("memory_full") == key:
+            return
+        if _send(state, memory_full_text(int(used), int(limit))):
+            with _mutation() as fresh:
+                if fresh is not None:
+                    fresh["memory_full"] = key
     except Exception:
         logger.debug("refine notices: memory-full notice failed", exc_info=True)
 
@@ -282,6 +379,35 @@ def _gateway_runner() -> Any:
         if isinstance(obj, GatewayRunner) and getattr(obj, "_running", False):
             return obj
     return None
+
+
+def _hermes_argv() -> List[str]:
+    """How to run the ``hermes`` CLI on this host, or ``[]``.
+
+    The host's own resolver knows the cases nothing else does -- a frozen build, a
+    venv wrapper, a service install -- so it is asked first. It is asked by name at
+    call time rather than imported: this release was disabled outright on a live
+    host for statically importing one host symbol Hermes had deleted, and a
+    private one is the likelier next casualty. The fallbacks keep the restart
+    working when it goes, instead of taking the plugin down with it.
+    """
+    try:
+        import importlib
+        resolve = getattr(importlib.import_module("gateway.run"), "_resolve_hermes_bin", None)
+        if callable(resolve):
+            argv = [str(part) for part in (resolve() or [])]
+            if argv:
+                return argv
+    except Exception:
+        logger.debug("refine: the host could not resolve the hermes binary", exc_info=True)
+    found = shutil.which("hermes")
+    if found:
+        return [found]
+    for name in ("hermes.exe", "hermes"):
+        candidate = Path(config.hermes_home()) / "bin" / name
+        if candidate.is_file():
+            return [str(candidate)]
+    return []
 
 
 def restart_hermes(loop: Any = None) -> bool:
@@ -311,10 +437,9 @@ def restart_hermes(loop: Any = None) -> bool:
         # get_running_pid, not is_gateway_running: Hermes removed the latter on
         # 2026-09-14 and refuses to load a plugin that still imports it.
         from gateway.status import get_running_pid
-        from gateway.run import _resolve_hermes_bin
         if get_running_pid() is None:
             return False
-        argv = _resolve_hermes_bin()
+        argv = _hermes_argv()
         if not argv:
             return False
         import subprocess
@@ -341,13 +466,17 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
     was_working = plugin_working()
     result = update_check.run_update()
     outcome = result.get("outcome")
+    # The installer's own stdout and stderr are quoted in this message, so it can
+    # carry whatever the environment that ran it had in it. Scrubbed here, once,
+    # where the message is turned into words: the chat reply and the desktop app's
+    # JSON both read it, and the desktop one used to send it raw.
+    message = scrub_text(str(result.get("message") or "")).strip()
     if outcome in ("updated", "repaired"):
         new_version = str(result.get("tag") or update_check.installed_version())
-        with _lock:
-            state = _load()
-            state["pending"] = {"kind": "update" if outcome == "updated" else "fix",
-                                "version": new_version}
-            _save(state)
+        with _mutation() as state:
+            if state is not None:
+                state["pending"] = {"kind": "update" if outcome == "updated" else "fix",
+                                    "version": new_version}
         head = (f"{BRAND} updated to {plain_version(new_version)}." if outcome == "updated"
                 else f"{BRAND} fixed.")
         return head, head
@@ -356,10 +485,10 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
             return f"{BRAND} {plain_version(update_check.installed_version())} is up to date.", ""
         if _host_supported() is False:
             return paused_text(hermes_version()), ""
-        return f"{BRAND} could not fix itself. {result.get('message', '')}".strip(), ""
+        return f"{BRAND} could not fix itself. {message}".strip(), ""
     if outcome == "catalog_install":
-        return f"{BRAND}: {result.get('message', '')}", ""
-    return f"{BRAND} update failed. {result.get('message', '')}".strip(), ""
+        return f"{BRAND}: {message}", ""
+    return f"{BRAND} update failed. {message}".strip(), ""
 
 
 def finish_with_restart(head: str, loop: Any = None) -> str:
@@ -380,6 +509,10 @@ def finish_with_restart(head: str, loop: Any = None) -> str:
 
 _job: Dict[str, Any] = {}
 _job_lock = threading.Lock()
+# Which backend process answered. New code only runs in a new process, so this
+# changing is the one honest proof a restart happened; the button waits for it
+# instead of announcing the new version while the old code is still answering.
+_BACKEND_ID = f"{os.getpid()}-{time.time():.6f}"
 
 
 def desktop_state() -> Dict[str, Any]:
@@ -394,6 +527,7 @@ def desktop_state() -> Dict[str, Any]:
         "working": plugin_working(),
         "latest": plain_version(latest) if latest else None,
         "job": job,
+        "backend": _BACKEND_ID,
     }
 
 

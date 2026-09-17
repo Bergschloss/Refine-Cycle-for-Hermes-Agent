@@ -24691,6 +24691,151 @@ class NoticesTests(unittest.TestCase):
             self.notices.memory_full_text(7999, 8000),
         ])
 
+    def test_two_writers_cannot_overwrite_each_other_with_a_stale_snapshot(self):
+        """Two passes at once, as AGENTS.md requires for read-then-act state.
+
+        The file is shared by the gateway, a CLI and cron, and load-change-save is
+        not atomic on its own. A writer that cannot take the lock records nothing
+        -- it does not write its older snapshot over the other one's change.
+        """
+        holding = threading.Event()
+        release = threading.Event()
+
+        def hold():
+            with self.notices._mutation() as state:
+                state["broken"] = ["stopped", "0.21.4"]
+                holding.set()
+                release.wait(5)
+
+        writer = threading.Thread(target=hold, daemon=True)
+        writer.start()
+        try:
+            self.assertTrue(holding.wait(5))
+            started = time.monotonic()
+            self.notices.remember_chat(("telegram", "222", ""))
+            waited = time.monotonic() - started
+        finally:
+            release.set()
+            writer.join(5)
+        # The agent's turn calls remember_chat. It must not wait on the lock at all.
+        self.assertLess(waited, 0.3, "the turn path waited on the notices lock")
+        state = self.notices._load()
+        self.assertEqual(state.get("broken"), ["stopped", "0.21.4"])
+        self.assertIsNone(state.get("chat"), "a busy lock must skip the write, not clobber")
+        # Skipped, not lost forever: the next turn records it.
+        self.notices.remember_chat(("telegram", "222", ""))
+        self.assertEqual(self.notices._load().get("chat"), ["telegram", "222", ""])
+
+    def test_a_release_check_that_never_answered_is_retried_the_same_day(self):
+        """A dead network or a killed process costs an hour, not the whole day."""
+        with patch.object(update_check, "_fetch_latest_release",
+                          side_effect=OSError("no network")) as failed:
+            self.notices.check_update(now=1000.0)
+            self.notices.check_update(now=1000.0 + 600)
+        self.assertEqual(failed.call_count, 1, "the retry window must hold the slot")
+        self.assertEqual(self.sent, [])
+        with patch.object(update_check, "installed_version", return_value="1.3.11"), \
+             patch.object(update_check, "_fetch_latest_release",
+                          return_value={"tag": "v1.3.12", "url": ""}) as fetch:
+            self.notices.check_update(now=1000.0 + 3700)
+        self.assertEqual(fetch.call_count, 1, "a failed check must not cost the whole day")
+        self.assertEqual([t for t, _ in self.sent],
+                         [self.notices.update_available_text("v1.3.12")])
+
+    def test_a_confirmation_that_could_not_be_delivered_is_kept_for_the_next_start(self):
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "updated", "tag": "v1.3.12", "message": ""}), \
+             self._working(True):
+            self.notices.run_update_command(None)
+        with patch.object(self.notices._notify, "notify", return_value=False), \
+             self._working(True), patch.object(self.notices, "check_update"), \
+             patch.object(update_check, "installed_version", return_value="1.3.12"):
+            self.notices.startup_check()
+        self.assertEqual(self.sent, [], "nothing was delivered")
+        with self._working(True), patch.object(self.notices, "check_update"), \
+             patch.object(update_check, "installed_version", return_value="1.3.12"):
+            self.notices.startup_check()
+        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text("1.3.12")])
+
+    def test_the_installer_output_is_scrubbed_before_it_reaches_the_desktop(self):
+        """The reply quotes installer stdout/stderr, so it can carry credentials.
+
+        Both surfaces read the same message: the chat reply, which the command
+        entry scrubs, and the desktop app's JSON, which does not. Scrubbed where
+        the message is written, so neither can leak.
+        """
+        leak = "Traceback: env GITHUB_TOKEN=ghp_" + "a" * 36
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "failed", "message": leak}), \
+             self._working(True):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(restart_head, "")
+        self.assertNotIn("ghp_", reply)
+        self.assertIn("[REDACTED]", reply)
+
+        self.notices._job.clear()
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "failed", "message": leak}), \
+             patch.object(self.notices, "restart_hermes", return_value=False), \
+             patch.object(self.notices, "check_update"), self._working(True):
+            asyncio_run(plugin_init._update_command_entry("desktop-start"))
+            deadline = time.monotonic() + 5
+            payload = "{}"
+            while time.monotonic() < deadline:
+                payload = asyncio_run(plugin_init._update_command_entry("desktop-state"))
+                if (json.loads(payload).get("job") or {}).get("status") == "done":
+                    break
+                time.sleep(0.02)
+        self.notices._job.clear()
+        self.assertNotIn("ghp_", payload)
+        self.assertIn("[REDACTED]", payload)
+        # The desktop half confirms a restart by watching this change, so it has
+        # to be there and it has to identify this process.
+        self.assertEqual(json.loads(payload)["backend"], self.notices._BACKEND_ID)
+
+    def test_the_restart_survives_the_host_dropping_its_private_resolver(self):
+        """A removed host symbol may cost the restart path, never the plugin."""
+        gateway = types.ModuleType("gateway")
+        run = types.ModuleType("gateway.run")
+        gateway.run = run
+        with patch.dict(sys.modules, {"gateway": gateway, "gateway.run": run}), \
+             patch.object(self.notices.shutil, "which", return_value="/usr/local/bin/hermes"):
+            self.assertEqual(self.notices._hermes_argv(), ["/usr/local/bin/hermes"])
+        run._resolve_hermes_bin = lambda: ["/opt/hermes/bin/hermes", "--flag"]
+        with patch.dict(sys.modules, {"gateway": gateway, "gateway.run": run}):
+            self.assertEqual(self.notices._hermes_argv(),
+                             ["/opt/hermes/bin/hermes", "--flag"])
+
+    def test_a_tap_command_the_host_already_owns_is_reported_not_skipped_quietly(self):
+        """Every surface tells the user to tap it; a silent skip makes them lie."""
+        captured = {}
+
+        class Context:
+            llm = object()
+            subagent_lifecycle = None
+
+            def register_command(self, name, handler, **kwargs):
+                captured[name] = handler
+
+            def register_tool(self, *args, **kwargs):
+                return None
+
+            def register_hook(self, *args, **kwargs):
+                return None
+
+        saved = (plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider)
+        with patch.object(self.notices, "start_background_checks"), \
+             patch.object(plugin_init, "_built_in_command_exists",
+                          side_effect=lambda name: name == self.notices.UPDATE_COMMAND):
+            try:
+                with self.assertLogs(plugin_init.logger, level="WARNING") as logs:
+                    plugin_init.register(Context())
+            finally:
+                plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider = saved
+        self.assertNotIn("refine-update", captured)
+        self.assertIn("refine-fix", captured)
+        self.assertTrue(any("refine-update" in line for line in logs.output), logs.output)
+
     def test_the_status_headline_names_the_state_and_the_command_to_tap(self):
         with self._working(False):
             self.assertEqual(plugin_init._status_headline()[1], "/refine-fix")
