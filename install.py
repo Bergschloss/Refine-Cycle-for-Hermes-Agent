@@ -260,6 +260,12 @@ PLUGIN_MANIFEST_EXTRAS = ("plugin.yaml",)
 # core.py imports every one of these at module level, so the absence of any one
 # of them is a dead install. Derivation should cover them already; this is the
 # guard for derivation itself going wrong.
+#
+# desktop/plugin.js is deliberately not here. Nothing in the plugin imports it and
+# the host only reads it when the desktop app runs, so its absence costs the
+# status-bar item and the [Update] / [Fix] buttons, not the plugin -- a wrong
+# thing to refuse an install over. `test_an_install_ships_the_desktop_half` is
+# what keeps derivation honest about it.
 REQUIRED_PLUGIN_MODULES = (
     "__init__.py", "config.py", "core.py", "journal.py", "ledger.py", "llm.py",
     "notices.py", "notify.py", "patterns.py", "refine_trace.py",
