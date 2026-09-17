@@ -45,7 +45,13 @@ export const host = {
     if (globalThis.__backendDown) throw new Error('backend restarting')
     return { output: JSON.stringify(globalThis.__state) }
   },
-  notify: (payload) => calls.notify.push(payload)
+  notify: (payload) => {
+    if (globalThis.__notifyThrows) {
+      globalThis.__notifyThrows -= 1
+      throw new Error('no notification surface')
+    }
+    calls.notify.push(payload)
+  }
 }
 `)
 writeFileSync(join(reactDir, 'package.json'),
@@ -126,7 +132,15 @@ function context() {
       set: (key, value) => store.set(key, value),
       remove: (key) => store.delete(key)
     },
-    os: { notify: (payload) => osNotes.push(payload) },
+    os: {
+      notify: (payload) => {
+        if (globalThis.__osNotifyThrows) {
+          globalThis.__osNotifyThrows -= 1
+          throw new Error('no OS notification surface')
+        }
+        osNotes.push(payload)
+      }
+    },
     register: () => {},
     onDispose: (fn) => disposers.push(fn)
   }
@@ -242,6 +256,39 @@ globalThis.__backendDown = false
 requests = calls.request.length
 await advance(11 * 60 * 1000)
 check('an unreachable backend does not stop the loop', calls.request.length - requests, 1)
+dispose()
+
+// 7. A notification surface that refuses must not swallow the result, and must
+//    not stop the update from loading.
+withBridge()
+recycled = 0
+globalThis.__state = state({
+  job: { status: 'done', started: 7, restart: true, reply: 'RC updated to 1.3.13.' }
+})
+const ctx8 = context()
+globalThis.__notifyThrows = 1
+plugin.register(ctx8)
+await advance(1)
+check('a refused toast is not marked as shown', store.get('shown:7'), undefined)
+check('the restart happens even when the toast failed', store.get('restartingTo'), '1.3.12')
+await advance(1600)
+check('the backend is recycled even when the toast failed', recycled, 1)
+await advance(2100)
+check('the result is reported on the next poll instead',
+  messages(), ['RC updated to 1.3.13. Restarting Hermes…'])
+dispose()
+
+// 8. Same rule for the OS notification: refused is not "announced".
+withBridge()
+globalThis.__state = state({ working: false })
+const ctx9 = context()
+globalThis.__osNotifyThrows = 1
+plugin.register(ctx9)
+await advance(1)
+check('a refused OS notification is not latched', store.get('announced'), undefined)
+await advance(11 * 60 * 1000)
+check('and it is offered again on the next poll',
+  osNotes.map((note) => note.body), ['RC stopped working after the Hermes update.'])
 dispose()
 
 console.log(failures ? `${failures} failed` : 'all ok')

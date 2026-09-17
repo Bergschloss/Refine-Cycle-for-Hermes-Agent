@@ -1305,6 +1305,16 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             lines.append(
                 f"cooldown remaining: {status['cooldown_remaining_minutes']} min"
             )
+        # Not a warning: a lesson that exists is the plugin working. But a failure
+        # refine no longer proposes anything for has to be readable somewhere, and
+        # whether those lessons held is what audit answers.
+        if status["memory_covered_patterns"] or status["memory_backoff_patterns"]:
+            lines.append(
+                f"memory coverage: {status['memory_covered_patterns']} failure(s) "
+                f"covered by a stored lesson, {status['memory_backoff_patterns']} "
+                f"held back by a full store "
+                f"({_command_display_name()} audit says whether they helped)"
+            )
         if status["recent_auto_events"]:
             lines.append("recent auto events:")
             lines.extend(

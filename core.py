@@ -2353,6 +2353,26 @@ def _memory_offer_exclusions(
     return frozenset(covered), frozenset(backed_off)
 
 
+def _memory_offer_counts() -> "Tuple[int, int]":
+    """``(covered, backed_off)`` -- how many failures the memory checks hold back.
+
+    Two different suppressions, and the user is entitled to see both. ``covered``
+    is a lesson that exists and is presumed to be doing its job, so it is a plain
+    number in ``/refine status`` and not a warning; whether those lessons actually
+    helped is what ``/refine audit`` answers. ``backed_off`` is the full store, and
+    that one is a warning, because nothing improves until room appears.
+    """
+    try:
+        used, limit = _memory_usage()
+        covered, backed_off = _memory_offer_exclusions(
+            _live_memory_entries(), used, limit
+        )
+        return len(covered), len(backed_off)
+    except Exception as exc:
+        logger.debug("Cannot count the memory offer exclusions: %s", scrub_text(str(exc)))
+        return 0, 0
+
+
 def _memory_backoff_count() -> int:
     """How many repeated failures the full-store backoff is holding back now.
 
@@ -2742,8 +2762,10 @@ def refine_status() -> Dict[str, Any]:
                 "code": f"{store_name}_unreadable",
                 "message": f"The refine {store_name.replace('_', '-')} store is unreadable",
             })
+    memory_covered = 0
+    held_back = 0
     if journal_present and journal_readable:
-        held_back = _memory_backoff_count()
+        memory_covered, held_back = _memory_offer_counts()
         if held_back:
             warnings.append({
                 "code": "memory_full_backoff",
@@ -2917,6 +2939,11 @@ def refine_status() -> Dict[str, Any]:
         "model_runs_today": model_runs_today,
         "max_model_runs_per_day": max_model_runs,
         "update_available": update,
+        # What the memory checks are keeping from the proposer, both kinds, because
+        # a plugin that has quietly stopped proposing for its top failures must be
+        # readable somewhere other than the journal.
+        "memory_covered_patterns": memory_covered,
+        "memory_backoff_patterns": held_back,
         "journal_present": journal_present,
         "journal_readable": journal_readable,
         "journal_dir": str(jdir),

@@ -259,6 +259,24 @@ def _check_due(state: Dict[str, Any], now: float) -> bool:
     return True
 
 
+def _forget_attempts(state: Dict[str, Any], prefixes: Tuple[str, ...]) -> None:
+    """Drop attempt stamps for an episode that is over.
+
+    A claim stops the same message being said twice; it must not stop the NEXT
+    occurrence. The keys carry a version, not an occurrence, so break, fix, break
+    and fix again inside the retry window would find the old stamp and say nothing
+    -- and because the latch is cleared only on delivery, a swallowed "working
+    again" left ``broken`` behind, which then silenced the next real break. So the
+    latch and the claim are released together, always.
+    """
+    attempts = state.get("attempts")
+    if isinstance(attempts, dict):
+        state["attempts"] = {
+            event: when for event, when in attempts.items()
+            if not event.startswith(prefixes)
+        }
+
+
 def _claim(event: str, now: float) -> bool:
     """Claim the one attempt at a once-per-event message, or return False.
 
@@ -372,6 +390,9 @@ def startup_check(now: Optional[float] = None) -> None:
                     if fresh is not None:
                         fresh.pop("broken", None)
                         fresh.pop("pending", None)
+                        # The episode is over: its claims go with its latch, so a
+                        # break and a fix an hour apart are not the last word.
+                        _forget_attempts(fresh, ("working:", "broken:"))
         else:
             # Claimed before ``_host_supported``, not after: that call runs the
             # installer as a subprocess with a 60-second timeout, and on a broken
@@ -390,6 +411,9 @@ def startup_check(now: Optional[float] = None) -> None:
                     with _mutation() as fresh:
                         if fresh is not None:
                             fresh["broken"] = key
+                            # Told about this break, so the recovery from it may be
+                            # told too, whatever was said about an earlier one.
+                            _forget_attempts(fresh, ("working:",))
             if isinstance(pending, dict):
                 with _mutation() as fresh:
                     if fresh is not None:

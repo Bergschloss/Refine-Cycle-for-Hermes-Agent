@@ -90,16 +90,22 @@ function announce(state) {
     return
   }
   if (pluginCtx.storage.get('announced', '') === key) return
-  pluginCtx.storage.set('announced', key)
   const fix = !state.working
-  pluginCtx.os.notify({
-    title: state.brand,
-    body: fix
-      ? `${state.brand} stopped working after the Hermes update.`
-      : `${state.brand} — update available: ${state.latest}.`,
-    actions: [{ id: fix ? 'fix' : 'update', label: fix ? 'Fix' : 'Update', onAction: () => void start() }],
-    onActivate: () => void start()
-  })
+  try {
+    pluginCtx.os.notify({
+      title: state.brand,
+      body: fix
+        ? `${state.brand} stopped working after the Hermes update.`
+        : `${state.brand} — update available: ${state.latest}.`,
+      actions: [{ id: fix ? 'fix' : 'update', label: fix ? 'Fix' : 'Update', onAction: () => void start() }],
+      onActivate: () => void start()
+    })
+  } catch {
+    // Marked as announced only once it was: a notification surface that refuses
+    // must not consume the event, or the user is never told at all.
+    return
+  }
+  pluginCtx.storage.set('announced', key)
 }
 
 function forgetRestart() {
@@ -129,11 +135,17 @@ function afterRestart(state) {
   // backend process answers, or this says "is running" about the old code.
   const from = pluginCtx.storage.get('restartingFrom', '')
   if (from && state.backend === from) return
+  try {
+    host.notify({
+      kind: 'success',
+      message: state.working ? `${state.brand} ${state.version} is running.` : `${state.brand} is working again.`
+    })
+  } catch {
+    // Still waiting, so the next poll tries again until the deadline in
+    // waitingForRestart() runs out. Forgetting first would lose it for good.
+    return
+  }
   forgetRestart()
-  host.notify({
-    kind: 'success',
-    message: state.working ? `${state.brand} ${state.version} is running.` : `${state.brand} is working again.`
-  })
 }
 
 async function refresh() {
@@ -150,13 +162,20 @@ async function refresh() {
     }
     if (!pluginCtx) return
     if (job && job.status === 'done' && !pluginCtx.storage.get(`shown:${job.started}`, false)) {
-      pluginCtx.storage.set(`shown:${job.started}`, true)
       // The restart sentence is written here, not by the backend: this side is
       // the one that knows whether it can recycle the backend at all.
       const tail = job.restart
         ? (canRecycle() ? ' Restarting Hermes…' : ' It loads the next time Hermes starts.')
         : ''
-      host.notify({ kind: job.restart ? 'success' : 'info', message: `${job.reply}${tail}` })
+      try {
+        host.notify({ kind: job.restart ? 'success' : 'info', message: `${job.reply}${tail}` })
+        // Marked as reported only once it was reported: a toast that threw would
+        // otherwise lose the only account of what the update did.
+        pluginCtx.storage.set(`shown:${job.started}`, true)
+      } catch {
+        // Nothing else changes. The restart below does not depend on the toast:
+        // an update that installed has to load either way.
+      }
       // Without the bridge there is no restart to wait for, so no fast polling
       // and no confirmation to expect either.
       if (job.restart && canRecycle()) {

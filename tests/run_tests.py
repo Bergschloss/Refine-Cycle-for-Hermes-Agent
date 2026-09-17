@@ -16337,9 +16337,11 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
              patch.object(core, "_apply_memory",
                           return_value={"success": False, "error": self._FULL_REFUSAL}):
             self._run_with_patterns(lesson, repeated)
-            codes = [w["code"] for w in core.refine_status()["warnings"]]
-            self.assertIn("memory_full_backoff", codes)
+            status = core.refine_status()
+            self.assertIn("memory_full_backoff", [w["code"] for w in status["warnings"]])
+            self.assertEqual(status["memory_backoff_patterns"], 1)
             rendered = plugin_init._handle_refine_command("status")
+            self.assertIn("held back by a full store", rendered)
         self.assertIn("not offered to the proposer", rendered)
         self.assertIn("memory_char_limit", rendered)
         with patch.object(core, "_memory_usage", return_value=(7000, 8000)):
@@ -16378,6 +16380,11 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(
             journal.get_entry(covered["journal_id"])["llm_meta"]["memory_live_covered"], 1
         )
+        # And it is readable outside the journal: this suppression lasts as long as
+        # the entry does, so /refine status counts it and points at the audit.
+        self.assertEqual(core.refine_status()["memory_covered_patterns"], 1)
+        self.assertIn("covered by a stored lesson",
+                      plugin_init._handle_refine_command("status"))
 
         FakeHost.memory_entries[:] = [e for e in FakeHost.memory_entries if e != lesson["content"]]
         _again, again_model = self._run_with_patterns({"action": "no_op", "reason": "x"}, repeated)
@@ -24808,6 +24815,40 @@ class NoticesTests(unittest.TestCase):
             thread.join(10)
         self.assertEqual([t for t, _ in self.sent], [self.notices.stopped_text()])
         self.assertEqual(self.notices._load().get("broken"), ["stopped", "0.21.4"])
+
+    def test_a_second_break_and_fix_inside_the_hour_is_still_reported(self):
+        """A claim stops the same message twice; it must not stop the next one.
+
+        The claim key names a version, not an occurrence, so break-fix-break-fix
+        inside the retry window found the old stamp and said nothing -- and because
+        the latch is cleared only on delivery, the swallowed "working again" left
+        `broken` behind, which then silenced the next real break entirely. The latch
+        and the claim are released together now.
+        """
+        def broken_at(when):
+            with self._working(False), \
+                 patch.object(self.notices, "_host_supported", return_value=True), \
+                 patch.object(self.notices, "hermes_version", return_value="0.23.0"), \
+                 patch.object(self.notices, "check_update"):
+                self.notices.startup_check(now=when)
+
+        def working_at(when):
+            with self._working(True), patch.object(self.notices, "check_update"):
+                self.notices.startup_check(now=when)
+
+        broken_at(1000.0)
+        working_at(1100.0)
+        broken_at(1200.0)     # a second break, same Hermes, inside the hour
+        working_at(1300.0)
+        self.assertEqual([t for t, _ in self.sent], [
+            self.notices.stopped_text(),
+            self.notices.working_again_text(),
+            self.notices.stopped_text(),
+            self.notices.working_again_text(),
+        ])
+        self.assertIsNone(self.notices._load().get("broken"), "no stale latch is left")
+        broken_at(1400.0)     # and a third break is not silent
+        self.assertEqual(self.sent[-1][0], self.notices.stopped_text())
 
     def test_a_notice_whose_latch_could_not_be_written_is_not_said_again_at_once(self):
         """The latch write can lose the lock race; the claim is what prevents the
