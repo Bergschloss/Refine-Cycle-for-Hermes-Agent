@@ -104,6 +104,8 @@ python tests/run_tests.py
 
 `PathTraceTests` runs every way a pass starts (the `refine_run` tool, `post_llm_call`, `on_session_end`, a deferred session end drained later, the slash command) through the real entry points, against a host double that enforces Hermes's ContextVar rules for the model route and the subagent parent. It asserts the whole trace as one table: trigger, outcome, which proposer ran, why it fell back, which parent the launch saw, and how many structured calls were made.
 
+Before a release, run `hermes plugins compat <repo>` on the newest Hermes. Hermes refuses to load a plugin that imports an internal path it removed (the September 2026 decomposition removed a batch on 2026-09-14), and importing the plugin directly does not run that check. 1.3.12 shipped after it caught `gateway.status.is_gateway_running`.
+
 `install.py --status` reports host state without changing anything: which patch applies, whether all 8 targets carry markers, and whether the plugin is installed.
 
 ## Known gaps

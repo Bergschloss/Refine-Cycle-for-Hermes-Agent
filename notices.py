@@ -308,9 +308,11 @@ def restart_hermes(loop: Any = None) -> bool:
         loop.call_soon_threadsafe(loop.call_later, _RESTART_DELAY_SECONDS, request)
         return True
     try:
-        from gateway.status import is_gateway_running
+        # get_running_pid, not is_gateway_running: Hermes removed the latter on
+        # 2026-09-14 and refuses to load a plugin that still imports it.
+        from gateway.status import get_running_pid
         from gateway.run import _resolve_hermes_bin
-        if not is_gateway_running():
+        if get_running_pid() is None:
             return False
         argv = _resolve_hermes_bin()
         if not argv:
