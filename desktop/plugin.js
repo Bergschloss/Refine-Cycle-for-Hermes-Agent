@@ -30,6 +30,11 @@ const listeners = new Set()
 let current = null
 let pluginCtx = null
 let timer = null
+// Bumped by dispose. A refresh already in flight when the plugin is disposed
+// finishes after it, and without this it rescheduled itself and re-fired the
+// finished job's toast on every poll -- forever, because the "already shown"
+// check reads storage through the context dispose just cleared.
+let generation = 0
 
 function publish(state) {
   current = state
@@ -63,7 +68,12 @@ function announce(state) {
   // backend's state for the life of the process, and treating that as "busy"
   // muted every later release notification after the first press.
   if (!pluginCtx || !state || (state.job && state.job.status === 'running')) return
-  const key = state.working ? (state.latest ? `update:${state.latest}` : '') : `fix:${state.version}`
+  // "Stopped working" is an event about the Hermes that broke it, which is how
+  // the Python half keys it too. Keyed on the plugin version alone, a second
+  // Hermes update that broke the same plugin version said nothing.
+  const key = state.working
+    ? (state.latest ? `update:${state.latest}` : '')
+    : `fix:${state.version}:${state.hermes || ''}`
   if (!key || pluginCtx.storage.get('announced', '') === key) return
   pluginCtx.storage.set('announced', key)
   const fix = !state.working
@@ -112,8 +122,10 @@ function afterRestart(state) {
 }
 
 async function refresh() {
+  const mine = generation
   try {
     const state = await ask('desktop-state')
+    if (mine !== generation) return
     publish(state)
     afterRestart(state)
     const job = state.job
@@ -121,13 +133,14 @@ async function refresh() {
       schedule(BUSY_POLL_MS)
       return
     }
-    if (job && job.status === 'done' && !pluginCtx?.storage.get(`shown:${job.started}`, false)) {
-      pluginCtx?.storage.set(`shown:${job.started}`, true)
+    if (!pluginCtx) return
+    if (job && job.status === 'done' && !pluginCtx.storage.get(`shown:${job.started}`, false)) {
+      pluginCtx.storage.set(`shown:${job.started}`, true)
       host.notify({ kind: job.restart ? 'success' : 'info', message: job.reply })
       if (job.restart) {
-        pluginCtx?.storage.set('restartingTo', state.version)
-        pluginCtx?.storage.set('restartingFrom', state.backend || '')
-        pluginCtx?.storage.set('restartingAt', Date.now())
+        pluginCtx.storage.set('restartingTo', state.version)
+        pluginCtx.storage.set('restartingFrom', state.backend || '')
+        pluginCtx.storage.set('restartingAt', Date.now())
         setTimeout(recycleBackend, 1500)
         // Keep polling. Recycling the backend leaves this renderer mounted, so
         // nothing else would ever call refresh() again, and the confirmation
@@ -140,6 +153,7 @@ async function refresh() {
   } catch {
     // Plugin not loaded on the backend yet, or the backend is restarting.
   }
+  if (mine !== generation) return
   schedule(waitingForRestart() ? BUSY_POLL_MS : IDLE_POLL_MS)
 }
 
@@ -210,7 +224,9 @@ export default {
     pluginCtx = ctx
     ctx.register({ id: 'status', area: 'statusBar.left', order: 900, render: () => jsx(RefineStatus, {}) })
     ctx.onDispose(() => {
+      generation += 1
       clearTimeout(timer)
+      timer = null
       listeners.clear()
       pluginCtx = null
     })
