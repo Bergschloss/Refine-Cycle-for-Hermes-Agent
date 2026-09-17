@@ -15,9 +15,9 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from agent.plugin_llm import PluginLlm
 
 try:
-    from . import config, core, journal, ledger, update_check
+    from . import config, core, journal, ledger, notices, update_check
 except ImportError:
-    import config, core, journal, ledger, update_check  # noqa: F811
+    import config, core, journal, ledger, notices, update_check  # noqa: F811
 
 logger = logging.getLogger(__name__)
 _ROLLBACK_COMMAND = re.compile(r"^rollback\s+([0-9a-fA-F]{12})$")
@@ -298,7 +298,7 @@ def _run_auto_refine(
             return
         # A worker thread nobody waits on, before the lock: the one place in a
         # long-running gateway where the daily release check can refresh.
-        update_check.latest_release()
+        notices.check_update()
         with journal.try_mutation_lock() as acquired:
             try:
                 if not acquired:
@@ -947,11 +947,15 @@ def _on_post_llm_call(
         llm = _session_llm()
         # Same reason, same moment: the active chat lives in a per-task
         # ContextVar the worker may not inherit. Capture here, pass by value.
+        active_chat = _capture_active_chat()
+        # Messages nobody asked for (a new release, Hermes breaking the plugin)
+        # go to the last chat the user talked from.
+        notices.remember_chat(active_chat)
         _start_auto_refine(
             session_id,
             _assistant_turn_count(conversation_history),
             llm,
-            _capture_active_chat(),
+            active_chat,
             _capture_subagent_parent(),
         )
     except Exception as exc:
@@ -1138,20 +1142,56 @@ async def _refine_command_entry(raw_args: str) -> Optional[str]:
 
 
 async def _update_command() -> str:
-    """Download and install the latest release on a worker thread.
+    """Update, or repair after a Hermes update, then restart. On a worker thread.
 
     The gateway calls command handlers on its event loop and awaits a coroutine
     when one is returned. A download and an install run for tens of seconds, and
     doing them inline would stall every chat on that gateway for as long.
     """
+    chat = _capture_active_chat()
     try:
-        result = await asyncio.to_thread(update_check.run_update)
+        reply, restart_head = await asyncio.to_thread(notices.run_update_command, chat)
+        if restart_head:
+            # New code only loads in a new process. Restart instead of asking the
+            # user to: the gateway's own restart, scheduled after this reply.
+            reply = await asyncio.to_thread(
+                notices.finish_with_restart, restart_head, asyncio.get_running_loop()
+            )
     except Exception as exc:
         logger.exception("refine update failed")
-        return f"\u274c Update failed: {core.scrub_text(str(exc))}"
-    mark = {"updated": "\u2705", "repaired": "\u2705", "already_latest": "\u2139\ufe0f",
-            "catalog_install": "\u2139\ufe0f"}.get(result.get("outcome"), "\u274c")
-    return f"{mark} {core.scrub_text(result.get('message', ''))}"
+        return f"{notices.BRAND} update failed. {core.scrub_text(str(exc))}"
+    return core.scrub_text(reply)
+
+
+def _status_headline() -> list:
+    """The first line of /refine status: works or not, and the one command to tap.
+
+    Plain words on purpose. Why it stopped (a Hermes update took the route patch
+    away) is the plugin's business; the user needs to know it stopped and what
+    to tap.
+    """
+    try:
+        version = update_check.installed_version()
+        messaging = _capture_active_chat() is not None
+        head = f"{notices.BRAND} {notices.plain_version(version)}"
+        if not notices.plugin_working():
+            return [f"{head} · not working", notices.tap(notices.FIX_COMMAND, messaging=messaging)]
+        latest = notices.latest_known()
+        if latest:
+            return [f"{head} · update available: {notices.plain_version(latest)}",
+                    notices.tap(notices.UPDATE_COMMAND, messaging=messaging)]
+        used, limit = core._memory_usage()
+        memory = f" · memory {used}/{limit}" if used is not None and limit is not None else ""
+        return [f"{head} · working{memory}"]
+    except Exception:
+        logger.debug("refine status headline failed", exc_info=True)
+        return []
+
+
+async def _update_command_entry(raw_args: str = "") -> str:
+    """``/refine_update`` and ``/refine_fix``: one tap, no arguments."""
+    del raw_args
+    return await _update_command()
 
 
 def _handle_refine_command(raw_args: str) -> Optional[str]:
@@ -1271,7 +1311,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         if status["warnings"]:
             lines.append("warnings:")
             lines.extend(f"  ⚠ {item['message']}" for item in status["warnings"])
-        return core.scrub_text("\n".join(lines))
+        return core.scrub_text("\n".join(_status_headline() + lines))
 
     if args == "dry-run" or args.startswith("dry-run "):
         dry_reason = args[7:].strip()  # len("dry-run") == 7
@@ -1764,6 +1804,13 @@ def register(ctx) -> None:
             "model [target|auto] | session <session_id> | rollback <id>]"
         ),
     )
+    for tap_command in (notices.UPDATE_COMMAND, notices.FIX_COMMAND):
+        if not _built_in_command_exists(tap_command):
+            ctx.register_command(
+                tap_command,
+                _update_command_entry,
+                description="Update Refine Cycle, or fix it after a Hermes update.",
+            )
     ctx.register_tool(
         "refine_run",
         "refine",
@@ -1796,6 +1843,7 @@ def register(ctx) -> None:
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     _warn_if_core_patch_missing()
     _warn_on_register()
+    notices.start_background_checks()
 
 
 _REGISTER_WARNED = False

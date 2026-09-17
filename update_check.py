@@ -393,6 +393,7 @@ def run_update(*, runner: Callable[..., Any] = subprocess.run) -> Dict[str, str]
         _changed, note = _repair_host(runner, tree / "install.py", host)
         return {
             "outcome": "updated",
+            "tag": tag,
             "message": (
                 f"Updated Refine Cycle {installed} to {tag}." + note
                 + " Restart Hermes to load it (in chat: /restart)."

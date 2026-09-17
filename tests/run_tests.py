@@ -576,6 +576,10 @@ def load_plugin_init():
 
 
 plugin_init = load_plugin_init()
+# register() starts the once-per-event checks on a thread that can reach GitHub.
+# NoticesTests exercises those functions directly; nothing else may start them.
+_real_start_background_checks = plugin_init.notices.start_background_checks
+plugin_init.notices.start_background_checks = lambda: None
 
 
 @contextmanager
@@ -16738,9 +16742,9 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "content": f"a brand new fact for {name}", "reason": "why", "evidence": [],
         }
 
-    def test_the_lesson_notification_names_a_newer_release_without_a_network_call(self):
-        # The notification is sent under the mutation lock, so it may only read a
-        # release already known; it must never wait on GitHub there.
+    def test_the_lesson_notification_does_not_repeat_the_release(self):
+        # A new release is its own message, sent once (notices.check_update). The
+        # lesson message must not repeat it, and must never wait on GitHub.
         update_check._memory.update(
             {"checked_ts": time.time(), "release": self._release("v99.0.0")}
         )
@@ -16749,7 +16753,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 patch.object(core._notify, "notify") as sent:
             result = self.run_proposal(self._memory_proposal("tail-newer"))
         self.assertTrue(result["success"])
-        self.assertTrue(sent.call_args[0][0].endswith(" \u00b7 v99.0.0 available"))
+        self.assertNotIn("available", sent.call_args[0][0])
 
     def test_the_lesson_notification_is_unchanged_when_no_newer_release_is_known(self):
         with patch.object(core._notify, "notify") as sent:
@@ -16955,14 +16959,14 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
         def run_update():
             seen["thread"] = threading.current_thread()
-            return {"outcome": "updated", "message": "Updated to v99.0.0."}
+            return {"outcome": "updated", "tag": "v99.0.0", "message": "Updated to v99.0.0."}
 
         with patch.object(update_check, "run_update", side_effect=run_update):
             pending = plugin_init._handle_refine_command("update")
             self.assertTrue(inspect.iscoroutine(pending))
             text = asyncio_run(pending)
 
-        self.assertIn("v99.0.0", text)
+        self.assertIn("updated to 99.0.0", text)
         self.assertIsNot(seen["thread"], threading.main_thread())
 
     # -- The host-facing /refine handler and what an install ships --------------
@@ -16980,7 +16984,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             subagent_lifecycle = None
 
             def register_command(self, name, handler, **kwargs):
-                captured["handler"] = handler
+                captured[name] = handler
 
             def register_tool(self, *args, **kwargs):
                 return None
@@ -16993,7 +16997,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             plugin_init.register(Context())
         finally:
             plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider = saved
-        return captured["handler"]
+        self._registered_commands = captured
+        return captured[plugin_init._COMMAND_NAME]
 
     def test_the_registered_refine_command_runs_off_the_event_loop(self):
         """The gateway awaits the handler on its event loop. /refine can call the
@@ -17025,9 +17030,10 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_the_registered_refine_command_still_completes_update(self):
         handler = self._registered_refine_handler()
         with patch.object(update_check, "run_update",
-                          return_value={"outcome": "updated", "message": "Updated to v99.0.0."}):
+                          return_value={"outcome": "updated", "tag": "v99.0.0",
+                                        "message": "Updated to v99.0.0."}):
             text = asyncio_run(handler("update"))
-        self.assertIn("v99.0.0", text)
+        self.assertIn("updated to 99.0.0", text)
 
     def test_an_install_ships_no_tests_and_no_research_checker(self):
         import install
@@ -19081,6 +19087,19 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         # The journaled outcome must stay "error" -- no new outcome member.
         entry = journal.get_entry(result["record_id"])
         self.assertEqual(entry["outcome"], "error")
+
+    def test_a_refused_memory_lesson_tells_the_user_once(self):
+        """A full store is something only the user can fix, so they are told,
+        once per store state, in the chat they work from."""
+        refusal = {"success": False, "error": (
+            "Memory at 7,998/8,000 chars. Adding this entry (90 chars) would exceed the limit.")}
+        notices_module = plugin_init.notices
+        sent = []
+        with patch.object(core, "_apply_memory", return_value=refusal),              patch.object(notices_module._notify, "notify",
+                          side_effect=lambda text, chat=None: sent.append(text) or True):
+            self.run_proposal(memory_edit("x" * 40, name="full-1"))
+            self.run_proposal(memory_edit("y" * 40, name="full-2"))
+        self.assertEqual(sent, [notices_module.memory_full_text(7998, 8000)])
 
     def test_memory_consolidation_exhausted_gets_its_own_terminal_code(self):
         """The host's terminal "stop retrying" reply is a distinct state from
@@ -24523,6 +24542,200 @@ class PathTraceTests(unittest.TestCase):
             (row["proposer"], row["fallback"], row["launch_parent"], row["structured_calls"]),
             ("structured", "launch_failed", None, 1),
         )
+
+
+class NoticesTests(unittest.TestCase):
+    """What the user is told, once per event, and what one tap does."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
+        FakeHost.reset(self.root)
+        config._set_runtime_journal_dir(None)
+        update_check._memory.clear()
+        self.notices = plugin_init.notices
+        self.sent = []
+        send = patch.object(self.notices._notify, "notify",
+                            side_effect=lambda text, chat=None: self.sent.append((text, chat)) or True)
+        send.start()
+        self.addCleanup(send.stop)
+        self.addCleanup(self.temp.cleanup)
+
+    def _working(self, value):
+        return patch.object(self.notices, "plugin_working", return_value=value)
+
+    def test_every_message_starts_with_the_brand(self):
+        texts = [
+            self.notices.update_available_text("v1.3.12"),
+            self.notices.stopped_text(),
+            self.notices.paused_text("0.22.0"),
+            self.notices.running_text("v1.3.12"),
+            self.notices.working_again_text(),
+            self.notices.memory_full_text(7998, 8000),
+        ]
+        for text in texts:
+            self.assertTrue(text.startswith("♾️ Refine Cycle"), text)
+        self.assertIn("/refine_update", texts[0])
+        self.assertIn("/refine_fix", texts[1])
+        self.assertNotIn("patch", " ".join(texts).lower())
+
+    def test_a_release_is_announced_once_and_github_is_asked_once_a_day(self):
+        self.notices.remember_chat(("telegram", "6667956926", ""))
+        with patch.object(update_check, "installed_version", return_value="1.3.11"), \
+             patch.object(update_check, "_fetch_latest_release",
+                          return_value={"tag": "v1.3.12", "url": ""}) as fetch:
+            self.notices.check_update(now=1000.0)
+            self.notices.check_update(now=2000.0)
+        self.assertEqual(fetch.call_count, 1, "a second process the same day must not ask GitHub")
+        self.assertEqual([text for text, _ in self.sent], [self.notices.update_available_text("v1.3.12")])
+        self.assertEqual(self.sent[0][1], ("telegram", "6667956926", ""))
+
+        with patch.object(update_check, "installed_version", return_value="1.3.11"), \
+             patch.object(update_check, "_fetch_latest_release",
+                          return_value={"tag": "v1.3.13", "url": ""}):
+            self.notices.check_update(now=1000.0 + 25 * 3600)
+        self.assertEqual(self.sent[-1][0], self.notices.update_available_text("v1.3.13"))
+
+    def test_nothing_is_announced_when_the_install_is_current(self):
+        with patch.object(update_check, "installed_version", return_value="1.3.12"), \
+             patch.object(update_check, "_fetch_latest_release",
+                          return_value={"tag": "v1.3.12", "url": ""}):
+            self.notices.check_update(now=1000.0)
+        self.assertEqual(self.sent, [])
+
+    def test_a_broken_plugin_is_reported_once_per_hermes_version(self):
+        with self._working(False), \
+             patch.object(self.notices, "_host_supported", return_value=True), \
+             patch.object(self.notices, "hermes_version", return_value="0.21.4"), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check()
+            self.notices.startup_check()
+        self.assertEqual([t for t, _ in self.sent], [self.notices.stopped_text()])
+
+        with self._working(True), patch.object(self.notices, "check_update"):
+            self.notices.startup_check()
+            self.notices.startup_check()
+        self.assertEqual(self.sent[-1][0], self.notices.working_again_text())
+        self.assertEqual(len(self.sent), 2)
+
+    def test_an_unsupported_hermes_pauses_instead_of_asking_for_a_fix(self):
+        with self._working(False), \
+             patch.object(self.notices, "_host_supported", return_value=False), \
+             patch.object(self.notices, "hermes_version", return_value="0.22.0"), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check()
+        self.assertEqual([t for t, _ in self.sent], [self.notices.paused_text("0.22.0")])
+
+    def test_after_an_update_hermes_restarts_and_the_new_version_says_it_is_running(self):
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "updated", "tag": "v1.3.12", "message": ""}), \
+             self._working(True):
+            reply, restart_head = self.notices.run_update_command(("telegram", "1", ""))
+        self.assertEqual(restart_head, "♾️ Refine Cycle updated to 1.3.12.")
+        with patch.object(self.notices, "restart_hermes", return_value=True):
+            self.assertEqual(self.notices.finish_with_restart(restart_head),
+                             "♾️ Refine Cycle updated to 1.3.12. Restarting Hermes…")
+
+        with self._working(True), \
+             patch.object(update_check, "installed_version", return_value="1.3.12"), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check()
+            self.notices.startup_check()
+        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text("1.3.12")])
+
+    def test_the_user_is_never_asked_to_restart(self):
+        with patch.object(self.notices, "restart_hermes", return_value=False):
+            reply = self.notices.finish_with_restart("♾️ Refine Cycle fixed.")
+        self.assertEqual(reply, "♾️ Refine Cycle fixed. It loads the next time Hermes starts.")
+        self.assertNotIn("/restart", reply)
+
+    def test_inside_the_gateway_the_restart_is_the_gateways_own_after_the_reply(self):
+        calls = []
+
+        class Runner:
+            def request_restart(self, *, detached=False, via_service=False):
+                calls.append((detached, via_service))
+                return True
+
+        import asyncio
+
+        async def scenario():
+            loop = asyncio.get_running_loop()
+            with patch.object(self.notices, "_gateway_runner", return_value=Runner()), \
+                 patch.object(self.notices, "_RESTART_DELAY_SECONDS", 0.05):
+                started = await asyncio.to_thread(self.notices.restart_hermes, loop)
+                self.assertEqual(calls, [], "the restart must wait for the reply")
+                await asyncio.sleep(0.2)
+            return started
+
+        self.assertTrue(asyncio_run(scenario()))
+        self.assertEqual(len(calls), 1)
+
+    def test_fix_on_an_unsupported_hermes_says_paused(self):
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "already_latest", "message": "x"}), \
+             self._working(False), \
+             patch.object(self.notices, "_host_supported", return_value=False), \
+             patch.object(self.notices, "hermes_version", return_value="0.22.0"):
+            reply, restart_head = self.notices.run_update_command(("telegram", "1", ""))
+        self.assertEqual(reply, self.notices.paused_text("0.22.0"))
+        self.assertEqual(restart_head, "")
+
+    def test_memory_full_is_said_once_per_store_state(self):
+        self.notices.memory_full(7998, 8000)
+        self.notices.memory_full(7998, 8000)
+        self.notices.memory_full(7999, 8000)
+        self.notices.memory_full(None, 8000)
+        self.assertEqual([t for t, _ in self.sent], [
+            self.notices.memory_full_text(7998, 8000),
+            self.notices.memory_full_text(7999, 8000),
+        ])
+
+    def test_the_status_headline_names_the_state_and_the_command_to_tap(self):
+        with self._working(False):
+            self.assertEqual(plugin_init._status_headline()[1], "/refine-fix")
+            self.assertIn("not working", plugin_init._status_headline()[0])
+        with self._working(True), patch.object(self.notices, "latest_known", return_value="v1.3.13"):
+            head = plugin_init._status_headline()
+            self.assertIn("update available: 1.3.13", head[0])
+            self.assertEqual(head[1], "/refine-update")
+        with self._working(True), patch.object(self.notices, "latest_known", return_value=None), \
+             patch.object(core, "_memory_usage", return_value=(3222, 4400)):
+            head = plugin_init._status_headline()
+        self.assertEqual(len(head), 1)
+        self.assertTrue(head[0].endswith("· working · memory 3222/4400"), head[0])
+        with patch.object(plugin_init, "_capture_active_chat", return_value=("telegram", "1", "")), \
+             self._working(False):
+            self.assertEqual(plugin_init._status_headline()[1], "/refine_fix")
+
+    def test_register_offers_the_one_tap_commands_and_starts_the_checks(self):
+        captured = {}
+
+        class Context:
+            llm = object()
+            subagent_lifecycle = None
+
+            def register_command(self, name, handler, **kwargs):
+                captured[name] = handler
+
+            def register_tool(self, *args, **kwargs):
+                return None
+
+            def register_hook(self, *args, **kwargs):
+                return None
+
+        saved = (plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider)
+        with patch.object(self.notices, "start_background_checks") as started:
+            try:
+                plugin_init.register(Context())
+            finally:
+                plugin_init._REGISTERED_CONTEXT, core._subagent_lifecycle_provider = saved
+        started.assert_called_once()
+        self.assertIn("refine-update", captured)
+        self.assertIn("refine-fix", captured)
+        with patch.object(self.notices, "run_update_command", return_value=("done", "")) as run:
+            self.assertEqual(asyncio_run(captured["refine-fix"]("")), "done")
+        run.assert_called_once()
 
 
 class SubagentProposerTests(unittest.TestCase):

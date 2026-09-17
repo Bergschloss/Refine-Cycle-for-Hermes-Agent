@@ -17,6 +17,7 @@ from agent.plugin_llm import PluginLlm
 try:
     from . import config, journal, ledger, llm as _llm, notify as _notify, patterns
     from . import update_check as _update_check
+    from . import notices as _notices
     from .sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE, sanitize, scrub_text
     # Renamed from `trace` to refine_trace: the repo root is on sys.path on the
     # server, so `from . import trace` / `import trace` used to resolve to this
@@ -25,6 +26,7 @@ try:
 except ImportError:
     import config, journal, ledger, llm as _llm, notify as _notify, patterns  # noqa: F811
     import update_check as _update_check  # noqa: F811
+    import notices as _notices  # noqa: F811
     from sanitization import (  # noqa: F811
         LINE_BREAK_CHARS,
         LINE_BREAK_RE,
@@ -5014,11 +5016,8 @@ def _notify_lesson(
     """
     try:
         body = _lesson_body(used, limit)
-        # Only a release this process already knows about: the notification is
-        # sent under the mutation lock and must never wait on the network.
-        update = _update_check.update_available(fetch=False)
-        if update:
-            body += f" \u00b7 {update['latest']} available"
+        # A new release is its own message now (notices.check_update), sent once;
+        # repeating it on every lesson only trained people to skip the line.
         _notify.notify(body, active_chat)
     except Exception:
         logger.debug("refine notify: lesson message failed", exc_info=True)
@@ -6987,6 +6986,11 @@ def _apply_edit(
             if used is not None and limit is not None:
                 llm_meta["memory_used"] = used
                 llm_meta["memory_limit"] = limit
+            if memory_result_code == "memory_full":
+                # Once per store state: the backoff keeps the same lesson from
+                # coming back, and a full store is something only the user can fix.
+                _notices.remember_chat(active_chat)
+                _notices.memory_full(used, limit)
     # B4: report the pressure at every write, not only inside a failure. Same
     # llm_meta fields A2 sets on the failure path -- one shape for both --
     # computed fresh from the host AFTER this edit landed, so the number
