@@ -25073,6 +25073,45 @@ class NoticesTests(unittest.TestCase):
         run.assert_called_once()
 
 
+class DesktopHalfTests(unittest.TestCase):
+    """What desktop/plugin.js does, by running it.
+
+    The Python suite cannot execute the desktop half, and it is 235 lines the user
+    sees: a poll loop that outlived dispose and a notification that never fired
+    twice both reached a release because the only check was done by hand and thrown
+    away. tests/desktop_probe.mjs is that check kept; this runs it.
+
+    Skipped where node is not installed, like every other test here that needs
+    something the machine may not have. CI runners have it, so it runs there.
+    """
+
+    @staticmethod
+    def _node():
+        found = shutil.which("node")
+        if found:
+            return found
+        home = config.hermes_home()
+        for candidate in (home / "node" / "node.exe", home / "node" / "bin" / "node"):
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def test_the_desktop_half_behaves_when_it_is_actually_run(self):
+        node = self._node()
+        if node is None:
+            self.skipTest("node is not installed here, so the desktop half cannot be run")
+        probe = ROOT / "tests" / "desktop_probe.mjs"
+        plugin = ROOT / "desktop" / "plugin.js"
+        self.assertTrue(probe.is_file() and plugin.is_file())
+        with tempfile.TemporaryDirectory() as workspace:
+            done = subprocess.run(
+                [node, str(probe), str(plugin), workspace],
+                capture_output=True, text=True, timeout=180,
+            )
+        self.assertEqual(done.returncode, 0, (done.stdout or "") + (done.stderr or ""))
+        self.assertIn("all ok", done.stdout)
+
+
 class SubagentProposerTests(unittest.TestCase):
     """The proposer subagent: preferred path, fallbacks, read-only contract."""
 
