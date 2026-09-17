@@ -2292,9 +2292,15 @@ def _memory_offer_exclusions(
     Returns ``(covered, backed_off)``:
 
     * ``covered`` -- a memory lesson refine applied for this fingerprint is
-      still in the live store. Same standing as a fingerprint an active prompt
-      note carries. A lesson another writer removed is not coverage, so its
-      failure can be offered again.
+      still in the live store, so its failure counts as addressed. A lesson
+      another writer removed is not coverage, so that failure can be offered
+      again. This is NOT the same bound as note coverage, though it was once
+      described that way: ``_active_prompt_notes_safe`` keeps only the last
+      ``prompt_notes_max_count`` notes, so a note ages out and its fingerprint
+      becomes eligible again, while an entry covers its fingerprint for as long
+      as its exact text is in MEMORY.md and nothing here consults the ledger's
+      verdict on whether the lesson helped. A lesson that did not work therefore
+      keeps its failure out of the offered set until MEMORY.md changes.
     * ``backed_off`` -- the most recent memory attempt for this fingerprint was
       refused because the store was full, and the store has no more free room
       now than it had then. Offering it again produces the same proposal
@@ -2366,9 +2372,10 @@ def _memory_backoff_count() -> int:
     """
     try:
         used, limit = _memory_usage()
-        _covered, backed_off = _memory_offer_exclusions(
-            _live_memory_entries(), used, limit
-        )
+        # ``live=None``: the backoff is decided by the journal's refusal and the
+        # room now, so the entries themselves are not needed, and a report has no
+        # business reading the store twice.
+        _covered, backed_off = _memory_offer_exclusions(None, used, limit)
         return len(backed_off)
     except Exception as exc:
         logger.debug("Cannot count the memory backoff: %s", scrub_text(str(exc)))
@@ -2579,10 +2586,15 @@ def _persistence_snapshot(directory: Path) -> Dict[str, Any]:
 def refine_status() -> Dict[str, Any]:
     """Report why automatic refinement will or will not run.
 
-    Strictly read-only: it creates no directory, writes no journal record,
-    consumes no daily budget, and never calls a model. It also does not
-    reconcile pending approvals, so an unresolved staged edit still counts
-    toward the budget it reports.
+    Read-only in the sense that matters: it creates no refine directory, writes no
+    journal record, consumes no daily budget, and never calls a model. It also
+    does not reconcile pending approvals, so an unresolved staged edit still
+    counts toward the budget it reports.
+
+    One thing it does touch: memory usage is read through the host's own store,
+    whose ``load_from_disk`` creates the host's memory directory if it is missing
+    and runs the host's scan over the entries. Reading it any other way would mean
+    guessing the numbers, which ``_memory_usage`` exists not to do.
     """
     config_readable = config.config_available()
     auto = config.auto_enabled()

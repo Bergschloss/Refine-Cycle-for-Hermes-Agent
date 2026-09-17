@@ -309,8 +309,12 @@ gone the next day while its journal row still says `applied`. The journal is nev
 rewritten to match; instead, before every model call refine reads the live store
 and checks its own past memory edits against it:
 
-- A lesson still in the store covers its failure the way an active prompt note
-  does, and that failure is not offered to the model again.
+- A lesson still in the store covers its failure, and that failure is not offered
+  to the model again. This coverage does not age the way prompt-note coverage does:
+  only the last `prompt_notes_max_count` notes cover anything, while a memory entry
+  covers its failure for as long as its exact text is in `MEMORY.md`, whatever the
+  audit later says about whether the lesson helped. If a lesson did not work, the
+  way to let refine try something else for that failure is to remove the entry.
 - A lesson no longer in the store covers nothing. The model sees it in its history
   as `not_in_memory` rather than `applied`, and the same text may be written again
   instead of being refused as a duplicate.
