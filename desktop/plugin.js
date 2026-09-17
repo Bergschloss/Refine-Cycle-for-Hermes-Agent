@@ -52,14 +52,22 @@ function schedule(ms) {
   timer = setTimeout(refresh, ms)
 }
 
+function canRecycle() {
+  try {
+    return typeof window.hermesDesktop?.recycleBackend === 'function'
+  } catch {
+    return false
+  }
+}
+
 function recycleBackend() {
   try {
     const profile = host.state.profile?.get?.()
     const recycle = window.hermesDesktop?.recycleBackend
     if (typeof recycle === 'function') void recycle(profile)
   } catch {
-    // The reply already said Hermes is restarting; a missing bridge only means
-    // the new code loads on the next start.
+    // Said in the toast as "loads the next time Hermes starts", because
+    // canRecycle() answered for that case before the toast was written.
   }
 }
 
@@ -74,7 +82,14 @@ function announce(state) {
   const key = state.working
     ? (state.latest ? `update:${state.latest}` : '')
     : `fix:${state.version}:${state.hermes || ''}`
-  if (!key || pluginCtx.storage.get('announced', '') === key) return
+  if (!key) {
+    // Nothing to announce: up to date, or working again. Forget what was
+    // announced, or a second break at the same versions would be silent here
+    // while the chat half -- which clears its own latch on recovery -- speaks.
+    pluginCtx.storage.remove('announced')
+    return
+  }
+  if (pluginCtx.storage.get('announced', '') === key) return
   pluginCtx.storage.set('announced', key)
   const fix = !state.working
   pluginCtx.os.notify({
@@ -136,8 +151,15 @@ async function refresh() {
     if (!pluginCtx) return
     if (job && job.status === 'done' && !pluginCtx.storage.get(`shown:${job.started}`, false)) {
       pluginCtx.storage.set(`shown:${job.started}`, true)
-      host.notify({ kind: job.restart ? 'success' : 'info', message: job.reply })
-      if (job.restart) {
+      // The restart sentence is written here, not by the backend: this side is
+      // the one that knows whether it can recycle the backend at all.
+      const tail = job.restart
+        ? (canRecycle() ? ' Restarting Hermes…' : ' It loads the next time Hermes starts.')
+        : ''
+      host.notify({ kind: job.restart ? 'success' : 'info', message: `${job.reply}${tail}` })
+      // Without the bridge there is no restart to wait for, so no fast polling
+      // and no confirmation to expect either.
+      if (job.restart && canRecycle()) {
         pluginCtx.storage.set('restartingTo', state.version)
         pluginCtx.storage.set('restartingFrom', state.backend || '')
         pluginCtx.storage.set('restartingAt', Date.now())
@@ -159,11 +181,18 @@ async function refresh() {
 
 async function start() {
   haptic('tap')
+  // Same generation check as refresh(): a press whose answer lands after dispose
+  // must not publish to a torn-down context, and must not start a poll loop that
+  // nothing can stop.
+  const mine = generation
   try {
-    publish(await ask('desktop-start'))
+    const state = await ask('desktop-start')
+    if (mine !== generation) return
+    publish(state)
   } catch {
     // The next refresh shows whatever state the backend is in.
   }
+  if (mine !== generation) return
   schedule(BUSY_POLL_MS)
 }
 

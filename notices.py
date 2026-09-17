@@ -48,6 +48,9 @@ _CHECK_INTERVAL_SECONDS = 24 * 3600
 # killed mid-fetch) holds the slot for an hour, not for the whole day: otherwise
 # one dead process costs every process on the host a day of release checks.
 _CHECK_RETRY_SECONDS = 3600
+# How many attempt stamps to keep. Each names a version, so only the newest can
+# still be inside the retry window; the rest are history nobody reads.
+_ATTEMPTS_KEPT = 8
 _RESTART_DELAY_SECONDS = 3.0
 # Every Hermes process on the host writes this one file, so the write is
 # serialized by the cross-process lock prompt notes and the model override
@@ -118,7 +121,13 @@ def _mutation(timeout: float = _STATE_LOCK_TIMEOUT) -> Iterator[Optional[Dict[st
     with stack:
         state = _load()
         yield state
-        _save(state)
+        try:
+            _save(state)
+        except Exception:
+            # Swallowed by every caller, so this is the only place it can be seen,
+            # and an unwritable state file makes every message here repeat.
+            logger.warning("refine notices: cannot write %s", _STATE_FILE, exc_info=True)
+            raise
 
 
 def remember_chat(chat: Optional[Tuple[str, str, str]]) -> None:
@@ -250,21 +259,44 @@ def _check_due(state: Dict[str, Any], now: float) -> bool:
     return True
 
 
-def _notify_due(state: Dict[str, Any], tag: str, now: float) -> bool:
-    """Whether this process may try to send the notice for ``tag`` now.
+def _claim(event: str, now: float) -> bool:
+    """Claim the one attempt at a once-per-event message, or return False.
 
-    ``notify`` returns False for two different things: nothing to send to (a
-    desktop-only host has no chat on record) and a send whose 5-second wait ran
-    out on a slow platform. Only the second is worth retrying, and neither may
-    repeat a once-per-event message on every poll -- ``desktop_state`` calls this
-    module every ten minutes, and every two seconds while a restart is expected.
-    So an undelivered notice is retried on the same clock as a failed fetch.
+    Neither obvious order works on its own. Send first and latch what was
+    delivered, and the message repeats: ``notify`` returns False both when there
+    is nothing to send to (a desktop-only host has no chat on record) and when its
+    five-second wait ran out on a slow platform, and two processes starting
+    together -- gateway, CLI and cron right after a restart -- both read "not said
+    yet" and both send. Latch first and a send that really failed is lost for good.
+
+    So the attempt is what is recorded, before the send and under the lock: the
+    process that wins it sends, the others stay quiet, and a send that failed is
+    retried on the same clock a failed release check uses. The delivery latch
+    (``broken``, ``update_notified``, ``memory_full``) still decides whether the
+    event is finished; this only decides who may try, and how often.
+
+    False also when the state file could not be written -- unrecorded attempts
+    would be exactly the repetition this prevents.
     """
-    attempt = state.get("update_notify_attempt")
-    if not (isinstance(attempt, list) and len(attempt) == 2 and attempt[0] == tag):
-        return True
-    when = attempt[1]
-    return not (isinstance(when, (int, float)) and now - when < _CHECK_RETRY_SECONDS)
+    try:
+        with _mutation() as state:
+            if state is None:
+                return False
+            attempts = state.get("attempts")
+            attempts = dict(attempts) if isinstance(attempts, dict) else {}
+            when = attempts.get(event)
+            if isinstance(when, (int, float)) and now - when < _CHECK_RETRY_SECONDS:
+                return False
+            attempts[event] = now
+            # Bounded: an event name carries a version, so upgrades leave old keys
+            # behind. The newest few are all that can still be inside a window.
+            state["attempts"] = dict(
+                sorted(attempts.items(), key=lambda item: item[1])[-_ATTEMPTS_KEPT:]
+            )
+            return True
+    except Exception:
+        logger.debug("refine notices: cannot claim %s", event, exc_info=True)
+        return False
 
 
 def check_update(now: Optional[float] = None) -> None:
@@ -305,15 +337,8 @@ def check_update(now: Optional[float] = None) -> None:
                                 fresh["latest_tag"] = release["tag"]
             state = _load()
         latest = latest_known(state)
-        if latest and state.get("update_notified") != latest and _notify_due(state, latest, now):
-            claimed = False
-            with _mutation() as fresh:
-                # The attempt is claimed before the send, exactly like the fetch:
-                # a send that reports failure is retried, but not on every poll.
-                if fresh is not None and _notify_due(fresh, latest, now):
-                    fresh["update_notify_attempt"] = [latest, now]
-                    claimed = True
-            if claimed and _send(state, update_available_text(latest)):
+        if latest and state.get("update_notified") != latest and _claim(f"update:{latest}", now):
+            if _send(state, update_available_text(latest)):
                 with _mutation() as fresh:
                     if fresh is not None:
                         fresh["update_notified"] = latest
@@ -321,13 +346,16 @@ def check_update(now: Optional[float] = None) -> None:
         logger.debug("refine notices: update check failed", exc_info=True)
 
 
-def startup_check() -> None:
+def startup_check(now: Optional[float] = None) -> None:
     """At process start: say whether the plugin works, once per change.
 
-    Every message is latched only after it was delivered. A process that starts
-    without any way to reach the user (a CLI with no chat on record) must not
-    consume the confirmation the gateway would have sent.
+    Every message is claimed before it is sent and latched only after it was
+    delivered. Two processes start together often -- gateway, CLI and cron right
+    after ``hermes gateway restart`` -- and a process with no way to reach the
+    user must neither repeat the message nor consume the confirmation the gateway
+    would have sent.
     """
+    now = time.time() if now is None else now
     try:
         state = _load()
         pending = state.get("pending")
@@ -339,28 +367,36 @@ def startup_check() -> None:
                 text = working_again_text()
             else:
                 text = ""
-            if text and _send(state, text):
+            if text and _claim(f"working:{version}", now) and _send(state, text):
                 with _mutation() as fresh:
                     if fresh is not None:
                         fresh.pop("broken", None)
                         fresh.pop("pending", None)
         else:
-            supported = _host_supported()
-            kind = "paused" if supported is False else "stopped"
-            key = [kind, hermes_version()]
-            text = "" if state.get("broken") == key else (
-                paused_text(hermes_version()) if kind == "paused" else stopped_text()
-            )
-            delivered = bool(text) and _send(state, text)
-            if delivered or isinstance(pending, dict):
+            # Claimed before ``_host_supported``, not after: that call runs the
+            # installer as a subprocess with a 60-second timeout, and on a broken
+            # host every ``hermes`` invocation used to pay for it even when the
+            # message had been delivered days earlier. Keyed on the Hermes version
+            # alone -- deciding paused vs stopped is what the subprocess is for.
+            host_version = hermes_version()
+            if _claim(f"broken:{host_version}", now):
+                supported = _host_supported()
+                kind = "paused" if supported is False else "stopped"
+                key = [kind, host_version]
+                text = "" if state.get("broken") == key else (
+                    paused_text(host_version) if kind == "paused" else stopped_text()
+                )
+                if text and _send(state, text):
+                    with _mutation() as fresh:
+                        if fresh is not None:
+                            fresh["broken"] = key
+            if isinstance(pending, dict):
                 with _mutation() as fresh:
                     if fresh is not None:
                         # A confirmation still pending on a plugin that does not
                         # work is stale: the update landed and did not fix it.
                         fresh.pop("pending", None)
-                        if delivered:
-                            fresh["broken"] = key
-        check_update()
+        check_update(now)
     except Exception:
         logger.debug("refine notices: startup check failed", exc_info=True)
 
@@ -369,14 +405,17 @@ def start_background_checks() -> None:
     threading.Thread(target=startup_check, name="refine-notices", daemon=True).start()
 
 
-def memory_full(used: Optional[int], limit: Optional[int]) -> None:
+def memory_full(used: Optional[int], limit: Optional[int], now: Optional[float] = None) -> None:
     """Once per store state: a lesson could not be saved because memory is full."""
     if used is None or limit is None:
         return
+    now = time.time() if now is None else now
     try:
         state = _load()
         key = [int(used), int(limit)]
         if state.get("memory_full") == key:
+            return
+        if not _claim(f"memory_full:{used}/{limit}", now):
             return
         if _send(state, memory_full_text(int(used), int(limit))):
             with _mutation() as fresh:
@@ -593,9 +632,13 @@ def start_desktop_job() -> Dict[str, Any]:
                     reply, restart_head = run_update_command(None)
                     if restart_head:
                         # A Telegram gateway on this host restarts too; the desktop
-                        # backend is restarted by the button once it sees this.
+                        # backend is restarted by the button once it sees this. The
+                        # sentence about restarting is left to the button as well:
+                        # it is the only side that knows whether it can recycle the
+                        # backend, and this side must not claim a restart that only
+                        # the other side can perform.
                         restart_hermes(None)
-                        reply = f"{restart_head} Restarting Hermes\u2026"
+                        reply = restart_head
                     result = {"status": "done", "reply": reply, "restart": bool(restart_head)}
                 except Exception as exc:
                     logger.exception("refine desktop update failed")

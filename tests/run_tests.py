@@ -24784,6 +24784,51 @@ class NoticesTests(unittest.TestCase):
             self.notices.check_update(now=1000.0 + 25 * 3600)
         self.assertEqual(fetch.call_count, 1, "and the day after, it asks again")
 
+    def test_two_processes_starting_together_say_it_once(self):
+        """gateway, CLI and cron all start within a second of a restart.
+
+        Each of them reads a state file that says nothing has been said yet, so
+        sending first and latching afterwards told the user twice. The attempt is
+        claimed under the cross-process lock instead.
+        """
+        started = threading.Barrier(2)
+
+        def start_one():
+            started.wait(5)
+            with self._working(False), \
+                 patch.object(self.notices, "_host_supported", return_value=True), \
+                 patch.object(self.notices, "hermes_version", return_value="0.21.4"), \
+                 patch.object(self.notices, "check_update"):
+                self.notices.startup_check(now=1000.0)
+
+        threads = [threading.Thread(target=start_one, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual([t for t, _ in self.sent], [self.notices.stopped_text()])
+        self.assertEqual(self.notices._load().get("broken"), ["stopped", "0.21.4"])
+
+    def test_a_notice_whose_latch_could_not_be_written_is_not_said_again_at_once(self):
+        """The latch write can lose the lock race; the claim is what prevents the
+        repeat, so the message waits for the retry window instead of the next start."""
+        with patch.object(self.notices, "_save", side_effect=OSError("disk full")), \
+             self._working(False), \
+             patch.object(self.notices, "_host_supported", return_value=True), \
+             patch.object(self.notices, "hermes_version", return_value="0.21.4"), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check(now=1000.0)
+        # The claim could not be written either, so nothing was sent at all: an
+        # unrecorded attempt is exactly the repetition this prevents.
+        self.assertEqual(self.sent, [])
+        with self._working(False), \
+             patch.object(self.notices, "_host_supported", return_value=True), \
+             patch.object(self.notices, "hermes_version", return_value="0.21.4"), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check(now=1000.0 + 60)
+            self.notices.startup_check(now=1000.0 + 120)
+        self.assertEqual([t for t, _ in self.sent], [self.notices.stopped_text()])
+
     def test_an_undelivered_release_notice_is_retried_but_not_on_every_poll(self):
         """`notify` returns False both for "nothing to send to" and for a send that
         outran its five-second wait. Neither may repeat a once-per-event message on
@@ -24841,11 +24886,15 @@ class NoticesTests(unittest.TestCase):
         with patch.object(self.notices._notify, "notify", return_value=False), \
              self._working(True), patch.object(self.notices, "check_update"), \
              patch.object(update_check, "installed_version", return_value="1.3.12"):
-            self.notices.startup_check()
+            self.notices.startup_check(now=1000.0)
         self.assertEqual(self.sent, [], "nothing was delivered")
         with self._working(True), patch.object(self.notices, "check_update"), \
              patch.object(update_check, "installed_version", return_value="1.3.12"):
-            self.notices.startup_check()
+            # Right away it stays quiet: an attempt was claimed, and repeating a
+            # once-per-event message on every process start is the other failure.
+            self.notices.startup_check(now=1000.0 + 60)
+            self.assertEqual(self.sent, [])
+            self.notices.startup_check(now=1000.0 + 3700)
         self.assertEqual([t for t, _ in self.sent], [self.notices.running_text("1.3.12")])
 
     def test_the_installer_output_is_scrubbed_before_it_reaches_the_desktop(self):
@@ -24967,9 +25016,11 @@ class NoticesTests(unittest.TestCase):
                 if state["job"]["status"] == "done":
                     break
                 time.sleep(0.02)
+        # No "Restarting Hermes…" here on purpose: only the button knows whether it
+        # can recycle the backend, so it writes that sentence (desktop/plugin.js).
         self.assertEqual(state["job"], {
             "status": "done", "started": state["job"]["started"], "restart": True,
-            "reply": "♾️ Refine Cycle updated to 1.3.12. Restarting Hermes…",
+            "reply": "♾️ Refine Cycle updated to 1.3.12.",
         })
         restart.assert_called_once_with(None)
         self.assertTrue(state["working"])

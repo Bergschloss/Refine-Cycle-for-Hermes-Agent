@@ -427,6 +427,9 @@ _MIGRATION_FILES = [
     "skill_stats.json",
     _PROMPT_NOTES_FILE_NAME,
     _MODEL_OVERRIDE_FILE_NAME,
+    # notices.json: what the user has already been told. Left behind by a
+    # migration, every once-per-event message is said one more time.
+    "notices.json",
 ]
 _MIGRATION_DIRS = [_BACKUPS_DIR_NAME]
 
