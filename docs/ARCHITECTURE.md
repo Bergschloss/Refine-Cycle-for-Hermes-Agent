@@ -70,6 +70,7 @@ Recurrence is decided by the plugin, not the model. `patterns.py` normalizes req
 | `sanitization.py` | 332 | Credential redaction, line-structure hygiene |
 | `notify.py` | 272 | User notifications through the CLI entry point |
 | `notices.py` | 367 | What the user is told and when: releases, a broken or paused plugin, a full memory store; one-tap update and fix, restart |
+| `desktop/plugin.js` | 184 | The desktop app's status-bar item and notification with Update / Fix; all decisions stay in `notices.py` |
 | `refine_trace.py` | 186 | Sanitized invocation trace |
 
 ## What it may write
@@ -99,7 +100,7 @@ Everything under the Hermes home, nothing in the plugin install directory (migra
 python tests/run_tests.py
 ```
 
-1,284 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
+1,286 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
 
 `PathTraceTests` runs every way a pass starts (the `refine_run` tool, `post_llm_call`, `on_session_end`, a deferred session end drained later, the slash command) through the real entry points, against a host double that enforces Hermes's ContextVar rules for the model route and the subagent parent. It asserts the whole trace as one table: trigger, outcome, which proposer ran, why it fell back, which parent the launch saw, and how many structured calls were made.
 

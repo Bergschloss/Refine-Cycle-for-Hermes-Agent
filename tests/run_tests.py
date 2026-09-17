@@ -24708,6 +24708,41 @@ class NoticesTests(unittest.TestCase):
              self._working(False):
             self.assertEqual(plugin_init._status_headline()[1], "/refine_fix")
 
+    def test_the_desktop_button_starts_the_work_in_the_background_and_reports_it(self):
+        """Hermes desktop stops waiting for a plugin command after 30 seconds, so the
+        button starts the update and polls; a restart is left to the button."""
+        release = threading.Event()
+
+        def slow_update(chat=None):
+            release.wait(5)
+            return "♾️ Refine Cycle updated to 1.3.12.", "♾️ Refine Cycle updated to 1.3.12."
+
+        self.notices._job.clear()
+        with patch.object(self.notices, "run_update_command", side_effect=slow_update),              patch.object(self.notices, "restart_hermes", return_value=False) as restart,              patch.object(self.notices, "check_update"), self._working(True):
+            first = asyncio_run(plugin_init._update_command_entry("desktop-start"))
+            again = asyncio_run(plugin_init._update_command_entry("desktop-start"))
+            self.assertEqual(json.loads(first)["job"]["status"], "running")
+            self.assertEqual(json.loads(again)["job"]["started"], json.loads(first)["job"]["started"])
+            release.set()
+            deadline = time.monotonic() + 5
+            state = {}
+            while time.monotonic() < deadline:
+                state = json.loads(asyncio_run(plugin_init._update_command_entry("desktop-state")))
+                if state["job"]["status"] == "done":
+                    break
+                time.sleep(0.02)
+        self.assertEqual(state["job"], {
+            "status": "done", "started": state["job"]["started"], "restart": True,
+            "reply": "♾️ Refine Cycle updated to 1.3.12. Restarting Hermes…",
+        })
+        restart.assert_called_once_with(None)
+        self.assertTrue(state["working"])
+        self.notices._job.clear()
+
+    def test_an_install_ships_the_desktop_half(self):
+        import install
+        self.assertIn("desktop/plugin.js", install.plugin_files())
+
     def test_register_offers_the_one_tap_commands_and_starts_the_checks(self):
         captured = {}
 

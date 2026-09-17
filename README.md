@@ -98,7 +98,7 @@ hermes gateway restart
 
 **4. Check it.** Send `/refine status` in chat. If your Hermes already has its own `/refine`, the plugin answers to `/refine-cycle status`.
 
-When a new version is out, or a Hermes update stops the plugin, Refine Cycle tells you in chat. Tap `/refine_update` or `/refine_fix` and it updates or repairs itself and restarts Hermes. Version support, troubleshooting and everything the installer changes: [docs/INSTALL.md](docs/INSTALL.md).
+When a new version is out, or a Hermes update stops the plugin, Refine Cycle tells you in chat. Tap `/refine_update` or `/refine_fix` and it updates or repairs itself and restarts Hermes. In the Hermes desktop app the same **Update** and **Fix** buttons sit in the status bar (turn the plugin's desktop half on once under Plugins). Version support, troubleshooting and everything the installer changes: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Documentation
 

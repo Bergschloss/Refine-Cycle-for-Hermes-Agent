@@ -1189,8 +1189,16 @@ def _status_headline() -> list:
 
 
 async def _update_command_entry(raw_args: str = "") -> str:
-    """``/refine_update`` and ``/refine_fix``: one tap, no arguments."""
-    del raw_args
+    """``/refine_update`` and ``/refine_fix``: one tap, no arguments.
+
+    The desktop half (desktop/plugin.js) calls the same command with ``desktop-state``
+    or ``desktop-start`` and gets JSON back; see ``notices.start_desktop_job``.
+    """
+    arg = (raw_args or "").strip()
+    if arg == "desktop-state":
+        return json.dumps(await asyncio.to_thread(notices.desktop_state))
+    if arg == "desktop-start":
+        return json.dumps(await asyncio.to_thread(notices.start_desktop_job))
     return await _update_command()
 
 

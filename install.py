@@ -290,6 +290,9 @@ def plugin_files() -> list[str]:
         if _is_shipped(p) and p.name not in NOT_INSTALLED
     ]
     rels += [n for n in PLUGIN_MANIFEST_EXTRAS if (PLUGIN_DIR / n).is_file()]
+    # The desktop half: Hermes desktop loads <plugin>/desktop/plugin.js from the
+    # installed plugin, so it must travel with the install to show [Update] / [Fix].
+    rels += [f"desktop/{p.name}" for p in sorted((PLUGIN_DIR / "desktop").glob("*.js"))]
     # The route patches travel with install.py, because install.py travels with
     # the plugin. The SUCCESS banner tells the operator to run
     # `python install.py --rollback` from the installed tree, and a re-install or

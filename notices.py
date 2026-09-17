@@ -365,3 +365,60 @@ def finish_with_restart(head: str, loop: Any = None) -> str:
     if restart_hermes(loop):
         return f"{head} Restarting Hermes…"
     return f"{head} It loads the next time Hermes starts."
+
+
+# -- The desktop half --------------------------------------------------------------
+#
+# The Hermes desktop app runs this plugin in its own backend, not in the gateway,
+# and gives a plugin command 30 seconds before it gives up on the answer. A
+# download and an install take longer, so its [Update] / [Fix] button starts the
+# work here and polls ``desktop_state`` until it is done; the button then restarts
+# the desktop backend itself (desktop/plugin.js). Same outcome and wording as the
+# one-tap chat command.
+
+_job: Dict[str, Any] = {}
+_job_lock = threading.Lock()
+
+
+def desktop_state() -> Dict[str, Any]:
+    """What the desktop status bar shows. May look for a release, once a day."""
+    check_update()
+    with _job_lock:
+        job = dict(_job) or None
+    latest = latest_known()
+    return {
+        "brand": BRAND,
+        "version": plain_version(update_check.installed_version()),
+        "working": plugin_working(),
+        "latest": plain_version(latest) if latest else None,
+        "job": job,
+    }
+
+
+def start_desktop_job() -> Dict[str, Any]:
+    """Start one update-or-fix in the background; a second press while it runs does nothing."""
+    with _job_lock:
+        if _job.get("status") == "running":
+            pass
+        else:
+            _job.clear()
+            _job.update(status="running", started=time.time())
+
+            def work() -> None:
+                try:
+                    reply, restart_head = run_update_command(None)
+                    if restart_head:
+                        # A Telegram gateway on this host restarts too; the desktop
+                        # backend is restarted by the button once it sees this.
+                        restart_hermes(None)
+                        reply = f"{restart_head} Restarting Hermes\u2026"
+                    result = {"status": "done", "reply": reply, "restart": bool(restart_head)}
+                except Exception as exc:
+                    logger.exception("refine desktop update failed")
+                    result = {"status": "done", "restart": False,
+                              "reply": f"{BRAND} update failed. {type(exc).__name__}"}
+                with _job_lock:
+                    _job.update(result)
+
+            threading.Thread(target=work, name="refine-desktop-update", daemon=True).start()
+    return desktop_state()
