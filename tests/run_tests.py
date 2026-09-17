@@ -25117,7 +25117,7 @@ class NoticesTests(unittest.TestCase):
 class DesktopHalfTests(unittest.TestCase):
     """What desktop/plugin.js does, by running it.
 
-    The Python suite cannot execute the desktop half, and it is 235 lines the user
+    The Python suite cannot execute the desktop half, and it is 283 lines the user
     sees: a poll loop that outlived dispose and a notification that never fired
     twice both reached a release because the only check was done by hand and thrown
     away. tests/desktop_probe.mjs is that check kept; this runs it.

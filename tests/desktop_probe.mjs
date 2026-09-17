@@ -1,7 +1,7 @@
 /**
  * What desktop/plugin.js does, driven for real.
  *
- * The Python suite cannot execute the desktop half, and it is 235 lines of
+ * The Python suite cannot execute the desktop half, and it is 283 lines of
  * user-facing logic: two of its defects (a poll loop that outlived dispose, a
  * notification that never fired twice) reached a release because it was only ever
  * checked by hand. This is that check, kept.

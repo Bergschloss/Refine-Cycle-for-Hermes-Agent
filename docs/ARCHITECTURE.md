@@ -6,7 +6,7 @@ For someone deciding whether to adopt this, or who has to keep it alive. Not a u
 
 A Hermes plugin that reads the agent's own trajectory, finds failures that recur across sessions, and writes one small skill, memory or prompt edit so the agent stops repeating them. Every edit is journaled and reversible.
 
-22,252 lines of Python, standard library plus Hermes. One tool (`refine_run`), three slash commands (`/refine` and the one-tap `/refine-update`, `/refine-fix`), seven hooks.
+22,313 lines of Python, standard library plus Hermes. One tool (`refine_run`), three slash commands (`/refine` and the one-tap `/refine-update`, `/refine-fix`), seven hooks.
 
 ## What it touches in your host
 
@@ -58,10 +58,10 @@ Recurrence is decided by the plugin, not the model. `patterns.py` normalizes req
 
 | File | Lines | Does |
 |---|---|---|
-| `core.py` | 7,884 | Orchestration: evidence, guardrails, durable apply, rollback |
+| `core.py` | 7,911 | Orchestration: evidence, guardrails, durable apply, rollback |
 | `journal.py` | 3,153 | Append-only journal, mutation lock, approvals, rollback |
 | `llm.py` | 2,603 | Proposal calls, structured output, salvage, route classification |
-| `__init__.py` | 1,961 | Registration, hooks, slash command, prompt-note rule enforcement |
+| `__init__.py` | 1,971 | Registration, hooks, slash command, prompt-note rule enforcement |
 | `install.py` | 1,835 | Host classification, patch apply/verify, plugin install |
 | `ledger.py` | 1,086 | Whether an applied edit actually helped, measured later |
 | `patterns.py` | 919 | Error fingerprinting and aggregation |
@@ -69,8 +69,8 @@ Recurrence is decided by the plugin, not the model. `patterns.py` normalizes req
 | `lesson_effect_checker.py` | 555 | Frozen grader for the experiment programme |
 | `sanitization.py` | 332 | Credential redaction, line-structure hygiene |
 | `notify.py` | 272 | User notifications through the CLI entry point |
-| `notices.py` | 651 | What the user is told and when: releases, a broken or paused plugin, a full memory store; one-tap update and fix, restart |
-| `desktop/plugin.js` | 264 | The desktop app's status-bar item and notification with Update / Fix; all decisions stay in `notices.py` |
+| `notices.py` | 675 | What the user is told and when: releases, a broken or paused plugin, a full memory store; one-tap update and fix, restart |
+| `desktop/plugin.js` | 283 | The desktop app's status-bar item and notification with Update / Fix; all decisions stay in `notices.py` |
 | `refine_trace.py` | 187 | Sanitized invocation trace |
 
 ## What it may write
@@ -100,7 +100,7 @@ Everything under the Hermes home, nothing in the plugin install directory (migra
 python tests/run_tests.py
 ```
 
-1,301 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
+1,302 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
 
 `DesktopHalfTests` is the one test that leaves Python: it runs `tests/desktop_probe.mjs` under node against `desktop/plugin.js` with the SDK, react and the clock stubbed, and asserts what the status-bar item and its notifications actually do (a finished job reported once, an honest restart sentence, a confirmation only from a new backend, dispose stopping the poll loop, a repeat break announced again). It skips where node is not installed. Directly: `node tests/desktop_probe.mjs desktop/plugin.js <empty dir>`.
 
