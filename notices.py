@@ -250,6 +250,23 @@ def _check_due(state: Dict[str, Any], now: float) -> bool:
     return True
 
 
+def _notify_due(state: Dict[str, Any], tag: str, now: float) -> bool:
+    """Whether this process may try to send the notice for ``tag`` now.
+
+    ``notify`` returns False for two different things: nothing to send to (a
+    desktop-only host has no chat on record) and a send whose 5-second wait ran
+    out on a slow platform. Only the second is worth retrying, and neither may
+    repeat a once-per-event message on every poll -- ``desktop_state`` calls this
+    module every ten minutes, and every two seconds while a restart is expected.
+    So an undelivered notice is retried on the same clock as a failed fetch.
+    """
+    attempt = state.get("update_notify_attempt")
+    if not (isinstance(attempt, list) and len(attempt) == 2 and attempt[0] == tag):
+        return True
+    when = attempt[1]
+    return not (isinstance(when, (int, float)) and now - when < _CHECK_RETRY_SECONDS)
+
+
 def check_update(now: Optional[float] = None) -> None:
     """Once a day across every process: look for a release, and say so once per release."""
     if not config.update_check_enabled():
@@ -288,8 +305,15 @@ def check_update(now: Optional[float] = None) -> None:
                                 fresh["latest_tag"] = release["tag"]
             state = _load()
         latest = latest_known(state)
-        if latest and state.get("update_notified") != latest:
-            if _send(state, update_available_text(latest)):
+        if latest and state.get("update_notified") != latest and _notify_due(state, latest, now):
+            claimed = False
+            with _mutation() as fresh:
+                # The attempt is claimed before the send, exactly like the fetch:
+                # a send that reports failure is retried, but not on every poll.
+                if fresh is not None and _notify_due(fresh, latest, now):
+                    fresh["update_notify_attempt"] = [latest, now]
+                    claimed = True
+            if claimed and _send(state, update_available_text(latest)):
                 with _mutation() as fresh:
                     if fresh is not None:
                         fresh["update_notified"] = latest
@@ -491,6 +515,13 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
                            exc_info=True)
         head = (f"{BRAND} updated to {plain_version(new_version)}." if outcome == "updated"
                 else f"{BRAND} fixed.")
+        # What the installer said about the host route patch belongs in the head:
+        # the caller rebuilds the reply from the head when it restarts, so a
+        # release that installed while the patch could not be restored said
+        # nothing about it and only turned up later as "stopped working".
+        host_note = scrub_text(str(result.get("host_note") or "")).strip()
+        if host_note:
+            head = f"{head} {host_note}"
         return head, head
     if outcome == "already_latest":
         if was_working:

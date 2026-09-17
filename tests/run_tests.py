@@ -24784,6 +24784,44 @@ class NoticesTests(unittest.TestCase):
             self.notices.check_update(now=1000.0 + 25 * 3600)
         self.assertEqual(fetch.call_count, 1, "and the day after, it asks again")
 
+    def test_an_undelivered_release_notice_is_retried_but_not_on_every_poll(self):
+        """`notify` returns False both for "nothing to send to" and for a send that
+        outran its five-second wait. Neither may repeat a once-per-event message on
+        every desktop poll -- ten minutes apart, two seconds during a restart."""
+        undeliverable = patch.object(self.notices._notify, "notify", return_value=False)
+        with patch.object(update_check, "installed_version", return_value="1.3.11"), \
+             patch.object(update_check, "_fetch_latest_release",
+                          return_value={"tag": "v1.3.12", "url": ""}):
+            with undeliverable as failed:
+                for poll in range(6):
+                    self.notices.check_update(now=1000.0 + poll * 600)
+            self.assertEqual(failed.call_count, 1, "one attempt per retry window, not per poll")
+            # An hour later it tries again, and this time it is delivered.
+            self.notices.check_update(now=1000.0 + 3700)
+            self.assertEqual([t for t, _ in self.sent],
+                             [self.notices.update_available_text("v1.3.12")])
+            # Delivered means latched: no further attempt for this release.
+            self.notices.check_update(now=1000.0 + 8000)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_release_that_installed_without_its_route_patch_says_so(self):
+        """The reply the user reads is rebuilt from the head, so a host note buried
+        in the message reached nobody: the update looked clean and the plugin then
+        came back as "stopped working"."""
+        note = " The host route patch is missing (unpatched) and the installer did not restore it."
+        with patch.object(update_check, "run_update",
+                          return_value={"outcome": "updated", "tag": "v1.3.13",
+                                        "host_note": note, "message": "long message"}), \
+             self._working(True):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(reply, restart_head)
+        self.assertIn("updated to 1.3.13", reply)
+        self.assertIn("route patch is missing", reply)
+        self.assertNotIn("/restart", reply)
+        with patch.object(self.notices, "restart_hermes", return_value=True):
+            self.assertTrue(
+                self.notices.finish_with_restart(restart_head).endswith("Restarting Hermes…"))
+
     def test_an_update_that_landed_is_never_reported_as_a_failure(self):
         """The files are already replaced; a state file that would not write only
         costs the confirmation after the restart."""

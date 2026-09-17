@@ -394,6 +394,11 @@ def run_update(*, runner: Callable[..., Any] = subprocess.run) -> Dict[str, str]
         return {
             "outcome": "updated",
             "tag": tag,
+            # The host note separately, not only inside the sentence: the release
+            # can install while the route patch cannot be put back, and the reply
+            # the user reads is built from the head alone. Buried in `message` it
+            # reached nobody -- the only later sign was "stopped working".
+            "host_note": note,
             "message": (
                 f"Updated Refine Cycle {installed} to {tag}." + note
                 + " Restart Hermes to load it (in chat: /restart)."
