@@ -280,6 +280,32 @@ something else that is byte-identical to refine's own. The host refuses exact
 duplicates, so this requires another writer reproducing refine's scrubbed text
 verbatim.
 
+### When other writers rewrite MEMORY.md, and when it is full
+
+Refine is not the only writer of `MEMORY.md`. The host consolidates it, and some
+memory stacks rebuild it on their own schedule, so an entry refine applied can be
+gone the next day while its journal row still says `applied`. The journal is never
+rewritten to match; instead, before every model call refine reads the live store
+and checks its own past memory edits against it:
+
+- A lesson still in the store covers its failure the way an active prompt note
+  does, and that failure is not offered to the model again.
+- A lesson no longer in the store covers nothing. The model sees it in its history
+  as `not_in_memory` rather than `applied`, and the same text may be written again
+  instead of being refused as a duplicate.
+- The prompt states how many characters a new memory entry can hold, and says so
+  plainly when the store is full.
+- When a memory lesson was refused because the store was full, its failure is not
+  offered again while the store has no more room than it had at that refusal.
+  Removing an entry or raising `memory_char_limit` makes it eligible again.
+
+A pass that drops failures for these reasons journals the counts as
+`memory_live_covered` and `memory_full_backoff`, and when nothing is left to offer
+it ends as `no_applicable_pattern` without calling the model.
+
+Membership is by exact text, the same limit rollback has: an entry another writer
+reworded counts as gone.
+
 ### Multi-edit transactions
 
 Some lessons are not one edit. A new skill and the memory entry that says when to

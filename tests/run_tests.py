@@ -16282,6 +16282,98 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "no_applicable_pattern",
         )
 
+    _FULL_REFUSAL = (
+        "Memory at 7,998/8,000 chars. Adding this entry (90 chars) would exceed "
+        "the limit. Consolidate now: use 'replace' to merge overlapping entries."
+    )
+
+    def test_a_lesson_refused_by_a_full_store_is_not_proposed_again_until_room_appears(self):
+        """Reported from a live host: MEMORY.md at 7,998/8,000, and the same two
+        lessons re-proposed 6-7 times a day, every proposal refused at apply.
+        After one refusal the fingerprint is not offered while the store has no
+        more room than it had then; it is offered again once room appears."""
+        fp = "abababababab"
+        repeated = [{"fingerprint": fp, "count": 5, "sessions_seen": 2,
+                     "tool": "http", "sample": "request failed"}]
+        lesson = memory_edit("When the endpoint 429s, wait for Retry-After.", name="m")
+        lesson["pattern_fingerprint"] = fp
+        FakeHost.memory_entries = ["an entry that fills the store"]
+        with patch.object(core, "_memory_usage", return_value=(7998, 8000)), \
+             patch.object(core, "_apply_memory",
+                          return_value={"success": False, "error": self._FULL_REFUSAL}):
+            first, first_model = self._run_with_patterns(lesson, repeated)
+            self.assertEqual(len(first_model.calls), 1)
+            self.assertEqual(first["llm_meta"]["result_code"], "memory_full")
+            self.assertIn("the store is full", first_model.calls[0]["input"][0].text)
+
+            second, second_model = self._run_with_patterns(lesson, repeated)
+        self.assertEqual(len(second_model.calls), 0, "the refused lesson was proposed again")
+        entry = journal.get_entry(second["journal_id"])
+        self.assertEqual(entry["outcome"], "no_applicable_pattern")
+        self.assertEqual(entry["llm_meta"]["memory_full_backoff"], 1)
+
+        with patch.object(core, "_memory_usage", return_value=(7000, 8000)):
+            _third, third_model = self._run_with_patterns(lesson, repeated)
+        self.assertEqual(len(third_model.calls), 1, "room appeared, the lesson is eligible again")
+
+    def test_a_raised_limit_also_ends_the_backoff(self):
+        fp = "acacacacacac"
+        repeated = [{"fingerprint": fp, "count": 5, "sessions_seen": 2,
+                     "tool": "http", "sample": "request failed"}]
+        lesson = memory_edit("When the endpoint 429s, wait.", name="m")
+        lesson["pattern_fingerprint"] = fp
+        with patch.object(core, "_memory_usage", return_value=(7998, 8000)), \
+             patch.object(core, "_apply_memory",
+                          return_value={"success": False, "error": self._FULL_REFUSAL}):
+            self._run_with_patterns(lesson, repeated)
+        with patch.object(core, "_memory_usage", return_value=(7998, 10000)):
+            _result, model = self._run_with_patterns(lesson, repeated)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_a_memory_lesson_still_in_the_store_covers_its_failure(self):
+        """Same standing as a prompt note carrying the fingerprint: a lesson that
+        is still in MEMORY.md is not offered again. One another writer removed
+        is not coverage, and its failure is offered again."""
+        fp = "adadadadadad"
+        repeated = [{"fingerprint": fp, "count": 5, "sessions_seen": 2,
+                     "tool": "http", "sample": "request failed"}]
+        lesson = memory_edit("When the endpoint 429s, honour Retry-After.", name="m")
+        lesson["pattern_fingerprint"] = fp
+        first, _ = self._run_with_patterns(lesson, repeated)
+        self.assertEqual(first["outcome"], "applied")
+        self.assertIn(lesson["content"], FakeHost.memory_entries)
+
+        covered, covered_model = self._run_with_patterns(lesson, repeated)
+        self.assertEqual(len(covered_model.calls), 0)
+        self.assertEqual(
+            journal.get_entry(covered["journal_id"])["llm_meta"]["memory_live_covered"], 1
+        )
+
+        FakeHost.memory_entries[:] = [e for e in FakeHost.memory_entries if e != lesson["content"]]
+        _again, again_model = self._run_with_patterns({"action": "no_op", "reason": "x"}, repeated)
+        self.assertEqual(len(again_model.calls), 1, "a removed lesson is not coverage")
+
+    def test_the_proposer_sees_a_removed_memory_lesson_as_not_in_memory(self):
+        """An applied row for an entry another writer removed made the proposer
+        answer "already covered" for a lesson the agent could no longer see."""
+        records = [
+            {"outcome": "applied", "proposal": {"action": "create", "kind": "memory", "content": "kept"}},
+            {"outcome": "applied", "proposal": {"action": "create", "kind": "memory", "content": "gone"}},
+            {"outcome": "applied", "proposal": {"action": "create", "kind": "skill", "name": "s", "content": "x"}},
+        ]
+        marked = core._history_against_live_memory(records, ["kept"])
+        self.assertEqual([r["outcome"] for r in marked], ["applied", "not_in_memory", "applied"])
+        self.assertEqual(records[1]["outcome"], "applied", "the journal rows are not changed")
+        self.assertIs(core._history_against_live_memory(records, None), records)
+
+    def test_capacity_line_states_the_room_a_new_entry_has(self):
+        delimiter = len(core._memory_entry_delimiter())
+        self.assertEqual(core._memory_capacity_line(None, 8000, 3), "")
+        roomy = core._memory_capacity_line(7000, 8000, 3)
+        self.assertIn(f"at most {1000 - delimiter} chars", roomy)
+        self.assertNotIn("full", roomy)
+        self.assertIn("the store is full", core._memory_capacity_line(7998, 8000, 3))
+
     # ── Dry-run (Part E) ──────────────────────────────────────────────────────
 
     def test_dry_run_reports_that_an_apply_would_be_rejected(self):
@@ -20019,8 +20111,24 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             "id": "e1", "ts": time.time() - 100,
             "outcome": "applied", "proposal": created,
         }]
+        FakeHost.memory_entries = ["same future-context lesson"]
         with patch.object(journal, "_load_entries", return_value=entries):
             self.assertTrue(journal.was_applied_recently(patched, 7))
+
+    def test_dedup_does_not_block_a_memory_lesson_another_writer_removed(self):
+        """MEMORY.md has other writers (host consolidation, a user's memory stack).
+        An applied entry that is no longer in the store is not in the agent's
+        context; refusing the same lesson as a duplicate pushed the proposer into
+        a near-duplicate. An unreadable store still refuses (fail closed)."""
+        lesson = {"action": "create", "kind": "memory", "name": "m", "content": "lost lesson"}
+        entries = [{"id": "e1", "ts": time.time() - 100, "outcome": "applied", "proposal": lesson}]
+        with patch.object(journal, "_load_entries", return_value=entries):
+            FakeHost.memory_entries = ["lost lesson"]
+            self.assertTrue(journal.was_applied_recently(lesson, 7))
+            FakeHost.memory_entries = ["something else the rewrite kept"]
+            self.assertFalse(journal.was_applied_recently(lesson, 7))
+            with patch.object(journal, "_memory_entries", return_value=None):
+                self.assertTrue(journal.was_applied_recently(lesson, 7))
 
     def test_dedup_hash_identical_proposals_still_collide(self):
         """R9 §5: adding action to the hash must not break the ordinary case."""

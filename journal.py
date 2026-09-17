@@ -2006,10 +2006,31 @@ def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:
         all_entries = _load_entries()
     except IOError:
         return True
+    live_memory: Optional[List[str]] = None
+    live_memory_read = False
     for entry in all_entries:
         if entry.get("outcome") not in _CONSUMED_EDIT_OUTCOMES:
             continue
         if (entry.get("ts") or 0) >= cutoff and proposal_hash(entry.get("proposal", {})) == target:
+            prior = entry.get("proposal", {})
+            if entry.get("outcome") == "applied" and prior.get("kind") == "memory":
+                # MEMORY.md has other writers. An applied entry one of them has
+                # since removed is not in the agent's context, so it must not
+                # block the same lesson from being written again; the refusal
+                # pushed the proposer into a near-duplicate instead. An
+                # unreadable store keeps the refusal (fail closed).
+                if not live_memory_read:
+                    entries_now = _memory_entries("memory")
+                    live_memory = (
+                        [str(item).strip() for item in entries_now]
+                        if entries_now is not None else None
+                    )
+                    live_memory_read = True
+                if (
+                    live_memory is not None
+                    and str(prior.get("content", "")).strip() not in live_memory
+                ):
+                    continue
             return True
     return False
 

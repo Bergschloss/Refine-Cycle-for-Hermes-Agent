@@ -2393,6 +2393,15 @@ def finalize_proposal(
     )
 
 
+def memory_capacity_block(line: str) -> str:
+    """The store's room for a new entry, shown under EXISTING MEMORIES when known.
+
+    The overview lists entries but not how full the store is, so a proposer
+    facing a full MEMORY.md kept writing memory lessons the host then refused.
+    """
+    return f"  ({scrub_text(line)})\n" if line else ""
+
+
 def propose(
     llm: PluginLlm,
     evidence_text: str,
@@ -2412,6 +2421,7 @@ def propose(
     history_safe_fields_only: bool = False,
     prompt_content_validator: Optional[Callable[[str], Optional[str]]] = None,
     signal_path: str = "",
+    memory_capacity: str = "",
 ) -> Dict[str, Any]:
     """Propose one edit; skill patches are regenerated from safe full content."""
     _call_meta.value = {}
@@ -2511,6 +2521,7 @@ def propose(
         f"{skills_list}\n\n"
         "=== EXISTING MEMORIES ===\n"
         f"{mems_list}\n"
+        f"{memory_capacity_block(memory_capacity)}"
         f"{notes_block}"
         f"{unused_block}"
         f"{history_block}\n"

@@ -2246,6 +2246,134 @@ def _note_covered_fingerprints() -> frozenset:
     return frozenset(covered)
 
 
+def _live_memory_entries() -> Optional[List[str]]:
+    """The ``memory`` store's entries as the host reads them now, or None.
+
+    The journal records what refine wrote; the file is what the agent reads.
+    Other writers rewrite MEMORY.md (the host's own consolidation, a user's
+    memory stack), so an ``applied`` journal row says nothing about whether the
+    entry still exists. Everything below that treats a past memory edit as a
+    fact checks it here first. None means the store could not be read, and
+    callers then claim nothing either way.
+    """
+    try:
+        store = _memory_store()
+        store.load_from_disk()
+        return [str(entry).strip() for entry in store.memory_entries]
+    except Exception as exc:
+        logger.warning("Cannot read memory entries: %s", scrub_text(str(exc)))
+        return None
+
+
+def _memory_edits(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """``(fingerprint, stripped content)`` for each memory edit a journal row carries."""
+    proposal = entry.get("proposal")
+    if not isinstance(proposal, dict):
+        return []
+    shared = str(proposal.get("pattern_fingerprint", "") or "")
+    edits = proposal.get("edits")
+    candidates = edits if isinstance(edits, list) and edits else [proposal]
+    found = []
+    for edit in candidates:
+        if not isinstance(edit, dict) or edit.get("kind") != "memory":
+            continue
+        fingerprint = str(edit.get("pattern_fingerprint", "") or "") or shared
+        found.append((fingerprint, str(edit.get("content", "") or "").strip()))
+    return found
+
+
+def _memory_offer_exclusions(
+    live: Optional[List[str]], used: Optional[int], limit: Optional[int],
+) -> Tuple[frozenset, frozenset]:
+    """Fingerprints not worth a model call because of what memory already says.
+
+    Returns ``(covered, backed_off)``:
+
+    * ``covered`` -- a memory lesson refine applied for this fingerprint is
+      still in the live store. Same standing as a fingerprint an active prompt
+      note carries. A lesson another writer removed is not coverage, so its
+      failure can be offered again.
+    * ``backed_off`` -- the most recent memory attempt for this fingerprint was
+      refused because the store was full, and the store has no more free room
+      now than it had then. Offering it again produces the same proposal
+      against the same wall; it becomes eligible as soon as room appears,
+      whether an entry was removed or the limit was raised.
+
+    Nothing here is a guessed threshold: room is compared with the room the
+    host itself reported when it refused. The refusal text is the durable
+    ``error`` the journal keeps for every apply.
+    """
+    covered = set()
+    latest: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+    try:
+        rows = journal.entries()
+    except IOError:
+        return frozenset(), frozenset()
+    live_set = set(live) if live is not None else None
+    for entry in rows:
+        for fingerprint, content in _memory_edits(entry):
+            if not fingerprint:
+                continue
+            outcome = entry.get("outcome")
+            if outcome == "applied" and live_set is not None and content in live_set:
+                covered.add(fingerprint)
+            if outcome in ("applied", "error", "pending_approval"):
+                latest[fingerprint] = (str(outcome), entry)
+    backed_off = set()
+    if used is not None and limit is not None:
+        room_now = limit - used
+        for fingerprint, (outcome, entry) in latest.items():
+            if outcome != "error":
+                continue
+            refusal = {"success": False, "error": entry.get("error", "")}
+            if _memory_full_result_code(refusal) != "memory_full":
+                continue
+            used_then, limit_then = _memory_full_usage(refusal)
+            if used_then is None or limit_then is None:
+                continue
+            if room_now <= limit_then - used_then:
+                backed_off.add(fingerprint)
+    return frozenset(covered), frozenset(backed_off)
+
+
+def _history_against_live_memory(
+    records: List[Dict[str, Any]], live: Optional[List[str]],
+) -> List[Dict[str, Any]]:
+    """Mark applied memory edits that are no longer in the store.
+
+    The proposer reads PREVIOUS REFINEMENTS to avoid repeating itself. An
+    ``applied`` row for an entry another writer has since removed made it answer
+    "already covered" for a lesson the agent can no longer see. Such a row is
+    shown as ``not_in_memory``; the journal itself is not changed.
+    """
+    if live is None:
+        return records
+    live_set = set(live)
+    marked = []
+    for record in records:
+        edits = _memory_edits(record)
+        if (
+            record.get("outcome") == "applied"
+            and edits
+            and not isinstance((record.get("proposal") or {}).get("edits"), list)
+            and edits[0][1] not in live_set
+        ):
+            record = dict(record, outcome="not_in_memory")
+        marked.append(record)
+    return marked
+
+
+def _memory_capacity_line(used: Optional[int], limit: Optional[int], entry_count: int) -> str:
+    """One factual line on how much a new memory entry may hold, or "" when unknown."""
+    if used is None or limit is None:
+        return ""
+    room = limit - used - (len(_memory_entry_delimiter()) if entry_count else 0)
+    line = f"memory store: {used}/{limit} chars used; a new memory entry can hold at most {max(room, 0)} chars"
+    if room <= 0:
+        line += "; the store is full, so a memory edit will be refused -- use a skill or a prompt note, or no_op"
+    return line
+
+
 def _render_notes_overview(notes: List[Dict[str, str]]) -> str:
     """Render active notes as a bounded untrusted block for the proposer."""
     if not notes:
@@ -4949,6 +5077,7 @@ def _render_proposer_context(
     reviewer_context: str,
     active_notes: Optional[List[Dict[str, str]]] = None,
     history_safe_fields_only: bool = False,
+    memory_capacity: str = "",
 ) -> str:
     """Render the bounded, scrubbed context handed to the proposer subagent."""
     skills_list = _llm._render_overview(
@@ -5017,6 +5146,7 @@ def _render_proposer_context(
         f"{skills_list}\n\n"
         "=== EXISTING MEMORIES ===\n"
         f"{mems_list}\n"
+        f"{_llm.memory_capacity_block(memory_capacity)}"
         f"{notes_block}"
         f"{unused_block}"
         f"{history_block}\n"
@@ -5048,6 +5178,7 @@ def _propose_with_subagent(
     target: Optional[Dict[str, str]],
     history_safe_fields_only: bool = False,
     signal_path: str = "",
+    memory_capacity: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Produce a proposal via a read-only skills-verifying subagent.
 
@@ -5102,6 +5233,7 @@ def _propose_with_subagent(
         reviewer_context=reviewer_context,
         active_notes=_active_prompt_notes_safe(),
         history_safe_fields_only=history_safe_fields_only,
+        memory_capacity=memory_capacity,
     )
     # The host caps goal at 16k and context at 32k characters. Both are built
     # from already-bounded inputs; clip defensively so a future renderer
@@ -5662,15 +5794,36 @@ def _refine_once(
     # override that. ``all_error_patterns`` stays the full observed set either
     # way: grounding (``_observed_fps``) and the apply check measure against
     # everything seen; only the OFFERED set narrows.
+    # Memory is read once, before any model call, for three uses below: the
+    # offer filter, the capacity line in the proposer prompt, and the history
+    # the proposer is shown. MEMORY.md has other writers, so the journal alone
+    # cannot say what the store holds or how much room is left.
+    _live_memory = _live_memory_entries()
+    _memory_used, _memory_limit = _memory_usage()
+    _memory_capacity = _memory_capacity_line(
+        _memory_used, _memory_limit, len(_live_memory or [])
+    )
+    _memory_covered, _memory_backed_off = _memory_offer_exclusions(
+        _live_memory, _memory_used, _memory_limit
+    )
     if _min_signal_required:
-        _covered_fingerprints = _note_covered_fingerprints()
+        _covered_fingerprints = _note_covered_fingerprints() | _memory_covered
+        _apply_bar_patterns = [
+            pattern for pattern in prioritized_patterns if _pattern_meets_apply_bar(pattern)
+        ]
         error_patterns = [
             pattern
-            for pattern in prioritized_patterns
-            if _pattern_meets_apply_bar(pattern)
-            and str(pattern.get("fingerprint", "") or "")
-            not in _covered_fingerprints
+            for pattern in _apply_bar_patterns
+            if str(pattern.get("fingerprint", "") or "") not in _covered_fingerprints
+            and str(pattern.get("fingerprint", "") or "") not in _memory_backed_off
         ]
+        # Counted, not only applied: a pass that dropped a pattern because memory
+        # was full must not read afterwards like one that saw nothing.
+        _offered_ids = {str(p.get("fingerprint", "") or "") for p in _apply_bar_patterns}
+        _evidence_suppression["memory_live_covered"] = len(_offered_ids & _memory_covered)
+        _evidence_suppression["memory_full_backoff"] = len(
+            (_offered_ids - _covered_fingerprints) & _memory_backed_off
+        )
     else:
         error_patterns = prioritized_patterns
     evidence["error_patterns"] = error_patterns
@@ -5713,8 +5866,10 @@ def _refine_once(
     ):
         _no_offer_reason = (
             "A pattern passed the signal gate but none cleared the apply bar (or "
-            "every one was already covered by an active note), and there was no "
-            "explicit correction; nothing could be offered to the model."
+            "every one was already covered by an active note or a memory entry "
+            "still in the store, or its last memory edit was refused by a full "
+            "store that has no more room now), and there was no explicit "
+            "correction; nothing could be offered to the model."
         )
         return _terminal_result(
             outcome="no_applicable_pattern",
@@ -5793,9 +5948,11 @@ def _refine_once(
                 # global records — but dedup must not depend on how the run
                 # was invoked, so the history crosses in safe-fields-only
                 # form: outcome/kind/name/version, no reason/expects text.
-                refinement_history=journal.recent_refinements(
-                    config.history_max_entries()
+                refinement_history=_history_against_live_memory(
+                    journal.recent_refinements(config.history_max_entries()),
+                    _live_memory,
                 ),
+                memory_capacity=_memory_capacity,
                 history_safe_fields_only=explicit_session,
                 run_context=proposal_context,
                 reviewer_context=reviewer_context,
@@ -5871,9 +6028,11 @@ def _refine_once(
                 # records — but dedup must not depend on how the run was
                 # invoked, so the history crosses in safe-fields-only form:
                 # outcome/kind/name/version, no reason/expects text.
-                refinement_history=journal.recent_refinements(
-                    config.history_max_entries()
+                refinement_history=_history_against_live_memory(
+                    journal.recent_refinements(config.history_max_entries()),
+                    _live_memory,
                 ),
+                memory_capacity=_memory_capacity,
                 purpose="refine",
                 run_context=proposal_context,
                 reviewer_context=reviewer_context,
