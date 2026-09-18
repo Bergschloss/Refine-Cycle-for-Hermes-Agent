@@ -193,7 +193,7 @@ def working_again_text() -> str:
 def desktop_half_text() -> str:
     return (
         f"{BRAND} — please turn on the plugin: "
-        "Capabilities ▸ Plugins ▸ Refine Cycle ▸ Desktop — switch ON."
+        "Capabilities → Plugins → Refine Cycle → Desktop — switch ON."
     )
 
 

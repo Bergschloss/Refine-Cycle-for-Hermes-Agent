@@ -119,7 +119,7 @@ Every message starts with `♾️ Refine Cycle` and is sent once per event, to t
 | No bundled patch fits the new Hermes | `♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.` |
 | Hermes restarted on the new version | `♾️ Refine Cycle 1.3.12 is running.` |
 | Hermes restarted after a fix | `♾️ Refine Cycle is working again.` |
-| A desktop app on this host has the plugin's desktop half, switched off (once per host) | `♾️ Refine Cycle — please turn on the plugin: Capabilities ▸ Plugins ▸ Refine Cycle ▸ Desktop — switch ON.` |
+| A desktop app on this host has the plugin's desktop half, switched off (once per host) | `♾️ Refine Cycle — please turn on the plugin: Capabilities → Plugins → Refine Cycle → Desktop — switch ON.` |
 | A lesson was refused because memory is full | `♾️ Refine Cycle: memory is full (7998/8000). Lesson not saved. Remove old entries or raise memory_char_limit.` |
 
 `/refine status` starts with one line in the same words: `working` with memory use, `update available` with `/refine_update`, or `not working` with `/refine_fix`. On Telegram a command written with underscores is one tap; the gateway maps it to the registered `refine-update` / `refine-fix`.
