@@ -192,8 +192,8 @@ def working_again_text() -> str:
 
 def desktop_half_text() -> str:
     return (
-        f"{BRAND} has Update and Fix buttons in the Hermes desktop app. "
-        "Turn them on once: Settings ▸ Plugins ▸ refine ▸ the Desktop switch."
+        f"{BRAND} — please turn on the plugin: "
+        "Capabilities ▸ Plugins ▸ Refine Cycle ▸ Desktop — switch ON."
     )
 
 

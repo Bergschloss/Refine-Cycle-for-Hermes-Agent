@@ -116,13 +116,13 @@ function check(name, actual, expected) {
 }
 
 let store = new Map()
-let osNotes = []
 let disposers = []
 let recycled = 0
+let contribution = null
 
 function context() {
   store = new Map()
-  osNotes = []
+  contribution = null
   disposers = []
   calls.request.length = 0
   calls.notify.length = 0
@@ -132,16 +132,7 @@ function context() {
       set: (key, value) => store.set(key, value),
       remove: (key) => store.delete(key)
     },
-    os: {
-      notify: (payload) => {
-        if (globalThis.__osNotifyThrows) {
-          globalThis.__osNotifyThrows -= 1
-          throw new Error('no OS notification surface')
-        }
-        osNotes.push(payload)
-      }
-    },
-    register: () => {},
+    register: (entry) => { contribution = entry },
     onDispose: (fn) => disposers.push(fn)
   }
 }
@@ -158,6 +149,30 @@ const withoutBridge = () => { globalThis.window = {} }
 const messages = () => calls.notify.map((entry) => entry.message)
 const dispose = () => { for (const fn of disposers) fn() }
 
+// What the status bar actually renders, and pressing what it puts there: the
+// buttons are the whole point of this half, so the probe drives them, not a copy
+// of their handler.
+function rendered() {
+  const node = contribution.render()
+  return typeof node.t === 'function' ? node.t(node.p || {}) : node
+}
+function walk(node, hit) {
+  if (!node || typeof node !== 'object') return null
+  const found = hit(node)
+  if (found) return found
+  const kids = node.p?.children
+  for (const kid of Array.isArray(kids) ? kids : [kids]) {
+    const deeper = walk(kid, hit)
+    if (deeper) return deeper
+  }
+  return null
+}
+const button = () => walk(rendered(), (node) =>
+  typeof node.p?.onClick === 'function' && typeof node.p?.children === 'string' ? node : null)
+const label = () => walk(rendered(), (node) =>
+  typeof node.p?.children === 'string' && String(node.p.children).startsWith('RC') ? node.p.children : null)
+const pressButton = () => button().p.onClick()
+
 // 1. A finished job is reported once, and does not mute the release notification.
 withBridge()
 globalThis.__state = state({
@@ -167,8 +182,8 @@ globalThis.__state = state({
 plugin.register(context())
 await advance(1)
 check('a finished job is toasted once', messages(), ['RC is up to date.'])
-check('a finished job does not mute the release notification',
-  osNotes.map((note) => note.body), ['RC — update available: 1.3.13.'])
+check('the status bar offers the update', label(), 'RC · update available: 1.3.13')
+check('with a button that says so', button().p.children, 'Update')
 await advance(20 * 60 * 1000)
 check('the toast is not repeated on later polls', messages(), ['RC is up to date.'])
 dispose()
@@ -222,27 +237,12 @@ globalThis.__state = state({ working: false })
 const ctx5 = context()
 plugin.register(ctx5)
 await advance(1)
-const press = osNotes[0].onActivate()   // the notification's Fix action calls start()
+const press = pressButton()   // the status-bar Fix button calls start()
 dispose()
 await press
 requests = calls.request.length
 await advance(60 * 60 * 1000)
 check('dispose stops a loop a button press started', calls.request.length - requests, 0)
-
-// 5. A second break at the same versions is announced again, as in a chat.
-withBridge()
-globalThis.__state = state({ working: false })
-const ctx6 = context()
-plugin.register(ctx6)
-await advance(1)
-globalThis.__state = state({ working: true })
-await advance(11 * 60 * 1000)
-globalThis.__state = state({ working: false })
-await advance(11 * 60 * 1000)
-check('a repeat break is announced again', osNotes.length, 2)
-check('the announcement is not repeated while it holds',
-  (await advance(31 * 60 * 1000), osNotes.length), 2)
-dispose()
 
 // 6. A backend that cannot answer is not a crash, and polling continues.
 withBridge()
@@ -276,19 +276,6 @@ check('the backend is recycled even when the toast failed', recycled, 1)
 await advance(2100)
 check('the result is reported on the next poll instead',
   messages(), ['RC updated to 1.3.13. Restarting Hermes…'])
-dispose()
-
-// 8. Same rule for the OS notification: refused is not "announced".
-withBridge()
-globalThis.__state = state({ working: false })
-const ctx9 = context()
-globalThis.__osNotifyThrows = 1
-plugin.register(ctx9)
-await advance(1)
-check('a refused OS notification is not latched', store.get('announced'), undefined)
-await advance(11 * 60 * 1000)
-check('and it is offered again on the next poll',
-  osNotes.map((note) => note.body), ['RC stopped working after the Hermes update.'])
 dispose()
 
 console.log(failures ? `${failures} failed` : 'all ok')

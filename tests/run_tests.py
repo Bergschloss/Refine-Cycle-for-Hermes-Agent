@@ -24731,7 +24731,8 @@ class NoticesTests(unittest.TestCase):
         self.notices.desktop_half_check()
         self.notices.desktop_half_check()
         self.assertEqual([text for text, _ in self.sent], [self.notices.desktop_half_text()])
-        self.assertIn("Desktop switch", self.sent[0][0])
+        self.assertIn("Capabilities", self.sent[0][0])
+        self.assertIn("switch ON", self.sent[0][0])
 
     def test_a_desktop_half_that_answers_is_never_asked_to_be_turned_on(self):
         self._materialise_desktop_half()

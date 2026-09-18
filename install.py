@@ -1799,8 +1799,8 @@ print("CAPABILITY_OK")
     # Hermes loads every plugin's desktop half switched off (its opt-in posture),
     # and the plugin cannot flip that switch. Without this line the Update / Fix
     # buttons are simply absent and the user has no reason to suspect a switch.
-    say("  3. Hermes desktop app: Settings > Plugins > refine > turn the Desktop")
-    say("     switch on, for the Update / Fix buttons in the status bar.")
+    say("  3. Hermes desktop app: Capabilities > Plugins > Refine Cycle > Desktop")
+    say("     - switch ON, for the Update / Fix buttons in the status bar.")
     say("  Rollback: python install.py --rollback")
 
 

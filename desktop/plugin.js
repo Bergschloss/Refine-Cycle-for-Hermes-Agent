@@ -1,7 +1,7 @@
 /**
  * Refine Cycle in the Hermes desktop app: one status-bar item with [Update] or
- * [Fix], and a Windows/macOS notification with the same button when the app is
- * in the background.
+ * [Fix]. No system notifications: the plugin already says everything it has to
+ * say in chat, and a second copy in the corner of the screen is noise.
  *
  * The plugin's Python half owns every decision and every word. This file only
  * asks it for the state (`refine-update desktop-state`), starts the work
@@ -69,43 +69,6 @@ function recycleBackend() {
     // Said in the toast as "loads the next time Hermes starts", because
     // canRecycle() answered for that case before the toast was written.
   }
-}
-
-function announce(state) {
-  // Only a job that is still running silences this. A finished one stays in the
-  // backend's state for the life of the process, and treating that as "busy"
-  // muted every later release notification after the first press.
-  if (!pluginCtx || !state || (state.job && state.job.status === 'running')) return
-  // "Stopped working" is an event about the Hermes that broke it, which is how
-  // the Python half keys it too. Keyed on the plugin version alone, a second
-  // Hermes update that broke the same plugin version said nothing.
-  const key = state.working
-    ? (state.latest ? `update:${state.latest}` : '')
-    : `fix:${state.version}:${state.hermes || ''}`
-  if (!key) {
-    // Nothing to announce: up to date, or working again. Forget what was
-    // announced, or a second break at the same versions would be silent here
-    // while the chat half -- which clears its own latch on recovery -- speaks.
-    pluginCtx.storage.remove('announced')
-    return
-  }
-  if (pluginCtx.storage.get('announced', '') === key) return
-  const fix = !state.working
-  try {
-    pluginCtx.os.notify({
-      title: state.brand,
-      body: fix
-        ? `${state.brand} stopped working after the Hermes update.`
-        : `${state.brand} — update available: ${state.latest}.`,
-      actions: [{ id: fix ? 'fix' : 'update', label: fix ? 'Fix' : 'Update', onAction: () => void start() }],
-      onActivate: () => void start()
-    })
-  } catch {
-    // Marked as announced only once it was: a notification surface that refuses
-    // must not consume the event, or the user is never told at all.
-    return
-  }
-  pluginCtx.storage.set('announced', key)
 }
 
 function forgetRestart() {
@@ -190,7 +153,6 @@ async function refresh() {
         return
       }
     }
-    announce(state)
   } catch {
     // Plugin not loaded on the backend yet, or the backend is restarting.
   }
