@@ -303,19 +303,10 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path) -> Tup
         return False, f" The host route patch is missing and the installer could not run ({type(exc).__name__})."
     after = _host_state(runner, installer, host)
     if done.returncode == 0 and after["state"] == "patched":
-        note = f" Restored the host route patch: {after['detail']}."
-        if before["state"] == "outdated":
-            # The one case where fixing the plugin replaces files in the user's
-            # Hermes checkout: a superseded patch cannot be reversed, so those
-            # files were returned to the checkout's own version first. Said here
-            # because this sentence is what reaches the user, and an edit of
-            # their own in one of those files went with the old patch.
-            note += (
-                " A superseded patch revision was in the way, so the eight host files "
-                "were returned to your checkout's own version first; a snapshot was "
-                "taken beforehand and `python install.py --rollback` puts them back."
-            )
-        return True, note
+        # A repair that worked says nothing: the user asked for a working plugin,
+        # not for a list of Hermes files. The installer's own output names the files
+        # and the snapshot `--rollback` restores, for whoever reads the terminal.
+        return True, ""
     output = _tail((done.stdout or "") + "\n" + (done.stderr or ""))
     return False, (
         f" The host route patch is missing ({before['state']}) and the installer did not "

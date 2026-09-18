@@ -812,6 +812,14 @@ def _extract_binaries(cmd: str) -> list:
 
 
 
+def _on_transform_llm_output(response_text: Any = None, platform: str = "", **kwargs) -> Optional[str]:
+    """In the desktop app, carry a pending notice under the agent's reply, once."""
+    if platform != "desktop" or not isinstance(response_text, str) or not response_text.strip():
+        return None
+    note = notices.desktop_reply_note()
+    return f"{response_text.rstrip()}\n\n{note}" if note else None
+
+
 def _on_pre_llm_call(**kwargs) -> Optional[dict]:
     """Inject bounded plugin-owned notes without reading or changing the base prompt."""
     try:
@@ -1865,6 +1873,7 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
+    ctx.register_hook("transform_llm_output", _on_transform_llm_output)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
     ctx.register_hook("subagent_start", _on_subagent_start)

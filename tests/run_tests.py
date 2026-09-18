@@ -8893,6 +8893,7 @@ class RefineTests(unittest.TestCase):
                 "pre_llm_call",
                 "pre_tool_call",
                 "post_llm_call",
+                "transform_llm_output",
                 "on_session_end",
                 "on_session_reset",
                 "subagent_start",
@@ -16867,7 +16868,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         patch_calls = [argv for argv in calls if "--patch-only" in argv]
         self.assertEqual(patch_calls, [[sys.executable, str(tree / "install.py"), "--patch-only",
                                         "--hermes-src", str(self.root / "hermes")]])
-        self.assertIn("Restored the host route patch", result["message"])
+        self.assertNotIn("patch", result["message"].lower(), "a repair that worked says nothing about it")
 
     def test_update_on_the_latest_release_still_restores_a_wiped_host_patch(self):
         plugin_dir = self.root / "installed-plugin"
@@ -25146,6 +25147,72 @@ class NoticesTests(unittest.TestCase):
         with patch.object(self.notices, "run_update_command", return_value=("done", "")) as run:
             self.assertEqual(asyncio_run(captured["refine-fix"]("")), "done")
         run.assert_called_once()
+
+
+class DesktopReplyNoteTests(unittest.TestCase):
+    """In the desktop app a pending notice rides under the agent's reply, once."""
+
+    setUp = NoticesTests.setUp
+    _working = NoticesTests._working
+
+    def _seed(self, **values):
+        with self.notices._mutation() as state:
+            state.update(values)
+
+    def _reply(self, platform="desktop", text="Done."):
+        return plugin_init._on_transform_llm_output(response_text=text, platform=platform)
+
+    def test_the_card_goes_under_one_reply_per_release(self):
+        self._seed(desktop_seen=True, latest_tag="v1.3.15")
+        with self._working(True), \
+             patch.object(update_check, "installed_version", return_value="1.3.14"):
+            first = self._reply()
+            second = self._reply()
+        self.assertEqual(first, "Done.\n\n::refine{}")
+        self.assertIsNone(second, "the same release must not follow every reply")
+
+    def test_a_broken_plugin_gets_the_card_even_without_a_release(self):
+        self._seed(desktop_seen=True)
+        with self._working(False), \
+             patch.object(update_check, "installed_version", return_value="1.3.14"):
+            self.assertEqual(self._reply(), "Done.\n\n::refine{}")
+            self.assertIsNone(self._reply())
+
+    def test_nothing_is_added_when_there_is_nothing_to_say(self):
+        self._seed(desktop_seen=True)
+        with self._working(True), \
+             patch.object(update_check, "installed_version", return_value="1.3.14"):
+            self.assertIsNone(self._reply())
+
+    def test_without_the_desktop_half_the_reply_asks_to_turn_it_on_once(self):
+        with self._working(True):
+            first = self._reply()
+            second = self._reply()
+        self.assertEqual(first, "Done.\n\n" + self.notices.desktop_half_text())
+        self.assertNotIn("::refine", first, "an unclaimed directive shows as raw text")
+        self.assertIsNone(second)
+
+    def test_other_surfaces_and_empty_replies_are_left_alone(self):
+        self._seed(desktop_seen=True, latest_tag="v1.3.15")
+        with self._working(True), \
+             patch.object(update_check, "installed_version", return_value="1.3.14"):
+            self.assertIsNone(self._reply(platform="telegram"))
+            self.assertIsNone(self._reply(platform="tui"))
+            self.assertIsNone(self._reply(text="   "))
+            self.assertEqual(self._reply(), "Done.\n\n::refine{}",
+                             "skipped surfaces must not use up the card")
+
+    def test_the_hook_is_registered(self):
+        hooks = {}
+        context = types.SimpleNamespace(
+            llm=object(),
+            register_command=lambda *a, **k: None,
+            register_tool=lambda *a, **k: None,
+            register_hook=lambda name, callback: hooks.__setitem__(name, callback),
+        )
+        with patch.object(self.notices, "start_background_checks"):
+            plugin_init.register(context)
+        self.assertIs(hooks.get("transform_llm_output"), plugin_init._on_transform_llm_output)
 
 
 class DesktopHalfTests(unittest.TestCase):

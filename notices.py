@@ -474,6 +474,44 @@ def desktop_half_check(now: Optional[float] = None, state: Optional[Dict[str, An
         logger.debug("refine notices: desktop-half notice failed", exc_info=True)
 
 
+DESKTOP_CARD = "::refine{}"
+
+
+def desktop_reply_note() -> Optional[str]:
+    """What goes under the agent's next reply in the desktop app, once per event.
+
+    A plugin cannot post into the desktop chat, so the notices above never reach a
+    desktop-only user. The agent's own reply can carry them: with the desktop half
+    switched on, the ``::refine`` card (state plus an Update / Fix button); without
+    it, the "turn it on" line, because the card would show as raw text.
+    """
+    try:
+        state = _load()
+        if state.get("desktop_seen"):
+            if not plugin_working():
+                event = f"fix:{hermes_version()}"
+            else:
+                latest = latest_known(state)
+                event = f"update:{latest}" if latest else ""
+            if not event:
+                return None
+            key, value, note = "desktop_carded", event, DESKTOP_CARD
+        else:
+            key, value, note = "desktop_chat_prompted", True, desktop_half_text()
+        if state.get(key) == value:
+            return None
+        with _mutation(_TURN_LOCK_TIMEOUT) as fresh:
+            # Latched before it is shown: a reply that fails to render loses one
+            # card, a latch that could not be written would repeat it every reply.
+            if fresh is None or fresh.get(key) == value:
+                return None
+            fresh[key] = value
+        return note
+    except Exception:
+        logger.debug("refine notices: desktop reply note failed", exc_info=True)
+        return None
+
+
 def start_background_checks() -> None:
     threading.Thread(target=startup_check, name="refine-notices", daemon=True).start()
 
