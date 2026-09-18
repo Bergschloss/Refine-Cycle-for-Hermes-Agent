@@ -190,6 +190,13 @@ def working_again_text() -> str:
     return f"{BRAND} is working again."
 
 
+def desktop_half_text() -> str:
+    return (
+        f"{BRAND} has Update and Fix buttons in the Hermes desktop app. "
+        "Turn them on once: Settings ▸ Plugins ▸ refine ▸ the Desktop switch."
+    )
+
+
 def memory_full_text(used: int, limit: int) -> str:
     return (
         f"{BRAND}: memory is full ({used}/{limit}). Lesson not saved. "
@@ -228,6 +235,22 @@ def _host_supported() -> Optional[bool]:
     if state == "unknown":
         return None
     return state != "incompatible"
+
+
+def desktop_half_present() -> bool:
+    """Whether a desktop app on this host has materialised the plugin's desktop half.
+
+    Electron copies ``plugins/<name>/desktop/`` to ``<hermes home>/desktop-plugins/<name>/``
+    the first time it resolves that root, and loads it switched OFF (its opt-in
+    posture). So this file existing means there IS a desktop app here and the
+    buttons are one switch away; a server or a CLI-only host has no such copy and
+    is told nothing.
+    """
+    try:
+        name = update_check._plugin_dir().name
+        return (Path(config.hermes_home()) / "desktop-plugins" / name / "plugin.js").is_file()
+    except Exception:
+        return False
 
 
 def latest_known(state: Optional[Dict[str, Any]] = None) -> Optional[str]:
@@ -420,9 +443,35 @@ def startup_check(now: Optional[float] = None) -> None:
                         # A confirmation still pending on a plugin that does not
                         # work is stale: the update landed and did not fix it.
                         fresh.pop("pending", None)
+        desktop_half_check(now, state)
         check_update(now)
     except Exception:
         logger.debug("refine notices: startup check failed", exc_info=True)
+
+
+def desktop_half_check(now: Optional[float] = None, state: Optional[Dict[str, Any]] = None) -> None:
+    """Once per host: say that the desktop buttons are one switch away.
+
+    The switch is the user's alone -- Hermes loads every plugin's desktop half off
+    and the plugin cannot turn itself on -- so silence here reads as "this plugin
+    has no buttons". Said only where a desktop app actually put the half on disk,
+    and never again once the half has answered ``desktop_state`` even once.
+    """
+    now = time.time() if now is None else now
+    try:
+        state = _load() if state is None else state
+        if state.get("desktop_seen") or state.get("desktop_prompted"):
+            return
+        if not desktop_half_present():
+            return
+        if not _claim("desktop_half", now):
+            return
+        if _send(state, desktop_half_text()):
+            with _mutation() as fresh:
+                if fresh is not None:
+                    fresh["desktop_prompted"] = True
+    except Exception:
+        logger.debug("refine notices: desktop-half notice failed", exc_info=True)
 
 
 def start_background_checks() -> None:
@@ -623,6 +672,11 @@ _BACKEND_ID = f"{os.getpid()}-{time.time():.6f}"
 
 def desktop_state() -> Dict[str, Any]:
     """What the desktop status bar shows. May look for a release, once a day."""
+    if not _load().get("desktop_seen"):
+        # The half is switched on and talking, so the "turn it on" notice is moot.
+        with _mutation() as state:
+            if state is not None:
+                state["desktop_seen"] = True
     check_update()
     with _job_lock:
         job = dict(_job) or None

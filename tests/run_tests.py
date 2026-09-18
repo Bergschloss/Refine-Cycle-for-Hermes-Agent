@@ -24714,6 +24714,39 @@ class NoticesTests(unittest.TestCase):
         self.assertEqual(reply, self.notices.paused_text("0.22.0"))
         self.assertEqual(restart_head, "")
 
+    def _materialise_desktop_half(self):
+        """What Electron does the first time it sees the plugin's desktop/ folder."""
+        copied = Path(config.hermes_home()) / "desktop-plugins" / update_check._plugin_dir().name
+        copied.mkdir(parents=True, exist_ok=True)
+        (copied / "plugin.js").write_text("export default {}", encoding="utf-8")
+
+    def test_the_desktop_switch_is_asked_for_once_on_a_desktop_host(self):
+        """Hermes loads the desktop half off and the plugin cannot turn it on, so
+        silence reads as "this plugin has no buttons". Said once, and only where a
+        desktop app actually put the half on disk."""
+        self.notices.desktop_half_check()
+        self.assertEqual(self.sent, [], "no desktop app here, nothing to turn on")
+
+        self._materialise_desktop_half()
+        self.notices.desktop_half_check()
+        self.notices.desktop_half_check()
+        self.assertEqual([text for text, _ in self.sent], [self.notices.desktop_half_text()])
+        self.assertIn("Desktop switch", self.sent[0][0])
+
+    def test_a_desktop_half_that_answers_is_never_asked_to_be_turned_on(self):
+        self._materialise_desktop_half()
+        with patch.object(self.notices, "check_update"):
+            self.notices.desktop_state()
+        self.notices.desktop_half_check()
+        self.assertEqual(self.sent, [])
+
+    def test_a_failed_send_leaves_the_desktop_notice_for_the_next_process(self):
+        self._materialise_desktop_half()
+        with patch.object(self.notices._notify, "notify", return_value=False):
+            self.notices.desktop_half_check(now=1000.0)
+        self.notices.desktop_half_check(now=1000.0 + 2 * 3600)
+        self.assertEqual([text for text, _ in self.sent], [self.notices.desktop_half_text()])
+
     def test_memory_full_is_said_once_per_store_state(self):
         self.notices.memory_full(7998, 8000)
         self.notices.memory_full(7998, 8000)
