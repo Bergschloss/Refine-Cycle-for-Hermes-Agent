@@ -1796,6 +1796,11 @@ print("CAPABILITY_OK")
     say("  1. Restart the gateway OUTSIDE its own process:")
     say("     sudo systemd-run --unit=refine-gw-restart --collect -- systemctl restart hermes-gateway")
     say("  2. Verify: /refine-cycle status  (or refine_run in a turn)")
+    # Hermes loads every plugin's desktop half switched off (its opt-in posture),
+    # and the plugin cannot flip that switch. Without this line the Update / Fix
+    # buttons are simply absent and the user has no reason to suspect a switch.
+    say("  3. Hermes desktop app: Settings > Plugins > refine > turn the Desktop")
+    say("     switch on, for the Update / Fix buttons in the status bar.")
     say("  Rollback: python install.py --rollback")
 
 
