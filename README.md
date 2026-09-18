@@ -100,6 +100,8 @@ hermes gateway restart
 
 **5. In the Hermes desktop app, turn the plugin on.** Capabilities → Plugins → **Refine Cycle** → **Desktop** — switch ON. Hermes loads every plugin's desktop half switched off, so until you do this the status-bar item and its **Update** / **Fix** buttons are not there. The plugin cannot flip that switch for you — only you can.
 
+![In the Hermes desktop app: Capabilities → Plugins → Refine Cycle → Desktop switched on](assets/turn-on-desktop.gif)
+
 When a new version is out, or a Hermes update stops the plugin, Refine Cycle tells you in chat. Tap `/refine_update` or `/refine_fix` and it updates or repairs itself and restarts Hermes. In the desktop app the same **Update** and **Fix** buttons sit in the status bar. Version support, troubleshooting and everything the installer changes: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Documentation
