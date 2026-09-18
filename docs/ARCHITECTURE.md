@@ -100,7 +100,7 @@ Everything under the Hermes home, nothing in the plugin install directory (migra
 python tests/run_tests.py
 ```
 
-1,305 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
+1,312 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
 
 `DesktopHalfTests` is the one test that leaves Python: it runs `tests/desktop_probe.mjs` under node against `desktop/plugin.js` with the SDK, react and the clock stubbed, and asserts what the status-bar item actually does (the offer and the button it renders, a finished job reported once, an honest restart sentence, a confirmation only from a new backend, dispose stopping the poll loop — for a poll and for a real button press). It skips where node is not installed. Directly: `node tests/desktop_probe.mjs desktop/plugin.js <empty dir>`.
 
