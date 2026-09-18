@@ -22,6 +22,7 @@ const ID = 'refine'
 const COMMAND = 'refine-update'
 const IDLE_POLL_MS = 10 * 60 * 1000
 const BUSY_POLL_MS = 2000
+const STARTUP_POLL_MS = 3000
 // How long a restart may take before this stops waiting for its confirmation. A
 // backend that never comes back must not leave the poll running at BUSY forever.
 const RESTART_WAIT_MS = 2 * 60 * 1000
@@ -30,6 +31,7 @@ const listeners = new Set()
 let current = null
 let pluginCtx = null
 let timer = null
+let succeeded = false
 // Bumped by dispose. A refresh already in flight when the plugin is disposed
 // finishes after it, and without this it rescheduled itself and re-fired the
 // finished job's toast on every poll -- forever, because the "already shown"
@@ -38,6 +40,7 @@ let generation = 0
 
 function publish(state) {
   current = state
+  succeeded = true
   for (const listener of listeners) listener(state)
 }
 
@@ -157,7 +160,7 @@ async function refresh() {
     // Plugin not loaded on the backend yet, or the backend is restarting.
   }
   if (mine !== generation) return
-  schedule(waitingForRestart() ? BUSY_POLL_MS : IDLE_POLL_MS)
+  schedule(waitingForRestart() ? BUSY_POLL_MS : (!succeeded ? STARTUP_POLL_MS : IDLE_POLL_MS))
 }
 
 async function start() {
@@ -239,6 +242,8 @@ export default {
       timer = null
       listeners.clear()
       pluginCtx = null
+      current = null
+      succeeded = false
     })
     void refresh()
   }

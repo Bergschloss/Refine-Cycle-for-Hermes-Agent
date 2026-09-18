@@ -278,5 +278,19 @@ check('the result is reported on the next poll instead',
   messages(), ['RC updated to 1.3.13. Restarting Hermes…'])
 dispose()
 
+// 8. When the backend is unreachable on first load, retry within seconds instead
+//    of leaving the status bar empty for IDLE_POLL_MS (10 minutes).
+withBridge()
+globalThis.__backendDown = true
+const ctx9 = context()
+plugin.register(ctx9)
+await advance(1)
+requests = calls.request.length
+globalThis.__backendDown = false
+globalThis.__state = state({ working: true })
+await advance(3500)
+check('an unreachable backend on start retries promptly', calls.request.length - requests, 1)
+dispose()
+
 console.log(failures ? `${failures} failed` : 'all ok')
 process.exit(failures ? 1 : 0)
