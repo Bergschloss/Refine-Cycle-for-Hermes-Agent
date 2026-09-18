@@ -119,10 +119,12 @@ let store = new Map()
 let disposers = []
 let recycled = 0
 let contribution = null
+let contributions = []
 
 function context() {
   store = new Map()
   contribution = null
+  contributions = []
   disposers = []
   calls.request.length = 0
   calls.notify.length = 0
@@ -132,7 +134,12 @@ function context() {
       set: (key, value) => store.set(key, value),
       remove: (key) => store.delete(key)
     },
-    register: (entry) => { contribution = entry },
+    // Every contribution is kept; `contribution` stays the status-bar one, which
+    // is what the label/button helpers below drive.
+    register: (entry) => {
+      contributions.push(entry)
+      if (!entry.area || entry.area === 'statusBar.left') contribution = entry
+    },
     onDispose: (fn) => disposers.push(fn)
   }
 }
@@ -290,6 +297,31 @@ globalThis.__backendDown = false
 globalThis.__state = state({ working: true })
 await advance(3500)
 check('an unreachable backend on start retries promptly', calls.request.length - requests, 1)
+dispose()
+
+// 9. The chat card: a claimed directive, rendering the same decision with a
+//    button that reaches the backend. Hermes renders a card only inside an
+//    assistant message, so this is the only chat surface a plugin can own.
+withBridge()
+globalThis.__state = state({ working: false })
+plugin.register(context())
+await advance(1)
+const directive = contributions.find((entry) => entry.area === 'transcript.directives')
+check('a transcript directive is claimed', Boolean(directive), true)
+check('it is claimed under ::refine', directive && directive.data.name, 'refine')
+
+// The leaf is a component; render it the way the app would. The react stub's
+// useState returns the current value, so the card reads the published state.
+const card = directive.data.render({ attrs: {}, source: '::refine{}', streaming: false })
+const cardTree = typeof card.t === 'function' ? card.t(card.p || {}) : card
+const cardButton = walk(cardTree, (node) =>
+  typeof node.p?.onClick === 'function' && typeof node.p?.children === 'string' ? node : null)
+check('the card offers the action for this state', cardButton && cardButton.p.children, 'Fix')
+const beforeCardClick = calls.request.length
+cardButton.p.onClick()
+await advance(1)
+check('the button starts the work on the backend',
+  calls.request.slice(beforeCardClick).map((entry) => entry[1] && entry[1].arg), ['desktop-start'])
 dispose()
 
 console.log(failures ? `${failures} failed` : 'all ok')

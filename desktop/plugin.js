@@ -229,6 +229,75 @@ function RefineStatus() {
   })
 }
 
+/**
+ * `::refine{}` — the same Update / Fix decision as a card inside the chat.
+ *
+ * Hermes renders a widget or a card ONLY inside an assistant message: a plugin's
+ * own command output arrives as a `system` message and is drawn as plain linkified
+ * text, so a plugin cannot put a button in chat by answering. What it CAN do is
+ * claim a directive name, which is what this is: when the agent writes `::refine{}`
+ * on its own line, this card renders there, with buttons wired straight to the
+ * plugin's backend command -- no HTML file, no hidden user turn, no model call.
+ *
+ * The area is the literal string on purpose. Importing the SDK constant would make
+ * the whole desktop half fail to load on an app that does not export it yet; a
+ * name this app does not know is simply an area nobody reads.
+ */
+const DIRECTIVE_AREA = 'transcript.directives'
+const DIRECTIVE_NAME = 'refine'
+
+function RefineCard() {
+  const [state, setState] = useState(current)
+
+  useEffect(() => {
+    listeners.add(setState)
+    void refresh()
+    return () => listeners.delete(setState)
+  }, [])
+
+  const brand = state ? state.brand : 'Refine Cycle'
+  const busy = Boolean(state && state.job && state.job.status === 'running')
+  const fix = Boolean(state && !state.working)
+  const update = Boolean(state && state.working && state.latest)
+  const line = !state
+    ? 'checking…'
+    : busy
+      ? `${fix ? 'fixing' : 'updating'}…`
+      : fix
+        ? 'stopped working after the Hermes update'
+        : update
+          ? `update available: ${state.latest}`
+          : `${state.version} is running`
+
+  const children = [
+    jsx('span', { className: cn('font-medium'), children: brand }, 'brand'),
+    jsx('span', { className: cn('text-(--muted-foreground)'), children: line }, 'line')
+  ]
+  if (state && !busy && (fix || update)) {
+    children.push(
+      jsx(
+        'button',
+        {
+          className: cn(
+            'rounded border border-(--ui-border) px-2 py-0.5 text-xs',
+            'hover:bg-(--chrome-action-hover) hover:text-foreground'
+          ),
+          type: 'button',
+          onClick: () => void start(),
+          children: fix ? 'Fix' : 'Update'
+        },
+        'action'
+      )
+    )
+  }
+
+  return jsxs('span', {
+    className: cn('my-2 inline-flex items-center gap-2 rounded-md border border-(--ui-border)',
+      'bg-(--card) px-3 py-2 text-[0.8125rem]'),
+    children
+  })
+}
+
 export default {
   id: ID,
   name: 'Refine Cycle',
@@ -236,6 +305,13 @@ export default {
   register(ctx) {
     pluginCtx = ctx
     ctx.register({ id: 'status', area: 'statusBar.left', order: 900, render: () => jsx(RefineStatus, {}) })
+    // Claimed once, used whenever an assistant message carries `::refine{}`. An
+    // app that does not know this area ignores the registration.
+    ctx.register({
+      id: 'transcript.refine',
+      area: DIRECTIVE_AREA,
+      data: { name: DIRECTIVE_NAME, render: () => jsx(RefineCard, {}) }
+    })
     ctx.onDispose(() => {
       generation += 1
       clearTimeout(timer)
