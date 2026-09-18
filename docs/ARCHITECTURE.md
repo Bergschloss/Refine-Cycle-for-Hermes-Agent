@@ -70,7 +70,7 @@ Recurrence is decided by the plugin, not the model. `patterns.py` normalizes req
 | `sanitization.py` | 332 | Credential redaction, line-structure hygiene |
 | `notify.py` | 272 | User notifications through the CLI entry point |
 | `notices.py` | 675 | What the user is told and when: releases, a broken or paused plugin, a full memory store; one-tap update and fix, restart |
-| `desktop/plugin.js` | 283 | The desktop app's status-bar item and notification with Update / Fix; all decisions stay in `notices.py` |
+| `desktop/plugin.js` | 245 | The desktop app's status-bar item with Update / Fix; all decisions stay in `notices.py` |
 | `refine_trace.py` | 187 | Sanitized invocation trace |
 
 ## What it may write
@@ -102,7 +102,7 @@ python tests/run_tests.py
 
 1,302 tests, standard library `unittest`, no network. Running an individual test file directly will fail on imports; the runner sets the path.
 
-`DesktopHalfTests` is the one test that leaves Python: it runs `tests/desktop_probe.mjs` under node against `desktop/plugin.js` with the SDK, react and the clock stubbed, and asserts what the status-bar item and its notifications actually do (a finished job reported once, an honest restart sentence, a confirmation only from a new backend, dispose stopping the poll loop, a repeat break announced again). It skips where node is not installed. Directly: `node tests/desktop_probe.mjs desktop/plugin.js <empty dir>`.
+`DesktopHalfTests` is the one test that leaves Python: it runs `tests/desktop_probe.mjs` under node against `desktop/plugin.js` with the SDK, react and the clock stubbed, and asserts what the status-bar item actually does (the offer and the button it renders, a finished job reported once, an honest restart sentence, a confirmation only from a new backend, dispose stopping the poll loop — for a poll and for a real button press). It skips where node is not installed. Directly: `node tests/desktop_probe.mjs desktop/plugin.js <empty dir>`.
 
 `PathTraceTests` runs every way a pass starts (the `refine_run` tool, `post_llm_call`, `on_session_end`, a deferred session end drained later, the slash command) through the real entry points, against a host double that enforces Hermes's ContextVar rules for the model route and the subagent parent. It asserts the whole trace as one table: trigger, outcome, which proposer ran, why it fell back, which parent the launch saw, and how many structured calls were made.
 
