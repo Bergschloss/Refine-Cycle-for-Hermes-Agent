@@ -218,26 +218,40 @@ def select_reverse_patch(src: Path) -> Path | None:
     return None
 
 
-def return_patch_targets_to_head(src: Path, patch: Path | None) -> int:
+def return_patch_targets_to_head(src: Path, patch: Path | None) -> tuple[int, list[str]]:
     """Put back the checkout's own version of every file ``patch`` touches.
 
     Only for an ``outdated`` host, after its backup is recorded. The route patch is
     an uncommitted change on top of the checkout, so HEAD holds the stock file; a
     file the patch created is not in HEAD and is removed. Nothing outside the
     patch's own files is touched.
+
+    Returns ``(count, replaced)``, where ``replaced`` names the files whose working
+    copy actually differed from HEAD. That list is the point: on a stock host the
+    ``dirty`` state refuses to overwrite user work, but a host carrying markers
+    never reaches that check -- the patch itself is the modification -- so this is
+    the one path where a hand edit in a host file is replaced. The caller names the
+    files and the snapshot that holds them instead of reporting a bare number.
     """
     count = 0
+    replaced: list[str] = []
     for rel in patch_content_files(patch):
         tracked = run_git(src, "ls-files", "--error-unmatch", "--", rel).returncode == 0
         if tracked:
+            # --quiet exits 1 when the working copy differs from HEAD. Read before
+            # the checkout, because after it every file matches by definition.
+            differed = run_git(src, "diff", "--quiet", "HEAD", "--", rel).returncode != 0
             r = run_git(src, "checkout", "HEAD", "--", rel)
             if r.returncode != 0:
                 fail(f"could not restore {rel} from the checkout: {r.stderr.strip()}")
             count += 1
+            if differed:
+                replaced.append(rel)
         elif (src / rel).is_file():
+            replaced.append(rel)
             (src / rel).unlink()
             count += 1
-    return count
+    return count, replaced
 
 # Top-level packages that belong to the Hermes host, not to the plugin. An
 # unresolved one of these during import verification means this environment
@@ -1650,8 +1664,22 @@ def do_install(args) -> None:
         record_host_backup(src, mdir, meta, detected)
         host_backup_recorded = True
         say(f"Superseded patch revision detected; backup recorded: {meta['host']['backup']}")
-        restored = return_patch_targets_to_head(src, detected)
+        restored, replaced = return_patch_targets_to_head(src, detected)
         say(f"Returned {restored} patch files to the checkout's own versions.")
+        if replaced:
+            # Said out loud, because this is the one mutation the dirty check
+            # cannot cover: a host carrying markers is never classified dirty, so
+            # a hand edit living beside the superseded patch is replaced here
+            # without anything else in the run mentioning it.
+            snapshots = list(meta["host"].get("extra_backups") or [])
+            latest = snapshots[-1] if snapshots else meta["host"]["backup"]
+            say(
+                "Replaced the working copy of: " + ", ".join(replaced) + ". Those "
+                "files carried the superseded patch, and any edit of your own beside "
+                f"it went with it: this run's snapshot of them is {latest}, and "
+                "`python install.py --rollback` puts the tree back from "
+                f"{meta['host']['backup']}."
+            )
         state, detail = classify_host(src)
         if state != "stock":
             fail(

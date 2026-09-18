@@ -27716,6 +27716,53 @@ class InstallerPatchSelectionTests(InstallerPluginOnlyTests):
             ))
         self.assertEqual(self._target_snapshot(), before)
 
+    def test_replacing_a_superseded_revision_names_the_files_and_the_snapshot(self):
+        """The one mutation the dirty check cannot cover, said out loud.
+
+        A host carrying markers is never classified ``dirty`` -- the patch itself
+        is the modification -- so on an ``outdated`` host an edit of the operator's
+        own, living in a patch target beside the superseded patch, is replaced by
+        the checkout's own version. The behaviour has to stay (the plugin cannot be
+        fixed otherwise), but it must not be silent, and it must be recoverable.
+        """
+        import install
+        import zipfile
+
+        revised = self._generate_revised_patch("revised-route.patch")
+        env = patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False)
+        with self._as_stock_host(), env:
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+
+        detected, _applied, _total = install.detected_patch_topology(self.src)
+        edited = install.patch_content_files(detected)[0]
+        mine = "MY_OWN_DEBUG_EDIT = True"
+        (self.src / edited).write_text(
+            (self.src / edited).read_text(encoding="utf-8") + f"\n{mine}\n", encoding="utf-8"
+        )
+
+        lines: list[str] = []
+        with patch.object(install, "patch_candidates", lambda: [revised]), env, \
+             patch.object(install, "say", side_effect=lambda text="": lines.append(str(text))):
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+        report = "\n".join(lines)
+
+        self.assertIn(edited, report, "the file whose working copy was replaced is not named")
+        self.assertIn("rollback", report, "the way back is not named")
+        self.assertNotIn(mine, (self.src / edited).read_text(encoding="utf-8"))
+        # Recoverable: the edit is inside the snapshot the report names.
+        named = [word.strip(".,`") for word in report.split() if word.strip(".,`").endswith(".zip")]
+        self.assertTrue(named, f"no snapshot named in: {report}")
+        found = False
+        for candidate in named:
+            path = Path(candidate)
+            if not path.is_file():
+                continue
+            with zipfile.ZipFile(path) as archive:
+                for entry in archive.namelist():
+                    if mine.encode() in archive.read(entry):
+                        found = True
+        self.assertTrue(found, f"the replaced edit is in none of {named}")
+
     def test_the_version_prefix_is_not_a_gate(self):
         """A host no bundled patch fits is still refused, but NOT on its commit id.
 
