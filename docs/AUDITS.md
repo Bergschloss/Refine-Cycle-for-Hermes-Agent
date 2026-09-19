@@ -69,6 +69,6 @@ Auditor: Apodex, six angles it chose itself. First check: Antigravity, in a clon
 ## How the checks work
 
 1. **Audit.** The auditor gets one angle per run and must give a code trace, a breaking input, a failing test and a fix for every finding.
-2. **First check.** A second agent runs each test on the old code, applies the fix on a branch, and runs the full suite: 1,331 tests on Windows and Linux, plus the desktop probe.
+2. **First check.** A second agent runs each test on the old code, applies the fix on a branch, and runs the full suite on Windows and Linux, plus the desktop probe.
 3. **Staging, from round 2.** Fixes that pass run on a separate Hermes install with real hooks and a real gateway, next to a live one that is never touched.
 4. **Final review.** Claude reviews every fix that touches the journal, locks, rollback, security or the installer before it merges.

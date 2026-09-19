@@ -218,8 +218,8 @@ _RESOURCE_TARGET_FORMS = r"""
 """
 # Bare shell metacharacters. A prompt note is a single "When <condition>,
 # <allowlisted action>." line, so none of these has any role in one and the
-# character class is the right test there. A memory body is Markdown prose,
-# where they are ordinary punctuation -- see ``_memory_resource_error``.
+# character class is the right test there. Memory is not checked for resources
+# at all: a lesson there may name a path, host or URL.
 _SHELL_METACHARACTERS = r"[`|;&><$]"
 _RESOURCE_TARGET = re.compile("(?ix)" + _RESOURCE_TARGET_FORMS)
 _RESOURCE_REFERENCE = re.compile(
