@@ -1790,9 +1790,9 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 previous_was_assistant_response = False
         # Resolution must inspect every candidate failure's immediate successors,
         # not merely the prompt excerpt.  The prompt remains bounded to ``limit``
-        # rows below; for each bounded candidate we read at most six later rows,
-        # so this analysis is complete for the outcome classifier without turning
-        # a long session into unbounded context or persistence.
+        # rows below; for each bounded candidate we read at most twenty-four
+        # later rows -- several exchange rounds -- which keeps context bounded
+        # while reaching corrections that a six-row window would miss.
         failure_rows_by_order = {
             row["message_order"]: row for row in failure_rows
         }
@@ -1809,7 +1809,7 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 "ORDER BY m.timestamp ASC, m.rowid ASC LIMIT ?",
                 (
                     resolved, _ts_low, _ts_high, failure_row["timestamp"],
-                    failure_row["timestamp"], failure_row["message_order"], 6,
+                    failure_row["timestamp"], failure_row["message_order"], 24,
                 ),
             ).fetchall()
             sequence = [failure_row, *successors]
@@ -2478,6 +2478,12 @@ def auto_cooldown_remaining_minutes() -> float:
     last_attempt = journal.last_attempt_ts()
     if last_attempt is None:
         return 0.0
+    if last_attempt > time.time():
+        logger.warning(
+            "Auto cooldown: last attempt ts %s lies in the future; clamping to now so "
+            "refinement is not blocked by a foreign/mis-set clock", last_attempt
+        )
+        last_attempt = time.time()
     remaining = config.auto_cooldown_minutes() * 60 - (time.time() - last_attempt)
     return remaining / 60 if remaining > 0 else 0.0
 
@@ -2946,6 +2952,7 @@ def refine_status() -> Dict[str, Any]:
         "memory_backoff_patterns": held_back,
         "journal_present": journal_present,
         "journal_readable": journal_readable,
+        "journal_path": str(journal_path),
         "journal_dir": str(jdir),
         "journal_dir_state": jdir_state,
         "journal_dir_state_text": _JOURNAL_DIR_STATE_TEXT.get(jdir_state, jdir_state),
@@ -4515,14 +4522,17 @@ _RESOLUTION_STOP_RE = re.compile(r"\b(?:stop(?: retrying)?|do not retry|abandon|
 
 
 def _resolution_for_occurrence(
-    messages: List[Dict[str, Any]], failure_index: int, fingerprint: str, *, lookahead: int = 6
+    messages: List[Dict[str, Any]], failure_index: int, fingerprint: str, *, lookahead: int = 24
 ) -> str:
     """Classify one sanitized failure by its bounded immediate outcome.
 
     The caller supplies only database-egress-scrubbed messages. A later user turn
     ends the observation window, so this cannot attribute a future task's success
     to the earlier failure. ``repeated`` wins over a later success because it is
-    evidence that the first action did not repair the failure.
+    evidence that the first action did not repair the failure. An observed
+    successful call whose arguments differ from the failure counts as
+    ``corrected`` even when earlier assistant prose contained a stop keyword:
+    prose-inferred abandonment yields to an observed repair.
     """
     changed_action = False
     abandoned = False
@@ -4545,10 +4555,13 @@ def _resolution_for_occurrence(
         # point, but still resolve the preceding already-scrubbed failure.
         status = _structured_error_status(content, tool_name=tool_name)
         if status is False:
-            if abandoned:
-                return "abandoned"
+            # An observed repair beats prose-inferred abandonment; ``repeated``
+            # still wins because it is evidence that the first action did not
+            # repair the failure.
             if changed_action:
                 return "corrected"
+            if abandoned:
+                return "abandoned"
             continue
         trusted = _evidence_text_or_none(content, tool_name)
         if trusted is None:

@@ -6847,6 +6847,28 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(conflict["success"])
         self.assertIn("second lesson", FakeHost.memory_entries)
 
+    def test_memory_rollback_works_on_a_store_without_save_to_disk(self):
+        # Current Hermes: no save_to_disk, the store writes through the static
+        # _write_file(path, entries). Rollback used to raise AttributeError there.
+        FakeHost.memory_entries[:] = ["before"]
+        written = []
+
+        def write_file(path, entries):
+            written.append((path.name, list(entries)))
+
+        store_class = sys.modules["tools.memory_tool"].MemoryStore
+        proposal = {
+            "action": "create", "kind": "memory", "name": "lesson",
+            "content": "exact appended lesson", "reason": "why", "evidence": [],
+        }
+        result = self.run_proposal(proposal)
+        with patch.object(store_class, "save_to_disk", None), \
+             patch.object(store_class, "_write_file", staticmethod(write_file), create=True):
+            rollback = core.refine_rollback(result["journal_id"])
+        self.assertTrue(rollback["success"], rollback)
+        self.assertEqual(written, [("MEMORY.md", ["before"])])
+        self.assertEqual(journal.get_entry(result["journal_id"])["outcome"], "rolled_back")
+
     def test_pending_consumes_budget_and_is_reported_as_pending(self):
         FakeHost.entry_config()["max_edits_per_day"] = 1
         FakeHost.stage_writes = True
@@ -25234,6 +25256,80 @@ class NoticesTests(unittest.TestCase):
         run.assert_called_once()
 
 
+class AuditRound2Tests(unittest.TestCase):
+    """Apodex round 2: the findings that held, each failing on the code before it."""
+
+    setUp = RefineTests.setUp
+    tearDown = RefineTests.tearDown
+
+    def test_distinct_exit_codes_in_other_phrasings_stay_distinct(self):
+        for a, b in (("process exited with code 1", "process exited with code 137"),
+                     ("returned a non-zero code: 1", "returned a non-zero code: 137")):
+            self.assertNotEqual(patterns.fingerprint("sh", a), patterns.fingerprint("sh", b))
+
+    def test_a_truncated_quote_does_not_split_the_same_error(self):
+        self.assertEqual(patterns.fingerprint("cmd", 'err: "timeout"'),
+                         patterns.fingerprint("cmd", 'err: "timeout'))
+
+    def test_an_exception_group_matches_the_plain_exception(self):
+        group = ("  + Exception Group Traceback (most recent call last):\n"
+                 '  |   File "/tmp/x.py", line 3, in <module>\n'
+                 '  |     raise ExceptionGroup("g", [TypeError("bad type")])\n'
+                 "  | TypeError: bad type\n"
+                 "  +------------------------------------")
+        plain = ("Traceback (most recent call last):\n"
+                 '  File "/tmp/x.py", line 3, in <module>\n'
+                 '    raise TypeError("bad type")\n'
+                 "TypeError: bad type")
+        self.assertEqual(patterns.normalize_error(group), patterns.normalize_error(plain))
+
+    def test_a_source_location_after_a_connection_verb_is_not_a_port(self):
+        self.assertEqual(patterns.fingerprint("net", "connection to main.py:42 failed"),
+                         patterns.fingerprint("net", "connection to main.py:99 failed"))
+
+    def test_ipv6_loopback_ports_stay_distinct(self):
+        self.assertNotEqual(patterns.fingerprint("net", "[::1]:8080 refused"),
+                            patterns.fingerprint("net", "[::1]:9090 refused"))
+
+    def test_a_future_timestamp_neither_blocks_dedup_nor_cooldown_for_years(self):
+        proposal = {"action": "create", "kind": "skill", "name": "x", "content": "c"}
+        future = time.time() + 5 * 365 * 86400
+        journal.journal_path().write_text(json.dumps({
+            "id": "f" * 12, "ts": future, "trigger": "auto", "reason": "r",
+            "session_id": "s", "proposal": proposal, "outcome": "applied",
+        }) + "\n", encoding="utf-8")
+        self.assertFalse(journal.was_applied_recently(proposal, 30))
+        self.assertLessEqual(core.auto_cooldown_remaining_minutes(),
+                             config.auto_cooldown_minutes())
+
+    def test_an_observed_repair_beats_a_stop_word_and_a_long_exchange(self):
+        failure = {"role": "tool", "tool_name": "bash", "content": '{"exit_code": 1}'}
+        messages = [failure, {"role": "assistant", "content": "I will stop retrying that."},
+                    {"role": "assistant", "content": "Trying a different flag instead."}]
+        messages += [{"role": "assistant", "content": f"checking step {i}"} for i in range(8)]
+        messages.append({"role": "tool", "tool_name": "bash", "content": '{"exit_code": 0}'})
+        self.assertEqual(core._resolution_for_occurrence(messages, 0, "fp"), "corrected")
+
+    def test_a_systemd_execstart_prefix_still_finds_the_checkout(self):
+        import install
+
+        root = self.root / "systemd-case"
+        src = root / "hermes-agent"
+        (src / "hermes_cli").mkdir(parents=True)
+        (src / "hermes_cli" / "plugins.py").write_text("# host\n", encoding="utf-8")
+        (src / ".venv" / "bin").mkdir(parents=True)
+        units = root / "units"
+        units.mkdir()
+        (units / "hermes-gateway.service").write_text(
+            f"[Service]\nExecStart=-{src / '.venv' / 'bin' / 'hermes'} gateway run\n",
+            encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k not in ("HERMES_SRC", "HERMES_HOME", "LOCALAPPDATA")}
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(install, "systemd_unit_dirs", lambda: (units,)), \
+             patch.object(install.Path, "home", staticmethod(lambda: root / "nowhere")):
+            self.assertEqual(install.find_hermes_src(None), src.resolve())
+
+
 class DesktopReplyNoteTests(unittest.TestCase):
     """In the desktop app a pending notice rides under the agent's reply, once."""
 
@@ -27534,6 +27630,21 @@ class InstallerPluginOnlyTests(unittest.TestCase):
             self._target_snapshot(), before,
             "the user's partial host state was not recoverable",
         )
+
+    def test_a_partial_host_no_patch_reverses_is_repaired_not_refused(self):
+        # A Hermes update or a `git checkout` put some targets back: no bundled
+        # patch reverses out of that, and /refine_fix used to stop here for good.
+        import install
+
+        self._write_markers(rels=list(install.PATCH_FILES[:3]))
+        with self._as_stock_host():
+            self.assertEqual(install.classify_host(self.src)[0], "partial")
+            self.assertIsNone(install.select_reverse_patch(self.src))
+            with patch.object(install, "say", lambda *_: None):
+                install.do_install(self._args(patch_only=True, plugin_only=False))
+            self.assertEqual(install.classify_host(self.src)[0], "patched")
+        self.assertTrue(self._read_metadata()["host"]["backup"],
+                        "the targets were replaced with no snapshot to undo it")
 
     def test_a_failed_apply_leaves_a_working_rollback(self):
         """Every fail() inside the apply happens with host files already changed."""

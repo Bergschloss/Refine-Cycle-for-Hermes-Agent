@@ -35,9 +35,40 @@ Auditor: Apodex (Deep Solve), six separate runs. Verification and fixes: Claude,
 
 One finding belongs to Hermes itself and is being reported there.
 
+## Round 2, 2026-09-19
+
+Auditor: Apodex, six angles it chose itself. First check: Antigravity, in a clone and then on a separate staging Hermes next to a live one. Final review and fixes: Claude.
+
+| Angle | Claimed | Real | Fixed |
+|---|---|---|---|
+| Installer on unusual checkouts | 3 | 3 | 3 |
+| Error fingerprints | 5 | 5 | 5 |
+| Daily limits and clocks | 3 | 1 | 1 |
+| "Did the lesson help" grader | 4 | 0 | none |
+| Rollback after a hand edit | 0 | 0 | none |
+| Data growth | 3 | 0 | none |
+| Found on the staging Hermes | 2 | 2 | 2 |
+
+### Fixed
+
+- **Memory rollback failed on every real Hermes.** Current Hermes writes memory through `_write_file`. It has no `save_to_disk`, so the rollback raised an error. The fake host in the tests still had the old method, so the suite passed anyway. The staging run found this. Rollback now writes through whichever writer the host has.
+- **`/refine_fix` could not repair a half-patched Hermes.** When an update or a `git checkout` restores some patched files but not others, no patch reverses cleanly, and the installer refused to continue. It now takes a snapshot, returns the files to the checkout's own versions, and patches again, the same way it handles an outdated patch.
+- **Installer.** A systemd `ExecStart=-…` prefix hid the Hermes checkout. Rollback failed when a folder had been removed. A rollback whose patch file no longer ships could restore the wrong set of files; it now refuses instead.
+- **Error fingerprints.** "exited with code 1" and "exited with code 137" merged into one fingerprint, and so did two different ports on `[::1]`. Other cases split one error into two: a quote cut off at the end, a Python exception group, and `main.py:42` read as a host and port.
+- **A timestamp years in the future** blocked a repeat edit and stretched the cooldown by years. Such timestamps are now ignored.
+- **Outcome of a failure.** The window that follows a failure grew from 6 messages to 24. A repair the agent actually made now outranks the word "stop" in what it wrote.
+
+### Rejected
+
+- **Grader changes.** `lesson_effect_checker.py` is the frozen grader of the pre-registered experiment, and its SHA-256 is in the report. Changing it would change how finished results are scored.
+- **Reading the journal backwards.** It read raw lines. In the journal one edit has several records, so this reported rolled-back edits as applied.
+- **A one-year limit on backups of applied edits.** It would silently end the promise that every applied edit can be undone.
+- **A cap on the audit window, and a ledger change.** Each broke tests that guard deliberate behaviour.
+- **Daily limits keyed to the UTC day.** Correct, and intended.
+
 ## How the checks work
 
 1. **Audit.** The auditor gets one angle per run and must give a code trace, a breaking input, a failing test and a fix for every finding.
-2. **First check.** A second agent runs each test on the old code, applies the fix on a branch, and runs the full suite: 1,320 tests on Windows and Linux, plus the desktop probe.
+2. **First check.** A second agent runs each test on the old code, applies the fix on a branch, and runs the full suite: 1,331 tests on Windows and Linux, plus the desktop probe.
 3. **Staging, from round 2.** Fixes that pass run on a separate Hermes install with real hooks and a real gateway, next to a live one that is never touched.
 4. **Final review.** Claude reviews every fix that touches the journal, locks, rollback, security or the installer before it merges.

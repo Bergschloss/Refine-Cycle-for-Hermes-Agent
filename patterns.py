@@ -139,7 +139,7 @@ def _preserve_http_status(text: str) -> str:
 # digits around its colons, and a port inside a path (``/v2/8080/items``) has no
 # host:port colon, so both keep collapsing.
 _EXIT_CODE_NUM = re.compile(
-    r"(?i)\bexit(?:\s*(?:code|status)|code|status)\b\s*[:=]?\s*(\d+)"
+    r"(?i)\b(?:exit(?:\s*(?:code|status)|code|status)|exited\s+with\s+(?:exit\s+)?code|returned\s+a\s+non-zero\s+code)\b\s*[:=]?\s*(\d+)"
 )
 _SIGNAL_NUM = re.compile(r"(?i)\bsignal\b\s*[:=]?\s*(\d+)")
 _PORT_WORD_NUM = re.compile(r"(?i)\bport\b\s*[:=]?\s*(\d+)")
@@ -171,8 +171,9 @@ _PORT_DNS_NUM = re.compile(
 _PORT_CONTEXT_NUM = re.compile(
     r"(?i)\b(?:connect(?:ing|ed)?\s+to|connection\s+to|dial(?:ing)?(?:\s+to)?"
     r"|upstream|proxy|hostname|host|server|address)\b\s*[:=]?\s*"
-    r"[a-z][\w-]*(?:\.[\w-]+)*:(\d{1,5})\b(?![:.]\d)"
+    r"([a-z][\w-]*(?:\.[\w-]+)*):(\d{1,5})\b(?![:.]\d)"
 )
+_PORT_IPV6_LOOPBACK_NUM = re.compile(r"(?i)(?:\[::1\]|::1):(\d{1,5})\b(?![:.]\d)")
 # ``name.py:12`` is a source location, not a host:port. Kept deliberately small:
 # the suffixes that actually appear before a line number in tool output. A
 # suffix missing from here only costs a false port preservation on that one
@@ -213,6 +214,13 @@ def _glue_dns_port(match: "re.Match[str]") -> str:
     return _glue_group(match, "netport", 2)
 
 
+def _glue_context_port(match: "re.Match[str]") -> str:
+    """Preserve a context-introduced port unless the "host" is really a source file."""
+    if match.group(1).split(".")[-1].lower() in _SOURCE_FILE_SUFFIXES:
+        return match.group(0)
+    return _glue_group(match, "netport", 2)
+
+
 def _preserve_semantic_numbers(text: str) -> str:
     """Shield exit codes, ports and signals before the blanket digit rule.
 
@@ -227,7 +235,8 @@ def _preserve_semantic_numbers(text: str) -> str:
     text = _PORT_LOCALHOST_NUM.sub(lambda m: _glue_group(m, "netport"), text)
     text = _PORT_IPV4_NUM.sub(lambda m: _glue_group(m, "netport"), text)
     text = _PORT_DNS_NUM.sub(_glue_dns_port, text)
-    text = _PORT_CONTEXT_NUM.sub(lambda m: _glue_group(m, "netport"), text)
+    text = _PORT_CONTEXT_NUM.sub(_glue_context_port, text)
+    text = _PORT_IPV6_LOOPBACK_NUM.sub(lambda m: _glue_group(m, "netport"), text)
     return text
 
 
@@ -243,7 +252,8 @@ _NORMALIZERS = [
     # (``Don't``, ``doesn't``) is not treated as an opening/closing quote and
     # collapsed to ``dont``/``doesnt`` — that mangling silently re-partitioned
     # the fingerprint of any error phrased with a contraction.
-    (re.compile(r"(?<![a-zA-Z])'([^']*)'(?![a-zA-Z])"), r"\1"),
+    (re.compile(r"(?<![a-zA-Z])'([^']*)'(?![a-zA-Z])"
+           r"|(?<![a-zA-Z])'([^']*)$"), r"\1\2"),
     # CLI switches, before the path rule can mistake one for a single-segment
     # POSIX path — see _CLI_FLAG above. A trailing "." is stripped from the
     # flag itself (not just excluded from the match, the way a comma already
@@ -287,7 +297,8 @@ def _is_python_exception_line(line: str) -> bool:
 
 
 # A complete double-quoted token, honouring backslash escapes.
-_DOUBLE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+# A complete double-quoted token, honouring backslash escapes.
+_DOUBLE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"|"(?:[^"\\]|\\.)*$')
 
 
 def _strip_quotes(text: str) -> str:
@@ -300,10 +311,15 @@ def _strip_quotes(text: str) -> str:
     entire purpose. The volatile pieces inside (ids, paths, timestamps) are
     already handled by the rules below, so keeping the words costs nothing.
 
-    Tokenizing matters: a naive ``"[^"]*"`` regex matches from the closing quote
-    of one JSON key to the opening quote of the next, mangling the boundary.
+    Tokenizing matters: a naive `"[^"]*"` regex matches from the closing quote
+    of one JSON key to the opening quote of the next, mangling the boundary. An
+    unmatched delimiter (e.g. truncated output) carries no structural information,
+    so strip it rather than letting it leak into the shape.
     """
-    return _DOUBLE_QUOTED.sub(lambda match: match.group(0)[1:-1], text)
+    def _drop_quote(match):
+        s = match.group(0)
+        return s[1:-1] if s.endswith('"') else s[1:]
+    return _DOUBLE_QUOTED.sub(_drop_quote, text)
 
 
 def normalize_error(content: str) -> str:
@@ -338,7 +354,10 @@ def normalize_error(content: str) -> str:
     traceback_headers = [
         index
         for index, line in enumerate(lines)
-        if re.fullmatch(r"Traceback \(most recent call last\):\s*", line)
+        if re.fullmatch(
+            r"(?:(?:\+\s+)?Exception Group )?Traceback \(most recent call last\):\s*",
+            line,
+        )
     ]
     if traceback_headers:
         exception_line = None
@@ -350,6 +369,22 @@ def normalize_error(content: str) -> str:
                 else len(lines)
             )
             block = lines[start:end]
+            # Python 3.11+ exception groups print a different header and wrap every
+            # line in box art, so the normal column-0 detection never fires; pull the
+            # terminal sub-exception instead (the group wrapper line is framework noise).
+            if re.fullmatch(
+                r"(?:\+\s+)?Exception Group Traceback \(most recent call last\):\s*",
+                lines[traceback_headers[position]],
+            ):
+                for ln in reversed(block):
+                    cleaned = ln.lstrip(" |")
+                    if not cleaned.strip():
+                        continue
+                    if _is_python_exception_line(cleaned.strip()):
+                        exception_line = cleaned.strip()
+                        break
+                if exception_line:
+                    continue
             # Find the block's terminal non-wrapper line, and its index, so a
             # multiline message can be joined back from it.
             terminal = ""

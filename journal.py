@@ -2062,7 +2062,8 @@ def model_run_limit_reached() -> bool:
 def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:
     """Return True when an identical edit exists or journal is unreadable (fail closed)."""
     target = proposal_hash(proposal)
-    cutoff = time.time() - (within_days * 86400)
+    now = time.time()
+    cutoff = now - (within_days * 86400)
     try:
         all_entries = _load_entries()
     except IOError:
@@ -2072,7 +2073,16 @@ def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:
     for entry in all_entries:
         if entry.get("outcome") not in _CONSUMED_EDIT_OUTCOMES:
             continue
-        if (entry.get("ts") or 0) >= cutoff and proposal_hash(entry.get("proposal", {})) == target:
+        ts = entry.get("ts")
+        if (
+            not isinstance(ts, (int, float))
+            or isinstance(ts, bool)
+            or not math.isfinite(float(ts))
+            or ts <= 0
+            or ts > now + 300
+        ):
+            continue
+        if ts >= cutoff and proposal_hash(entry.get("proposal", {})) == target:
             prior = entry.get("proposal", {})
             if entry.get("outcome") == "applied" and prior.get("kind") == "memory":
                 # MEMORY.md has other writers. An applied entry one of them has
@@ -2189,6 +2199,7 @@ def _content_digest(content: str) -> str:
 def content_digest(content: str) -> str:
     """Public wrapper over the internal digest used by planning baseline capture."""
     return _content_digest(content)
+
 
 
 def skill_baseline(name: str) -> Optional[Dict[str, Any]]:
@@ -2448,6 +2459,26 @@ def _memory_file_lock(store: Any, target: str):
             scrub_text(str(exc)),
         )
         return nullcontext()
+
+
+def _persist_memory_target(store: Any, target: str, values: List[str]) -> None:
+    """Write one memory target back through whichever writer this Hermes has.
+
+    Current Hermes has no ``save_to_disk``: its store writes through the static
+    ``_write_file(path, entries)``. Calling ``save_to_disk`` there raised, so every
+    memory rollback on a real host failed while the fake host in the tests, which
+    still had it, passed.
+    """
+    save = getattr(store, "save_to_disk", None)
+    if callable(save):
+        save(target)
+        return
+    write = getattr(store, "_write_file", None)
+    path_for = getattr(store, "_path_for", None)
+    if callable(write) and callable(path_for):
+        write(path_for(target), list(values))
+        return
+    raise RuntimeError("this Hermes memory store has no writer refine knows")
 
 
 def _reload_memory_target(store: Any, target: str) -> str:
@@ -3133,7 +3164,7 @@ def _rollback_memory_locked(entry_id: str) -> Dict[str, Any]:
             if entry.get("outcome") != "rollback_prepared":
                 entry = finalize(entry_id, "rollback_prepared")
             del values[position]
-            store.save_to_disk(target)
+            _persist_memory_target(store, target, values)
     except Exception as exc:
         latest = get_entry(entry_id) or entry
         if not rollback_target_matches(latest):

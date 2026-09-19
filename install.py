@@ -474,15 +474,22 @@ def find_hermes_src(explicit: str | None) -> Path:
         # skip it rather than index into an empty split.
         for line in reversed(text.splitlines()):
             s = line.strip()
-            if s.startswith("ExecStart=") and s.split("=", 1)[1].split():
-                first = s.split("=", 1)[1].split()[0]
-                # .../venv/bin/python|hermes -> walk up to the checkout root
-                p = Path(first)
-                for parent in p.parents:
-                    if (parent / "hermes_cli" / "plugins.py").is_file():
-                        candidates.append(parent)
-                        break
-                break
+            if not s.startswith("ExecStart="):
+                continue
+            rhs = s.split("=", 1)[1].split()
+            if not rhs:
+                # A bare `ExecStart=` is systemd's reset directive and names no binary.
+                continue
+            first = rhs[0].lstrip("-@+:!")   # ExecStart=-/+/@/!/: prefixes attach to path
+            if not first:
+                continue
+            # .../venv/bin/python|hermes -> walk up to the checkout root
+            p = Path(first)
+            for parent in p.parents:
+                if (parent / "hermes_cli" / "plugins.py").is_file():
+                    candidates.append(parent)
+                    break
+            break
     # Desktop layout: a `git` install puts the checkout INSIDE the Hermes data
     # directory (%LOCALAPPDATA%\hermes\hermes-agent on Windows), which is not
     # reachable by the by-name scan of ~ below -- "AppData" does not contain
@@ -1393,6 +1400,21 @@ def do_rollback(args) -> None:
 
     host = meta.get("host") or {}
     recorded_patch = patch_by_name(host.get("patch"))
+    if not recorded_patch and host.get("patch"):
+        # The file is gone, but its NAME still tells us its marker topology. A
+        # fallback to the hardcoded default topology is harmless only when the
+        # two agree; a cross-family record (e.g. an 0.21 revision) would restore
+        # the wrong file set, so refuse rather than guess.
+        recorded_markers = patch_markers(Path(host["patch"]))
+        if recorded_markers != patch_markers(None):
+            fail(
+                f"recorded patch {host['patch']} no longer ships with this "
+                f"installer, and this installer cannot reconstruct its host "
+                f"topology. Backups present: "
+                f"{sorted(p.name for p in mdir.glob('host-backup-*.zip')) or 'none'}. "
+                "Re-run this installer (or `git apply -R`) from a copy that still "
+                "carries that patch revision, and roll back from there."
+            )
     restore_targets = patch_content_files(recorded_patch) if recorded_patch else PATCH_FILES
     backup_value = host.get("backup")
     moved_on = False
@@ -1425,6 +1447,7 @@ def do_rollback(args) -> None:
                 restored = td_root / rel
                 target = src / rel
                 if restored.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(restored, target)
             for rel in host.get("created_files", []):
                 target = src / rel
@@ -1636,17 +1659,22 @@ def do_install(args) -> None:
         host_backup_recorded = True
         say(f"Pre-reverse backup recorded: {meta['host']['backup']}")
         reverse = select_reverse_patch(src)
-        if reverse is None:
-            fail(
-                "partial host state, but no bundled patch reverses cleanly out of it; "
-                "cannot safely reach stock. `python install.py --rollback` if this "
-                "installer applied it, otherwise `git checkout` the patch targets."
+        if reverse is not None:
+            rb = run_git(src, "apply", "-R", str(reverse))
+            say(
+                f"Partial patch state detected; attempted reverse of {reverse.name} to "
+                f"reach stock (rc={rb.returncode})."
             )
-        rb = run_git(src, "apply", "-R", str(reverse))
-        say(
-            f"Partial patch state detected; attempted reverse of {reverse.name} to "
-            f"reach stock (rc={rb.returncode})."
-        )
+        else:
+            # Some targets carry the patch and some do not (a Hermes update or a
+            # `git checkout` put one back), so no patch reverses cleanly: `git apply
+            # -R` needs every hunk present. Same way out as an outdated host, after
+            # the backup above: return the targets to the checkout's own version.
+            # Refusing here left /refine_fix unable to repair the plugin.
+            restored, replaced = return_patch_targets_to_head(src, detected)
+            say(f"Partial patch state detected; returned {restored} patch files to the checkout's own version.")
+            if replaced:
+                say(f"  Replaced files that differed from the checkout: {', '.join(replaced)}")
         state, detail = classify_host(src)
         if state not in ("stock", "patched"):
             fail(f"After reverse the host is still not installable: {state} — {detail}")
