@@ -8,6 +8,9 @@ venv/
 # Runtime data (may contain trajectory/session data)
 refine_journal.jsonl
 refine_journal.jsonl.pre-update-*
+# An unfinished record a crash left behind, moved aside on the next append. It
+# is a journal fragment, so it is trajectory data like the journal itself.
+refine_journal.jsonl.torn
 skill_stats.json
 skill_stats.json.pre-update-*
 prompt_notes.json

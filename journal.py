@@ -1707,12 +1707,34 @@ def _last_line_start(handle: Any, size: int) -> int:
     return 0
 
 
-def _load_entries_state() -> "tuple[List[Dict[str, Any]], str]":
-    """Return collapsed entries plus ``ok``, ``absent``, or ``unreadable``."""
+def _load_entries_state(
+    *, torn_out: Optional[Dict[str, bool]] = None
+) -> "tuple[List[Dict[str, Any]], str]":
+    """Return collapsed entries plus ``ok``, ``absent``, or ``unreadable``.
+
+    ``torn_out``, when given a dict, is filled in place with ``torn``: whether an
+    unfinished final record was skipped for this read. It is an out-parameter for
+    the same reason the collectors in ``core`` use them -- two passes can read at
+    once, so this cannot be a module global -- and it exists because "the tail was
+    skipped" and "the journal is whole" are different facts that the recovering
+    read otherwise reports identically. ``_load_entries_for_gate`` is the caller
+    that must tell them apart.
+    """
     path = journal_read_path()
 
     def _read():
-        data, _torn = _split_torn_tail(path.read_bytes())
+        data, torn = _split_torn_tail(path.read_bytes())
+        if torn_out is not None:
+            torn_out["torn"] = bool(torn)
+        if torn:
+            # Counted, never echoed: the bytes are an unfinished record and may
+            # carry trajectory content, so only the fact and the size are logged.
+            logger.warning(
+                "Journal read skipped an unfinished final record (%d bytes); it was "
+                "written by a crashed or still-running writer and is not yet part of "
+                "the journal",
+                len(torn),
+            )
         text = data.decode("utf-8", errors="strict")
         # The same universal newlines text mode applied. json.dumps escapes CR
         # and LF inside strings, so a raw one is always a record boundary.
@@ -1734,6 +1756,47 @@ def _load_entries() -> List[Dict[str, Any]]:
     if state == "unreadable":
         raise IOError("Journal unreadable")
     return entries_value
+
+
+def _load_entries_for_gate() -> List[Dict[str, Any]]:
+    """Like ``_load_entries``, but an unfinished tail also raises.
+
+    The budget, model-run and dedup gates read the journal and then act on the
+    answer. Recovering from a torn tail is right for reading history; for these
+    three it is not, because the skipped record may be the very edit another pass
+    is applying right now -- the reader would count one fewer and conclude there
+    is budget left. AGENTS.md calls this out by name: anything that reads state
+    and then acts on it has to hold under two simultaneous passes.
+
+    Raising here keeps the existing ``except IOError`` branches -- which already
+    return the ceiling, or ``True`` for dedup -- as the single fail-closed policy.
+    It is self-healing rather than sticky: the refusal itself is journaled, and
+    that append moves the torn record aside, so the next pass reads cleanly.
+
+    The entries still come from ``_load_entries``, so this adds a condition to
+    the gates without moving the seam the dedup tests inject through. The tail is
+    probed separately; the two reads can disagree only by one record arriving in
+    between, and either read seeing a torn tail closes the gate, which is the
+    direction that is safe.
+    """
+    entries_value = _load_entries()
+    if _unfinished_tail_present():
+        raise IOError("Journal has an unfinished final record; counting fails closed")
+    return entries_value
+
+
+def _unfinished_tail_present() -> bool:
+    """Whether the journal currently ends in a record that was never finished.
+
+    An unreadable or absent journal is not this function's question -- the caller
+    has already asked it through ``_load_entries`` -- so any read problem here
+    answers ``False`` rather than inventing a second failure mode.
+    """
+    try:
+        _committed, torn = _split_torn_tail(journal_read_path().read_bytes())
+    except Exception:
+        return False
+    return bool(torn)
 
 
 def _load_entries_safe() -> "tuple[List[Dict[str, Any]], str]":
@@ -1817,6 +1880,14 @@ def _append_entry(entry: Dict[str, Any]) -> None:
                             aside.write(torn + b"\n")
                             aside.flush()
                             os.fsync(aside.fileno())
+                        # Say so: the record leaves the journal here, and a
+                        # sidecar nobody is told about is an invisible loss. The
+                        # size only -- the bytes may carry trajectory content.
+                        logger.warning(
+                            "Journal append moved an unfinished record (%d bytes) "
+                            "aside to %s.torn before writing this entry",
+                            len(torn), journal_path().name,
+                        )
                         handle.truncate(size - len(torn))
                         handle.flush()
                         os.fsync(handle.fileno())
@@ -2002,12 +2073,14 @@ def is_reversible(entry: Optional[Dict[str, Any]]) -> bool:
 def count_today_applied() -> int:
     """Count today's edits that are applied, reserved, or rollback-in-flight.
 
-    Returns max_edits_per_day() when the journal is unreadable, so the budget
-    gate stays closed rather than silently allowing unlimited edits.
+    Returns max_edits_per_day() when the journal is unreadable OR carries an
+    unfinished record, so the budget gate stays closed rather than silently
+    allowing unlimited edits. See ``_load_entries_for_gate`` for why the second
+    case belongs here and not in the plain read path.
     """
     today = datetime.now(timezone.utc).date()
     try:
-        all_entries = _load_entries()
+        all_entries = _load_entries_for_gate()
     except IOError:
         return max_edits_per_day()
     count = 0
@@ -2032,12 +2105,12 @@ def count_today_model_runs() -> int:
     ``entries()`` holds one logical record per pass, so a pass that went on to
     apply and roll back is still one. A pass reached a model when it made a
     primary attempt or its proposer subagent made an API call. Returns the
-    ceiling when the journal is unreadable, so the gate stays closed rather than
-    allowing unlimited calls.
+    ceiling when the journal is unreadable or carries an unfinished record, so
+    the gate stays closed rather than allowing unlimited calls.
     """
     today = datetime.now(timezone.utc).date()
     try:
-        all_entries = _load_entries()
+        all_entries = _load_entries_for_gate()
     except IOError:
         return max_model_runs_per_day()
     count = 0
@@ -2060,12 +2133,14 @@ def model_run_limit_reached() -> bool:
 
 
 def was_applied_recently(proposal: Dict[str, Any], within_days: int) -> bool:
-    """Return True when an identical edit exists or journal is unreadable (fail closed)."""
+    """Return True when an identical edit exists, or the journal cannot be fully
+    read (fail closed) -- including a journal carrying an unfinished record, which
+    may be the identical edit another pass is applying right now."""
     target = proposal_hash(proposal)
     now = time.time()
     cutoff = now - (within_days * 86400)
     try:
-        all_entries = _load_entries()
+        all_entries = _load_entries_for_gate()
     except IOError:
         return True
     live_memory: Optional[List[str]] = None

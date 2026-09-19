@@ -25302,6 +25302,99 @@ class AuditRound2Tests(unittest.TestCase):
         self.assertLessEqual(core.auto_cooldown_remaining_minutes(),
                              config.auto_cooldown_minutes())
 
+    def test_an_unfinished_tail_keeps_the_budget_gate_closed(self):
+        """Skipping a crash's unfinished tail must not reopen the budget gate.
+
+        The read path recovers from a torn tail, which is right. The counting
+        paths inherited it: a reader that arrives between a writer's write and
+        its fsync now sees a journal SHORT by the record in flight and answers
+        'there is budget left'. Before the torn-tail change the same bytes raised
+        IOError and the gates returned their ceiling. AGENTS.md names this exact
+        read-then-act hazard, and these three gates are the blast-radius limit.
+        """
+        proposal = {"action": "patch", "kind": "skill", "name": "n0"}
+        for index in range(config.max_edits_per_day() - 1):
+            journal.log(
+                trigger="manual", reason=f"edit {index}", session_id="s",
+                proposal={"action": "patch", "kind": "skill", "name": f"n{index}"},
+                outcome="applied",
+            )
+        journal.log(
+            trigger="manual", reason="in flight", session_id="s",
+            proposal=proposal, outcome="applied",
+        )
+        path = journal.journal_path()
+        whole = path.read_bytes()
+        # The record in flight: written, not yet newline-terminated.
+        last_start = whole.rstrip(b"\n").rfind(b"\n") + 1
+        path.write_bytes(whole[:last_start] + whole[last_start:].rstrip(b"\n")[:-15])
+
+        entries_value, state = journal._load_entries_safe()
+        self.assertEqual(state, "ok", "the read path still recovers")
+        self.assertEqual(
+            journal.count_today_applied(), config.max_edits_per_day(),
+            "an unfinished tail must count as unreadable for the budget",
+        )
+        self.assertTrue(journal.daily_limit_reached())
+        self.assertEqual(journal.count_today_model_runs(), config.max_model_runs_per_day())
+        self.assertTrue(
+            journal.was_applied_recently(proposal, 30),
+            "dedup must fail closed while a record is in flight",
+        )
+        # And the mirror direction: an intact journal still answers honestly.
+        path.write_bytes(whole)
+        self.assertEqual(journal.count_today_applied(), config.max_edits_per_day())
+        self.assertFalse(journal.was_applied_recently(
+            {"action": "patch", "kind": "skill", "name": "never-proposed"}, 30
+        ))
+
+    def test_a_discarded_torn_record_is_logged_on_both_paths(self):
+        """A record set aside must not vanish silently.
+
+        Neither the read nor the append path said anything, so a dead writer's
+        record disappeared with the only trace being a sidecar file nobody is
+        told about (AGENTS.md: a failure must be distinguishable, not invisible).
+        """
+        journal.log(
+            trigger="test", reason="first", session_id="s",
+            proposal={"action": "no_op"}, outcome="no_op",
+        )
+        path = journal.journal_path()
+        with path.open("ab") as handle:
+            handle.write(b'{"id":"zzq-probe-fragment')
+
+        with self.assertLogs(journal.logger, level="WARNING") as read_logs:
+            _entries, state = journal._load_entries_safe()
+        self.assertEqual(state, "ok")
+        self.assertTrue(
+            any("unfinished" in line.lower() for line in read_logs.output),
+            f"the read path must report the skipped tail: {read_logs.output}",
+        )
+
+        with self.assertLogs(journal.logger, level="WARNING") as append_logs:
+            journal.log(
+                trigger="test", reason="second", session_id="s",
+                proposal={"action": "no_op"}, outcome="no_op",
+            )
+        self.assertTrue(
+            any("aside" in line.lower() for line in append_logs.output),
+            f"the append path must report what it moved aside: {append_logs.output}",
+        )
+        # The log must carry no journal content, only the fact and a size.
+        self.assertFalse(any("zzq-probe-fragment" in line for line in
+                             read_logs.output + append_logs.output))
+
+    def test_the_torn_sidecar_is_gitignored_like_the_journal(self):
+        """``refine_journal.jsonl.torn`` holds trajectory fragments.
+
+        AGENTS.md keeps the journal and its derivatives out of git for that
+        reason. A gitignore entry for ``refine_journal.jsonl`` does not cover
+        ``refine_journal.jsonl.torn``, so the sidecar showed up as untracked in a
+        tree where runtime data lives.
+        """
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").split()
+        self.assertIn("refine_journal.jsonl.torn", ignored)
+
     def test_an_observed_repair_beats_a_stop_word_and_a_long_exchange(self):
         failure = {"role": "tool", "tool_name": "bash", "content": '{"exit_code": 1}'}
         messages = [failure, {"role": "assistant", "content": "I will stop retrying that."},
