@@ -195,6 +195,14 @@ def _verify_tree(tree: Path, tag: str) -> None:
         raise ValueError(
             f"release {tag} contains plugin version {_manifest_version(tree) or 'unknown'}"
         )
+    # The release's installer only imports `core`, so a syntax error in any other
+    # module, `__init__.py` included, installed cleanly and the plugin was dead
+    # on the next start. Compiled in memory: nothing is written into the tree.
+    for module in sorted(tree.glob("*.py")):
+        try:
+            compile(module.read_bytes(), str(module), "exec")
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(f"release {tag} does not parse: {module.name}: {exc}") from exc
 
 
 def _download_release(tag: str, workdir: Path) -> Path:

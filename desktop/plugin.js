@@ -15,6 +15,9 @@
  */
 
 import { cn, haptic, host, Tip } from '@hermes/plugin-sdk'
+// Read off the namespace, never imported by name: a named import of an export
+// this app does not have fails the whole module, and with it the status bar.
+import * as sdk from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -31,6 +34,7 @@ const listeners = new Set()
 let current = null
 let pluginCtx = null
 let timer = null
+let restartTimer = null
 let succeeded = false
 // Bumped by dispose. A refresh already in flight when the plugin is disposed
 // finishes after it, and without this it rescheduled itself and re-fired the
@@ -117,7 +121,10 @@ function afterRestart(state) {
 async function refresh() {
   const mine = generation
   try {
-    const state = await ask('desktop-state')
+    // Tell the backend whether this app renders the `::refine` card. On an app
+    // without transcript directives the card would show under a reply as raw
+    // text, so the backend only appends it when this says it can render.
+    const state = await ask(CARDS ? 'desktop-state cards' : 'desktop-state')
     if (mine !== generation) return
     publish(state)
     afterRestart(state)
@@ -148,7 +155,7 @@ async function refresh() {
         pluginCtx.storage.set('restartingTo', state.version)
         pluginCtx.storage.set('restartingFrom', state.backend || '')
         pluginCtx.storage.set('restartingAt', Date.now())
-        setTimeout(recycleBackend, 1500)
+        restartTimer = setTimeout(recycleBackend, 1500)
         // Keep polling. Recycling the backend leaves this renderer mounted, so
         // nothing else would ever call refresh() again, and the confirmation
         // ("… is running.") is only sent once the new backend answers.
@@ -245,6 +252,7 @@ function RefineStatus() {
  */
 const DIRECTIVE_AREA = 'transcript.directives'
 const DIRECTIVE_NAME = 'refine'
+const CARDS = typeof sdk.TRANSCRIPT_DIRECTIVE_AREA === 'string'
 
 function RefineCard() {
   const [state, setState] = useState(current)
@@ -316,6 +324,10 @@ export default {
       generation += 1
       clearTimeout(timer)
       timer = null
+      // A restart scheduled just before dispose must not fire for a plugin that
+      // is gone.
+      clearTimeout(restartTimer)
+      restartTimer = null
       listeners.clear()
       pluginCtx = null
       current = null

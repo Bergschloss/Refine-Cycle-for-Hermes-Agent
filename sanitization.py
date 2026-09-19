@@ -58,7 +58,15 @@ _FIXED_PATTERNS = [
     re.compile(
         r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?"
         r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
-        re.S,
+        re.S | re.I,
+    ),
+    # A key a log or `head` cut before its END line: the header and every body
+    # or header line after it. Without END the block above matched nothing and
+    # the whole key body leaked.
+    re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+        r"(?:[ \t]*\r?\n[ \t]*(?:[A-Za-z0-9+/=]{8,}|[A-Za-z-]+:[^\r\n]*))*",
+        re.I,
     ),
 ]
 
@@ -140,6 +148,12 @@ _CANONICAL_SCHEME_MARKERS = {
 _URL_CREDENTIALS = re.compile(
     r"(?<![A-Za-z0-9+.-])([a-zA-Z][a-zA-Z0-9+.-]*://)"
     r"[^\s/?#]+@(?=[^\s/?#]+(?:[/?#]|\s|$))"
+)
+# `user:password@host` without a scheme: a DSN handed to a client, a pasted
+# connection string. `git@github.com:org/repo` has no password and is left alone.
+_BARE_CREDENTIALS = re.compile(
+    r"(?<![\w+.:/@%-])([A-Za-z0-9._%+-]{1,64}):[^\s:@/]{3,}@"
+    r"(?=[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::\d+)?(?:[/?#\s]|$))"
 )
 _ENV_SECRET = re.compile(
     r"(?m)^(\s*(?:export\s+|set\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*\s*=\s*)\S+$"
@@ -253,6 +267,7 @@ def _scrub_chunk(text: str) -> str:
     for pattern in _FIXED_PATTERNS:
         text = pattern.sub(_REDACTED, text)
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
+    text = _BARE_CREDENTIALS.sub(r"\1:[REDACTED]@", text)
     text = _ENV_SECRET.sub(r"\1[REDACTED]", text)
     text = _AUTH_TOKEN.sub(
         lambda m: f"{m.group('label')}{m.group('quote')}{_REDACTED}{m.group('close')}",

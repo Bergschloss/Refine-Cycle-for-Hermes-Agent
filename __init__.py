@@ -812,9 +812,31 @@ def _extract_binaries(cmd: str) -> list:
 
 
 
+_FENCE = re.compile(r"^[ 	]{0,3}(`{3,}|~{3,})")
+
+
+def _open_fence(text: str) -> bool:
+    """Whether ``text`` ends inside a fenced code block (CommonMark rules, simplified)."""
+    opener = ""
+    for line in text.splitlines():
+        match = _FENCE.match(line)
+        if not match:
+            continue
+        marker = match.group(1)
+        if not opener:
+            opener = marker
+        elif marker[0] == opener[0] and len(marker) >= len(opener) and not line.strip()[len(marker):].strip():
+            opener = ""
+    return bool(opener)
+
+
 def _on_transform_llm_output(response_text: Any = None, platform: str = "", **kwargs) -> Optional[str]:
     """In the desktop app, carry a pending notice under the agent's reply, once."""
     if platform != "desktop" or not isinstance(response_text, str) or not response_text.strip():
+        return None
+    if _open_fence(response_text):
+        # A reply cut off inside a code block would swallow the card as code.
+        # Checked before the note is claimed, so the card waits for the next reply.
         return None
     note = notices.desktop_reply_note()
     return f"{response_text.rstrip()}\n\n{note}" if note else None
@@ -1203,8 +1225,8 @@ async def _update_command_entry(raw_args: str = "") -> str:
     or ``desktop-start`` and gets JSON back; see ``notices.start_desktop_job``.
     """
     arg = (raw_args or "").strip()
-    if arg == "desktop-state":
-        return json.dumps(await asyncio.to_thread(notices.desktop_state))
+    if arg in ("desktop-state", "desktop-state cards"):
+        return json.dumps(await asyncio.to_thread(notices.desktop_state, arg.endswith(" cards")))
     if arg == "desktop-start":
         return json.dumps(await asyncio.to_thread(notices.start_desktop_job))
     return await _update_command()

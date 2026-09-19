@@ -6302,7 +6302,7 @@ class RefineTests(unittest.TestCase):
         self.assertEqual(state, "ok")
         self.assertTrue(len(entries) >= 1)
 
-    def test_journal_append_isolates_corrupt_tail_but_keeps_store_fail_closed(self):
+    def test_journal_append_moves_a_torn_tail_aside_and_the_store_stays_readable(self):
         journal.log(
             trigger="test", reason="first", session_id="s",
             proposal={"action": "no_op"}, outcome="no_op",
@@ -6311,17 +6311,46 @@ class RefineTests(unittest.TestCase):
         with path.open("ab") as handle:
             handle.write(b'{"id":"broken"')
             handle.flush()
+        # Before the next append: the unfinished record is not part of the
+        # journal, and everything committed before it reads.
+        entries_value, state = journal._load_entries_safe()
+        self.assertEqual(state, "ok")
+        self.assertEqual([entry["reason"] for entry in entries_value], ["first"])
         journal.log(
             trigger="test", reason="second", session_id="s",
             proposal={"action": "no_op"}, outcome="no_op",
         )
         raw = path.read_bytes()
-        self.assertIn(b'{"id":"broken"\n', raw)
+        self.assertNotIn(b'{"id":"broken"', raw)
+        aside = path.with_name(path.name + ".torn")
+        self.assertEqual(aside.read_bytes(), b'{"id":"broken"\n')
         entries_value, state = journal._load_entries_safe()
-        self.assertEqual(entries_value, [])
-        self.assertEqual(state, "unreadable")
-        self.assertTrue(journal.daily_limit_reached())
+        self.assertEqual(state, "ok")
+        self.assertEqual([entry["reason"] for entry in entries_value], ["first", "second"])
         self.assertNotIn("os.replace", inspect.getsource(journal._append_entry))
+
+    def test_a_whole_bad_line_still_fails_closed(self):
+        # Not a crash's shape: terminated, so it was written whole. Refuse.
+        journal.log(
+            trigger="test", reason="first", session_id="s",
+            proposal={"action": "no_op"}, outcome="no_op",
+        )
+        with journal.journal_path().open("ab") as handle:
+            handle.write(b'{"id":"broken"\n')
+        entries_value, state = journal._load_entries_safe()
+        self.assertEqual((entries_value, state), ([], "unreadable"))
+        self.assertTrue(journal.daily_limit_reached())
+
+    def test_a_tail_cut_inside_a_multibyte_character_is_torn_not_fatal(self):
+        journal.log(
+            trigger="test", reason="first", session_id="s",
+            proposal={"action": "no_op"}, outcome="no_op",
+        )
+        with journal.journal_path().open("ab") as handle:
+            handle.write('{"id":"x","reason":"café'.encode("utf-8")[:-1])
+        entries_value, state = journal._load_entries_safe()
+        self.assertEqual(state, "ok")
+        self.assertEqual([entry["reason"] for entry in entries_value], ["first"])
 
     def test_crash_inside_the_plugins_own_append_leaves_a_recoverable_journal(self):
         """A process death DURING _append_entry, not garbage appended after it.
@@ -6344,10 +6373,17 @@ class RefineTests(unittest.TestCase):
         # Die after the record is written but before it is durable. The bytes
         # are already in the file, so this reproduces the on-disk state a power
         # loss at that instant leaves -- including a partial trailing line.
+        real_fsync = os.fsync
+
         def die_before_durable(fd):
             with path.open("r+b") as truncating:
                 truncating.seek(0, os.SEEK_END)
                 end = truncating.tell()
+                if end <= len(intact):
+                    # An fsync before the record reached the journal (the lock
+                    # file, say). Dying here would cut the record already
+                    # committed, which no real crash can do.
+                    return real_fsync(fd)
                 # Chop the record mid-way: a valid JSON *prefix*, which is
                 # harder than obvious garbage -- it can look parseable right up
                 # until the closing brace turns out to be missing.
@@ -6365,25 +6401,27 @@ class RefineTests(unittest.TestCase):
         self.assertNotEqual(after_crash, intact)
         self.assertFalse(after_crash.endswith(b"\n"))
 
-        # While the tail is partial the store must not answer questions it
-        # cannot answer: reads fail closed and the daily budget refuses.
+        # The record that never finished is not part of the journal: what was
+        # committed before it still reads, so one crash does not stop refine.
         entries_value, state = journal._load_entries_safe()
-        self.assertEqual(entries_value, [])
-        self.assertEqual(state, "unreadable")
-        self.assertTrue(journal.daily_limit_reached())
+        self.assertEqual(state, "ok")
+        self.assertEqual([entry["reason"] for entry in entries_value], ["before crash"])
 
-        # The next append must isolate the partial line rather than continue it
-        # -- otherwise one crash silently corrupts the following record too.
+        # The next append moves the partial record aside instead of continuing
+        # it or leaving it behind as a whole bad line.
         journal.log(
             trigger="test", reason="after crash", session_id="s",
             proposal={"action": "no_op"}, outcome="no_op",
         )
         raw = path.read_bytes()
-        self.assertTrue(raw.startswith(after_crash))
-        self.assertGreater(len(raw), len(after_crash))
-        # The recovery record begins on its own line: the byte directly after
-        # the salvaged partial tail is a newline, not the start of new JSON.
-        self.assertEqual(raw[len(after_crash):len(after_crash) + 1], b"\n")
+        self.assertTrue(raw.startswith(intact))
+        torn = after_crash[len(intact):]
+        self.assertNotIn(torn, raw)
+        self.assertEqual(path.with_name(path.name + ".torn").read_bytes(), torn + b"\n")
+        entries_value, state = journal._load_entries_safe()
+        self.assertEqual(state, "ok")
+        self.assertEqual([entry["reason"] for entry in entries_value],
+                         ["before crash", "after crash"])
 
     def test_finalize_failure_keeps_prepared_recovery(self):
         original_finalize = journal.finalize
@@ -7422,6 +7460,30 @@ class RefineTests(unittest.TestCase):
             "PRIVATE KEY-----\nMIIkeybody\n-----END RSA PRIVATE KEY-----",
         )
         self.assertEqual(sanitization.scrub_text(rsa), "[REDACTED]")
+
+    def test_private_key_in_lowercase_or_cut_before_its_end_line_is_redacted(self):
+        body = "MIIBOgIBAAJBALRiMLAHude" + "QZ" * 8
+        lower = _fixture("-----begin rsa ", "private key-----\n" + body + "\n-----end rsa private key-----")
+        self.assertEqual(sanitization.scrub_text(lower), "[REDACTED]")
+        cut = _fixture(
+            "log:\n-----BEGIN RSA ",
+            "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n" + body + "\n" + body + "\n\nafter",
+        )
+        out = sanitization.scrub_text(cut)
+        self.assertNotIn(body, out)
+        self.assertNotIn("Proc-Type", out)
+        self.assertTrue(out.endswith("\n\nafter"), "prose after the key must survive")
+        public = "-----BEGIN PUBLIC KEY-----\n" + body
+        self.assertEqual(sanitization.scrub_text(public), public)
+
+    def test_password_in_a_connection_string_without_a_scheme_is_redacted(self):
+        self.assertEqual(
+            sanitization.scrub_text("connect " + "admin:" + "hunter2pass@db.internal:5432/app"),
+            "connect admin:[REDACTED]@db.internal:5432/app",
+        )
+        for kept in ("git clone git@github.com:org/repo.git",
+                     "meet at 10:30, mail a.b@example.com"):
+            self.assertEqual(sanitization.scrub_text(kept), kept)
 
     def test_token_and_apikey_auth_schemes_redact_without_erasing_scheme(self):
         """Audit 08-04: only bearer/basic were auth schemes, so `Token <hex>`
@@ -16747,9 +16809,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_update_check_can_be_turned_off(self):
         FakeHost.entry_config()["update_check"] = False
-        with patch.object(update_check, "_fetch_latest_release",
-                          side_effect=AssertionError("the network was used")):
+        # A plain mock, not one that raises: latest_release() swallows exceptions,
+        # so a raising fetch passed whether or not the network was used.
+        with patch.object(update_check, "_fetch_latest_release") as fetch:
             self.assertIsNone(update_check.update_available())
+            plugin_init.notices.check_update(now=1000.0)
+        fetch.assert_not_called()
 
     def test_status_names_an_available_update_as_a_warning(self):
         plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(
@@ -16986,6 +17051,21 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         with self.assertRaises(ValueError):
             update_check._verify_tree(tree, "v99.0.0")
         update_check._verify_tree(tree, "v99.0.1")
+
+    def test_a_release_whose_python_does_not_parse_is_refused_before_install(self):
+        # The release's own installer only imports `core`; a broken `__init__.py`
+        # installed cleanly and the plugin was dead on the next start.
+        tree = self._release_tree("99.0.1")
+        (tree / "core.py").write_text("X = 1\n", encoding="utf-8")
+        (tree / "__init__.py").write_text("def broken(:\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            update_check._verify_tree(tree, "v99.0.1")
+        self.assertIn("__init__.py", str(caught.exception))
+        (tree / "__init__.py").write_text("def fine():\n    return 1\n", encoding="utf-8")
+        update_check._verify_tree(tree, "v99.0.1")
+        self.assertEqual(sorted(p.name for p in tree.iterdir()),
+                         ["__init__.py", "core.py", "install.py", "plugin.yaml"],
+                         "verification must not write .pyc files into the tree")
 
     def test_refine_update_command_runs_off_the_event_loop(self):
         """The gateway calls handlers on its event loop; the update must not run there."""
@@ -25163,7 +25243,7 @@ class DesktopReplyNoteTests(unittest.TestCase):
         return plugin_init._on_transform_llm_output(response_text=text, platform=platform)
 
     def test_the_card_goes_under_one_reply_per_release(self):
-        self._seed(desktop_seen=True, latest_tag="v1.3.15")
+        self._seed(desktop_seen=True, desktop_cards=True, latest_tag="v1.3.15")
         with self._working(True), \
              patch.object(update_check, "installed_version", return_value="1.3.14"):
             first = self._reply()
@@ -25172,14 +25252,14 @@ class DesktopReplyNoteTests(unittest.TestCase):
         self.assertIsNone(second, "the same release must not follow every reply")
 
     def test_a_broken_plugin_gets_the_card_even_without_a_release(self):
-        self._seed(desktop_seen=True)
+        self._seed(desktop_seen=True, desktop_cards=True)
         with self._working(False), \
              patch.object(update_check, "installed_version", return_value="1.3.14"):
             self.assertEqual(self._reply(), "Done.\n\n::refine{}")
             self.assertIsNone(self._reply())
 
     def test_nothing_is_added_when_there_is_nothing_to_say(self):
-        self._seed(desktop_seen=True)
+        self._seed(desktop_seen=True, desktop_cards=True)
         with self._working(True), \
              patch.object(update_check, "installed_version", return_value="1.3.14"):
             self.assertIsNone(self._reply())
@@ -25193,7 +25273,7 @@ class DesktopReplyNoteTests(unittest.TestCase):
         self.assertIsNone(second)
 
     def test_other_surfaces_and_empty_replies_are_left_alone(self):
-        self._seed(desktop_seen=True, latest_tag="v1.3.15")
+        self._seed(desktop_seen=True, desktop_cards=True, latest_tag="v1.3.15")
         with self._working(True), \
              patch.object(update_check, "installed_version", return_value="1.3.14"):
             self.assertIsNone(self._reply(platform="telegram"))
@@ -25201,6 +25281,34 @@ class DesktopReplyNoteTests(unittest.TestCase):
             self.assertIsNone(self._reply(text="   "))
             self.assertEqual(self._reply(), "Done.\n\n::refine{}",
                              "skipped surfaces must not use up the card")
+
+    def test_an_app_that_cannot_render_the_card_gets_no_card(self):
+        # The half answers without "cards": no transcript directives in this app,
+        # so `::refine{}` would show as raw text. The status bar carries it.
+        self._seed(desktop_seen=True, desktop_cards=False, latest_tag="v1.3.15")
+        with self._working(True), \
+             patch.object(update_check, "installed_version", return_value="1.3.14"):
+            self.assertIsNone(self._reply())
+
+    def test_the_desktop_half_reports_whether_it_renders_cards(self):
+        with patch.object(self.notices, "check_update"):
+            self.notices.desktop_state(True)
+            self.assertIs(self.notices._load().get("desktop_cards"), True)
+            self.notices.desktop_state(False)
+            self.assertIs(self.notices._load().get("desktop_cards"), False)
+            state = json.loads(__import__("asyncio").run(plugin_init._update_command_entry("desktop-state cards")))
+        self.assertIn("working", state)
+        self.assertIs(self.notices._load().get("desktop_cards"), True)
+
+    def test_a_reply_cut_off_inside_a_code_block_waits_for_the_next_one(self):
+        self._seed(desktop_seen=True, desktop_cards=True, latest_tag="v1.3.15")
+        with self._working(True), \
+             patch.object(update_check, "installed_version", return_value="1.3.14"):
+            self.assertIsNone(self._reply(text="Here:\n```python\nprint(1)"))
+            self.assertIsNone(self._reply(text="~~~\ncode"))
+            closed = "Here:\n```python\nprint(1)\n```"
+            self.assertEqual(self._reply(text=closed), closed + "\n\n::refine{}",
+                             "an open fence must not use up the card")
 
     def test_the_hook_is_registered(self):
         hooks = {}

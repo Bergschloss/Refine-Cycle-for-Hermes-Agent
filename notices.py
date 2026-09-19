@@ -488,6 +488,9 @@ def desktop_reply_note() -> Optional[str]:
     try:
         state = _load()
         if state.get("desktop_seen"):
+            if not state.get("desktop_cards"):
+                # This app cannot render the card; its status bar says the same.
+                return None
             if not plugin_working():
                 event = f"fix:{hermes_version()}"
             else:
@@ -708,13 +711,19 @@ _job_lock = threading.Lock()
 _BACKEND_ID = f"{os.getpid()}-{time.time():.6f}"
 
 
-def desktop_state() -> Dict[str, Any]:
-    """What the desktop status bar shows. May look for a release, once a day."""
-    if not _load().get("desktop_seen"):
+def desktop_state(cards: bool = False) -> Dict[str, Any]:
+    """What the desktop status bar shows. May look for a release, once a day.
+
+    ``cards``: the app this half runs in renders the ``::refine`` card. An app
+    without transcript directives would show it as raw text under a reply.
+    """
+    known = _load()
+    if not known.get("desktop_seen") or bool(known.get("desktop_cards")) != cards:
         # The half is switched on and talking, so the "turn it on" notice is moot.
         with _mutation() as state:
             if state is not None:
                 state["desktop_seen"] = True
+                state["desktop_cards"] = cards
     check_update()
     with _job_lock:
         job = dict(_job) or None

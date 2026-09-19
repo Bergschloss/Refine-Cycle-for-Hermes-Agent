@@ -322,7 +322,23 @@ cardButton.p.onClick()
 await advance(1)
 check('the button starts the work on the backend',
   calls.request.slice(beforeCardClick).map((entry) => entry[1] && entry[1].arg), ['desktop-start'])
+// This stub SDK has no TRANSCRIPT_DIRECTIVE_AREA, like an app without transcript
+// directives: the half must not claim it can render the card.
+check('an app without directives does not ask for cards',
+  calls.request.some((entry) => entry[1] && entry[1].arg === 'desktop-state cards'), false)
 dispose()
+
+// A restart scheduled just before dispose must not fire for a plugin that is gone.
+withBridge()
+recycled = 0
+globalThis.__state = state({
+  job: { status: 'done', started: 9, restart: true, reply: 'RC updated to 1.3.13.' }
+})
+plugin.register(context())
+await advance(1)
+dispose()
+await advance(5000)
+check('dispose cancels a pending backend restart', recycled, 0)
 
 console.log(failures ? `${failures} failed` : 'all ok')
 process.exit(failures ? 1 : 0)

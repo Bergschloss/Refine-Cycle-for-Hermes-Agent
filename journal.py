@@ -1672,13 +1672,51 @@ def _replay_entries(lines: Iterable[str]) -> List[Dict[str, Any]]:
     return [latest[entry_id] for entry_id in order]
 
 
+def _split_torn_tail(data: bytes) -> "tuple[bytes, bytes]":
+    """Split off a final record a crash cut short: ``(committed, torn)``.
+
+    Every append is one whole JSON line, written and fsynced under the mutation
+    lock, so an unterminated last segment that does not decode is a write that
+    never finished -- a dead writer's, or one still in flight. It is not part of
+    the journal yet. Only that one shape is set aside: a terminated line that does
+    not decode, or a record that decodes but is malformed, still fails the store
+    closed, because neither comes from a crash.
+    """
+    end = max(data.rfind(b"\n"), data.rfind(b"\r")) + 1
+    tail = data[end:]
+    if not tail.strip():
+        return data, b""
+    try:
+        json.loads(tail.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return data[:end], tail
+    return data, b""
+
+
+def _last_line_start(handle: Any, size: int) -> int:
+    """Offset just after the last CR or LF in an open binary file, or 0."""
+    position = size
+    while position > 0:
+        step = min(65536, position)
+        position -= step
+        handle.seek(position)
+        chunk = handle.read(step)
+        cut = max(chunk.rfind(b"\n"), chunk.rfind(b"\r"))
+        if cut >= 0:
+            return position + cut + 1
+    return 0
+
+
 def _load_entries_state() -> "tuple[List[Dict[str, Any]], str]":
     """Return collapsed entries plus ``ok``, ``absent``, or ``unreadable``."""
     path = journal_read_path()
 
     def _read():
-        with path.open("r", encoding="utf-8", errors="strict") as handle:
-            return _replay_entries(handle)
+        data, _torn = _split_torn_tail(path.read_bytes())
+        text = data.decode("utf-8", errors="strict")
+        # The same universal newlines text mode applied. json.dumps escapes CR
+        # and LF inside strings, so a raw one is always a record boundary.
+        return _replay_entries(text.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
 
     try:
         entries_value = _retry_on_contention(_read, _READ_RETRY_BUDGET_SECONDS)
@@ -1764,9 +1802,29 @@ def _append_entry(entry: Dict[str, Any]) -> None:
             if size:
                 handle.seek(-1, os.SEEK_END)
                 if handle.read(1) != b"\n":
-                    # Isolate a corrupt/partial prior tail so this valid record
-                    # remains independently loadable.
-                    separator = b"\n"
+                    start = _last_line_start(handle, size)
+                    handle.seek(start)
+                    _committed, torn = _split_torn_tail(handle.read())
+                    if torn:
+                        # A writer died mid-append (we hold the lock, so no live
+                        # one is writing). Its partial record is moved aside, not
+                        # left in place: kept, it becomes a whole bad line the
+                        # moment this record follows it, and the journal reads
+                        # as unreadable from then on.
+                        with journal_path().with_name(
+                            journal_path().name + ".torn"
+                        ).open("ab") as aside:
+                            aside.write(torn + b"\n")
+                            aside.flush()
+                            os.fsync(aside.fileno())
+                        handle.truncate(size - len(torn))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    else:
+                        # A whole record without its newline (an older writer,
+                        # or CR line endings): keep it, start this one on its
+                        # own line.
+                        separator = b"\n"
             handle.seek(0, os.SEEK_END)
             handle.write(separator + encoded)
             handle.flush()
