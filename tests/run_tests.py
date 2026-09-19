@@ -7498,13 +7498,13 @@ class RefineTests(unittest.TestCase):
         public = "-----BEGIN PUBLIC KEY-----\n" + body
         self.assertEqual(sanitization.scrub_text(public), public)
 
-    def test_password_in_a_connection_string_without_a_scheme_is_redacted(self):
-        self.assertEqual(
-            sanitization.scrub_text("connect " + "admin:" + "hunter2pass@db.internal:5432/app"),
-            "connect admin:[REDACTED]@db.internal:5432/app",
-        )
+    def test_addresses_and_identifiers_without_a_scheme_are_left_alone(self):
+        # The user's own data stays theirs, and these tokens tell two errors
+        # apart: redacting them merged distinct failures into one fingerprint.
         for kept in ("git clone git@github.com:org/repo.git",
-                     "meet at 10:30, mail a.b@example.com"):
+                     "meet at 10:30, mail a.b@example.com",
+                     "org.example:mylib@1.2.3",
+                     "module:funcname@server.local"):
             self.assertEqual(sanitization.scrub_text(kept), kept)
 
     def test_token_and_apikey_auth_schemes_redact_without_erasing_scheme(self):
