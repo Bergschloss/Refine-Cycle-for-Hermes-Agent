@@ -3148,37 +3148,23 @@ def _skill_or_memory_injection_error(content: str) -> Optional[str]:
     return None
 
 
-def _memory_resource_error(content: str) -> Optional[str]:
-    """Reject operational resources in memory, which is future behavioral context.
-
-    Skills may legitimately document commands and URLs. A memory is injected as
-    durable guidance instead, so a URL, host, path or environment expansion --
-    a target the agent could act on -- has no safe operational role there.
-
-    Bare shell metacharacters are deliberately not part of this test, unlike the
-    prompt-note path that shares the target forms. A memory body is Markdown
-    prose, and ``;``, ``&``, ``$``, ``<``, ``>`` and backticks all occur in
-    ordinary English and ordinary Markdown; testing for the character rejected
-    sentences that name no resource at all. Measured on a real run, that is what
-    discarded the only useful lesson eleven real sessions produced -- on one
-    prose semicolon, in a body whose subject was a missing argument.
-
-    Dropping the character class costs no protection that this rule was for: a
-    shell construct only becomes operational once it names a target, and every
-    such target is still refused by the URL, host, path and environment clauses
-    below. What it stops costing is the false positive on prose.
-
-    NFKC is inspection-only: persisted memory bytes stay intact, while
-    compatibility forms such as full-width URL punctuation cannot bypass the same
-    policy applied to their ASCII equivalents.
-    """
-    inspected = unicodedata.normalize("NFKC", content)
-    if _RESOURCE_TARGET.search(inspected) or _memory_host_reference(inspected):
-        return (
-            "Memory content cannot reference resources, hosts, URLs, paths, or "
-            "environment variables"
-        )
-    return None
+# A memory body used to be refused for naming a URL, host, path or environment
+# variable (``_memory_resource_error``). That rule is gone by the owner's
+# decision: it cut the lessons most worth keeping -- "the config is at
+# ~/.hermes/config.yaml", "the API is at localhost:8080" -- and it was never
+# consistent, because Hermes writes URLs and paths into the same MEMORY.md
+# through its own memory tool with nothing stopping it. Measured on a real run it
+# refused 14 of 17 ordinary filenames.
+#
+# What is left in front of a memory: ``_skill_or_memory_injection_error`` (context
+# -control markup, override phrasing, impersonation, control codepoints), the
+# length ceiling, and the duplicate check. A bare URL in declarative prose is now
+# admitted by this plugin and left to Hermes's own memory-write scanner; that is
+# the accepted consequence of the decision, not an oversight.
+#
+# The prompt-note path keeps the strict resource clause and still uses
+# ``_RESOURCE_TARGET``, ``_RESOURCE_NETWORK_OR_SHELL`` and
+# ``_memory_host_reference``, so those stay.
 
 
 def _prompt_note_content_error(
@@ -3293,9 +3279,6 @@ def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:
         if injection_error:
             return injection_error
         if kind == "memory":
-            resource_error = _memory_resource_error(content)
-            if resource_error:
-                return resource_error
             # The same ceiling ``llm._finalize_edit`` enforces, applied here as
             # well. Production never lacked it -- both proposer arms finalize
             # through that path -- but the dry-run preview calls THIS function and
