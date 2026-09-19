@@ -18,7 +18,7 @@ try:
     from . import config, journal, ledger, llm as _llm, notify as _notify, patterns
     from . import update_check as _update_check
     from . import notices as _notices
-    from .sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE, sanitize, scrub_text
+    from .sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE
     # Renamed from `trace` to refine_trace: the repo root is on sys.path on the
     # server, so `from . import trace` / `import trace` used to resolve to this
     # plugin file and shadow the stdlib trace module process-wide.
@@ -27,12 +27,7 @@ except ImportError:
     import config, journal, ledger, llm as _llm, notify as _notify, patterns  # noqa: F811
     import update_check as _update_check  # noqa: F811
     import notices as _notices  # noqa: F811
-    from sanitization import (  # noqa: F811
-        LINE_BREAK_CHARS,
-        LINE_BREAK_RE,
-        sanitize,
-        scrub_text,
-    )
+    from sanitization import LINE_BREAK_CHARS, LINE_BREAK_RE  # noqa: F811
     _trace = None
 
 logger = logging.getLogger(__name__)
@@ -918,8 +913,8 @@ _PERSISTENCE_WARNING_BYTES = 100 * 1024 * 1024
 def note_auto_event(code: str, message: str) -> None:
     """Remember bounded, scrubbed background events for /refine status."""
     event = {
-        "code": _one_line(scrub_text(code))[:64],
-        "message": _one_line(scrub_text(message))[:300],
+        "code": _one_line(code)[:64],
+        "message": _one_line(message)[:300],
         "ts": time.time(),
     }
     with _LAST_AUTO_EVENT_LOCK:
@@ -1040,7 +1035,7 @@ def _open_db() -> Optional[sqlite3.Connection]:
         connection.row_factory = sqlite3.Row
         return connection
     except Exception as exc:
-        logger.warning("Cannot open state.db: %s", scrub_text(str(exc)))
+        logger.warning("Cannot open state.db: %s", str(exc))
         return None
 
 
@@ -1057,9 +1052,9 @@ def _get_session_source_status(session_id: str) -> Tuple[str, str]:
         ).fetchone()
         if not row:
             return "", "missing"
-        return scrub_text(str(row["source"] or "")), "ok"
+        return str(row["source"] or ""), "ok"
     except Exception as exc:
-        logger.warning("Cannot read session source: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read session source: %s", str(exc))
         return "", "error"
     finally:
         connection.close()
@@ -1101,7 +1096,7 @@ def _capture_source_revision(session_id: str) -> Optional[frozenset]:
         ).fetchall()
         return frozenset(int(row["rowid"]) for row in rows)
     except Exception as exc:
-        logger.warning("Cannot capture source revision token: %s", scrub_text(str(exc)))
+        logger.warning("Cannot capture source revision token: %s", str(exc))
         return None
     finally:
         connection.close()
@@ -1144,7 +1139,7 @@ def _source_revision_is_current(
         # Every captured row must still be active in the same session.
         return {int(row["rowid"]) for row in rows} == revision
     except Exception as exc:
-        logger.warning("Cannot verify source revision token: %s", scrub_text(str(exc)))
+        logger.warning("Cannot verify source revision token: %s", str(exc))
         return False
     finally:
         connection.close()
@@ -1594,7 +1589,7 @@ def count_session_messages(
         result["collection_status"] = "ok"
         return result
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.warning("Current-session count query failed: %s", safe_error)
         result["collection_status"] = "query_error"
         result["collection_error"] = safe_error[:300]
@@ -1680,7 +1675,7 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             ).fetchone()
             if predecessor:
                 predecessor_role = _one_line(
-                    scrub_text(str(predecessor["role"] or ""))
+                    str(predecessor["role"] or "")
                 )[:32].lower()
                 previous_was_assistant_response = bool(
                     predecessor_role == "assistant" and predecessor["has_content"]
@@ -1724,28 +1719,26 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         corrections: List[Dict[str, Any]] = []
         error_items: List[Dict[str, Any]] = []
         for row in failure_rows:
-            # Classify the raw row, scrub everything that is kept. scrub_text is
-            # not JSON-transparent: it replaces an unquoted value with the bare
-            # token ``[REDACTED]``, which is not a JSON scalar, so a payload
-            # carrying a numeric credential-shaped field (``"session_id": 918273645``)
-            # stops parsing and ``_structured_error_status`` loses its verdict --
-            # leaving the decision to the head/tail markers, which is the
-            # mechanism that once counted 479 successes as failures. Measured on a
-            # live install: 27 of 305 JSON tool rows stop parsing after scrubbing,
-            # 29 lose their structured verdict, and a ``{"success": false}`` row
-            # then reads as a success. Only the bool leaves this boundary, so
-            # invariant 4 is unchanged -- no raw string is stored, rendered or
-            # sent. Verified on the same corpus: classifying raw instead of
-            # scrubbed flipped 0 of 2694 rows in either direction.
+            # The row is classified and kept as it is. This boundary used to
+            # classify the raw row and store a redacted copy, because the
+            # credential filter was not JSON-transparent: it replaced an unquoted
+            # value with the bare token ``[REDACTED]``, which is not a JSON
+            # scalar, so a payload carrying a credential-shaped field
+            # (``"session_id": 918273645``) stopped parsing and
+            # ``_structured_error_status`` lost its verdict -- 27 of 305 JSON tool
+            # rows on a live install, 29 losing their structured verdict, with a
+            # ``{"success": false}`` row then reading as a success. With the
+            # filter gone the two views are one view, and that hazard cannot
+            # return here or at any later classifier.
             raw_content = str(row["content"] or "")
-            tool_name = _one_line(scrub_text(str(row["tool_name"] or "")))[:120]
+            tool_name = _one_line(str(row["tool_name"] or ""))[:120]
             # One admission decision, shared with the cross-session collector:
             # refine's own results are excluded and untrusted regions removed
             # BEFORE classification, so neither can make a row into evidence.
             trusted_raw = _evidence_text_or_none(raw_content, tool_name)
             if trusted_raw is None:
                 continue
-            content = scrub_text(trusted_raw)
+            content = trusted_raw
             bounded = (
                 content
                 if len(content) <= 4000
@@ -1767,12 +1760,12 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
         for row in chronological_rows:
             # Every string from SQLite is scrubbed at this single extraction
             # boundary so evidence, journals, and returned tool results inherit it.
-            role = _one_line(scrub_text(str(row["role"] or "")))[:32].lower()
+            role = _one_line(str(row["role"] or ""))[:32].lower()
             if role not in {"user", "assistant", "tool", "system"}:
                 role = "unknown"
-            content = scrub_text(str(row["content"] or ""))
+            content = str(row["content"] or "")
             tool_name = _one_line(
-                scrub_text(str(row["tool_name"] or ""))
+                str(row["tool_name"] or "")
             )[:120]
             shown = content[:400] + ("…" if len(content) > 400 else "")
             messages.append({
@@ -1818,15 +1811,15 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             sanitized: List[Dict[str, Any]] = []
             for position, row in enumerate(sequence):
                 role = "tool" if position == 0 else _one_line(
-                    scrub_text(str(row["role"] or ""))
+                    str(row["role"] or "")
                 )[:32].lower()
                 if role not in {"user", "assistant", "tool", "system"}:
                     role = "unknown"
                 sanitized.append({
                     "role": role,
-                    "content": scrub_text(str(row["content"] or "")),
+                    "content": str(row["content"] or ""),
                     "tool_name": _one_line(
-                        scrub_text(str(row["tool_name"] or ""))
+                        str(row["tool_name"] or "")
                     )[:120],
                 })
             return sanitized
@@ -1892,7 +1885,7 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             "collection_error": "",
         }
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.warning("Current-session evidence query failed: %s", safe_error)
         empty["session_id"] = resolved
         empty["session_id_source"] = how
@@ -2024,7 +2017,7 @@ def collect_cross_session_patterns(
                 )
                 if trusted_raw is None:
                     continue
-                content = scrub_text(trusted_raw)
+                content = trusted_raw
                 # SQL's ``timestamp >= since`` cannot express an upper
                 # bound or reject non-finite/non-positive values, so a
                 # row's membership in THIS horizon still has to be
@@ -2039,7 +2032,7 @@ def collect_cross_session_patterns(
                 if row_ts is None:
                     untimed_dropped += 1
                     continue
-                sid = scrub_text(str(row["session_id"] or ""))
+                sid = str(row["session_id"] or "")
                 if sid and sid not in seen:
                     if session_cap is not None and len(seen) >= session_cap:
                         cap_reached = True
@@ -2052,7 +2045,7 @@ def collect_cross_session_patterns(
                 )
                 yield {
                     "tool": _one_line(
-                        scrub_text(str(row["tool_name"] or ""))
+                        str(row["tool_name"] or "")
                     )[:120],
                     "content": _strip_untrusted_tags(bounded),
                     "session_id": sid,
@@ -2093,7 +2086,7 @@ def collect_cross_session_patterns(
             )
         return result
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.warning("Cross-session query failed: %s", safe_error)
         # Same reason as the two branches above, for the failure that actually
         # happens on a live host: the window could not be READ. Without this the
@@ -2123,7 +2116,7 @@ def _skill_items() -> List[Any]:
         skills = result.get("skills", []) if isinstance(result, dict) else result
         return skills if isinstance(skills, list) else []
     except Exception as exc:
-        logger.warning("Cannot retrieve skill items: %s", scrub_text(str(exc)))
+        logger.warning("Cannot retrieve skill items: %s", str(exc))
         return []
 
 
@@ -2131,7 +2124,7 @@ def list_skill_names() -> List[str]:
     names: List[str] = []
     for item in _skill_items():
         raw_name = item.get("name", "") if isinstance(item, dict) else item
-        name = scrub_text(str(raw_name)).strip()
+        name = str(raw_name).strip()
         if name:
             names.append(name)
     return names
@@ -2146,15 +2139,15 @@ def list_skill_entries() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for item in _skill_items():
         raw_name = item.get("name", "") if isinstance(item, dict) else item
-        name = scrub_text(str(raw_name)).strip()
+        name = str(raw_name).strip()
         if not name:
             continue
         entry: Dict[str, Any] = {
             "name": name,
-            "description": scrub_text(str(item.get("description", ""))).strip()
+            "description": str(item.get("description", "")).strip()
             if isinstance(item, dict)
             else "",
-            "category": scrub_text(str(item.get("category", ""))).strip()
+            "category": str(item.get("category", "")).strip()
             if isinstance(item, dict)
             else "",
         }
@@ -2177,11 +2170,11 @@ def list_memory_snippets() -> List[str]:
         store = MemoryStore()
         store.load_from_disk()
         return [
-            scrub_text(str(entry))[:120]
+            str(entry)[:120]
             for entry in (store.memory_entries + store.user_entries)[-20:]
         ]
     except Exception as exc:
-        logger.warning("Cannot read memory snippets: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read memory snippets: %s", str(exc))
         return []
 
 
@@ -2207,7 +2200,7 @@ def _active_prompt_notes_safe() -> List[Dict[str, str]]:
             return []
         notes = journal.load_prompt_notes()
     except Exception as exc:
-        logger.debug("Cannot read prompt notes for proposer: %s", scrub_text(str(exc)))
+        logger.debug("Cannot read prompt notes for proposer: %s", str(exc))
         return []
     if not notes:
         return []
@@ -2218,7 +2211,7 @@ def _active_prompt_notes_safe() -> List[Dict[str, str]]:
         scope = note.get("scope", "global")
         if scope == "session" and note.get("session_id") != live_session:
             continue
-        content = scrub_text(note["content"]).strip()
+        content = note["content"].strip()
         if _stored_prompt_note_content_error(content):
             continue
         entry = {"id": note["id"], "content": content}
@@ -2265,7 +2258,7 @@ def _live_memory_entries() -> Optional[List[str]]:
         store.load_from_disk()
         return [str(entry).strip() for entry in store.memory_entries]
     except Exception as exc:
-        logger.warning("Cannot read memory entries: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read memory entries: %s", str(exc))
         return None
 
 
@@ -2371,7 +2364,7 @@ def _memory_offer_counts() -> "Tuple[int, int]":
         )
         return len(covered), len(backed_off)
     except Exception as exc:
-        logger.debug("Cannot count the memory offer exclusions: %s", scrub_text(str(exc)))
+        logger.debug("Cannot count the memory offer exclusions: %s", str(exc))
         return 0, 0
 
 
@@ -2400,7 +2393,7 @@ def _memory_backoff_count() -> int:
         _covered, backed_off = _memory_offer_exclusions(None, used, limit)
         return len(backed_off)
     except Exception as exc:
-        logger.debug("Cannot count the memory backoff: %s", scrub_text(str(exc)))
+        logger.debug("Cannot count the memory backoff: %s", str(exc))
         return 0
 
 
@@ -2467,7 +2460,7 @@ def _reconcile_pending() -> List[Dict[str, Any]]:
         try:
             ledger.record_journal_state(entry)
         except Exception as exc:
-            logger.warning("Cannot mirror reconciled state in ledger: %s", scrub_text(str(exc)))
+            logger.warning("Cannot mirror reconciled state in ledger: %s", str(exc))
     return changed
 
 
@@ -2687,7 +2680,7 @@ def refine_status() -> Dict[str, Any]:
     except Exception as exc:
         journal_readable = False
         last_model_substituted = False
-        logger.warning("Cannot read refine journal for status: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read refine journal for status: %s", str(exc))
 
     blockers: List[Dict[str, str]] = []
     if not config_readable:
@@ -2811,7 +2804,7 @@ def refine_status() -> Dict[str, Any]:
     try:
         plugin_source_collision = (jdir / "plugin.yaml").is_file()
     except Exception as exc:
-        logger.debug("Cannot inspect plugin source collision: %s", scrub_text(str(exc)))
+        logger.debug("Cannot inspect plugin source collision: %s", str(exc))
     if plugin_source_collision:
         warnings.append({
             "code": "journal_dir_is_plugin_source",
@@ -2893,7 +2886,7 @@ def refine_status() -> Dict[str, Any]:
                 finally:
                     conn.close()
         except Exception as exc:
-            logger.warning("Cannot read session message count: %s", scrub_text(str(exc)))
+            logger.warning("Cannot read session message count: %s", str(exc))
     if sid_source == "unknown":
         blockers.append({
             "code": "session_unknown",
@@ -3010,7 +3003,7 @@ def refine_audit() -> Dict[str, Any]:
             _reconcile_pending()
             journal_entries = journal.entries()
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.error("Audit journal read failed: %s", safe_error)
         return {
             "success": False,
@@ -3021,7 +3014,7 @@ def refine_audit() -> Dict[str, Any]:
     try:
         ledger_earliest = ledger.earliest_created_ts()
     except IOError as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.error("Audit ledger read failed: %s", safe_error)
         return {
             "success": False,
@@ -3052,7 +3045,7 @@ def refine_audit() -> Dict[str, Any]:
                 strict=True,
             )
         except Exception as exc:
-            logger.error("Audit pattern collection failed: %s", scrub_text(str(exc)))
+            logger.error("Audit pattern collection failed: %s", str(exc))
             current = None
             complete = False
 
@@ -3068,7 +3061,7 @@ def refine_audit() -> Dict[str, Any]:
             memory_baselines = ledger.snapshot_memory_baselines(journal_entries)
             prompt_note_baselines = ledger.snapshot_prompt_note_baselines(journal_entries)
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.error("Audit attribution snapshot failed: %s", safe_error)
         return {
             "success": False,
@@ -3842,7 +3835,7 @@ def _memory_duplicate_error(content: str) -> Optional[str]:
         # a refusal is journaled, countable and reversible by fixing the host;
         # an unchecked write is permanent -- and the code below makes the cause
         # visible rather than leaving it to look like a content rejection.
-        logger.warning("Cannot read memory store for duplicate check: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read memory store for duplicate check: %s", str(exc))
         return f"{_MEMORY_STORE_UNAVAILABLE_MARKER} for the duplicate check"
     for existing in entries:
         relation = _operational_rule_relation(str(existing), content)
@@ -4062,7 +4055,7 @@ def _memory_store(fallback_out: Optional[Dict[str, bool]] = None) -> "Any":
     except Exception as exc:
         logger.warning(
             "Cannot read host memory config; falling back to built-in "
-            "defaults: %s", scrub_text(str(exc)),
+            "defaults: %s", str(exc),
         )
         if fallback_out is not None:
             fallback_out["built_in_defaults"] = True
@@ -4095,7 +4088,7 @@ def _memory_usage() -> "Tuple[Optional[int], Optional[int]]":
         store = _memory_store(fallback_out=fell_back)
         store.load_from_disk()
     except Exception as exc:
-        logger.warning("Cannot read memory usage: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read memory usage: %s", str(exc))
         return None, None
     delimiter = _memory_entry_delimiter()
     used = len(delimiter.join(store.memory_entries)) if store.memory_entries else 0
@@ -4247,7 +4240,7 @@ def _journal_nonmutation(**kwargs: Any) -> Optional[str]:
     try:
         return journal.log(**kwargs)
     except Exception as exc:
-        logger.error("Cannot write refine journal: %s", scrub_text(str(exc)))
+        logger.error("Cannot write refine journal: %s", str(exc))
         return None
 
 
@@ -4405,7 +4398,7 @@ def _application_evidence_refusal(
                 index,
                 fingerprint,
                 _normalize_edit(
-                    sanitize(child), str(proposal.get("session_id", "") or ""),
+                    child, str(proposal.get("session_id", "") or ""),
                 ),
             ))
     else:
@@ -4472,8 +4465,8 @@ def record_evidence_failure(
     timeout: float = 30.0,
 ) -> Optional[str]:
     """Wait off the host callback, then durably record unavailable evidence."""
-    safe_status = _one_line(scrub_text(collection_status))[:64] or "unknown"
-    safe_error = _one_line(scrub_text(collection_error))[:300]
+    safe_status = _one_line(collection_status)[:64] or "unknown"
+    safe_error = _one_line(collection_error)[:300]
     message = f"Current-session evidence is unavailable ({safe_status})."
     try:
         with journal.mutation_lock(timeout=timeout):
@@ -4494,7 +4487,7 @@ def record_evidence_failure(
             )
     except Exception as exc:
         logger.error(
-            "Cannot durably record evidence failure: %s", scrub_text(str(exc))
+            "Cannot durably record evidence failure: %s", str(exc)
         )
         return None
 
@@ -4843,10 +4836,10 @@ def _handle_no_signal(
         reviewer_llm_meta["model_substituted"] = reviewer_substituted
         if run_target_issues:
             reviewer_llm_meta["target_issues"] = run_target_issues
-        rationale = scrub_text(str(reviewer.get("rationale", "")))
+        rationale = str(reviewer.get("rationale", ""))
         decision = "approved" if reviewer.get("should_refine") else "declined"
         reviewer_reason = f"Reviewer {decision}: {rationale}"
-        reviewer_failure = scrub_text(str(reviewer.get("failure", "")).strip())
+        reviewer_failure = str(reviewer.get("failure", "")).strip()
         reviewer_target_issue = bool(
             not reviewer_failure
             and run_target_unusable
@@ -5005,7 +4998,7 @@ def _handle_no_signal(
                 "evidence": evidence,
                 "reversible": False,
             }
-        reviewer_instructions = scrub_text(str(reviewer.get("instructions", "")))
+        reviewer_instructions = str(reviewer.get("instructions", ""))
         return reviewer_instructions, "reviewer_approved"
     else:
         proposal = {
@@ -5124,7 +5117,7 @@ def _subagent_lifecycle() -> Optional[Any]:
     try:
         return provider()
     except Exception as exc:
-        logger.warning("refine proposer subagent lifecycle unavailable: %s", scrub_text(str(exc)))
+        logger.warning("refine proposer subagent lifecycle unavailable: %s", str(exc))
         return None
 
 
@@ -5186,7 +5179,7 @@ def _render_proposer_context(
     )
     corrections = "\n".join(
         "  " + _llm._untrusted_json_record("user_correction", item[:200], escape_tags=True)
-        for item in [scrub_text(str(c)) for c in user_corrections][:5]
+        for item in [str(c) for c in user_corrections][:5]
     ) or "  (none)"
     history_lines = _llm._render_refinement_history(
         list(refinement_history or []),
@@ -5200,7 +5193,7 @@ def _render_proposer_context(
             "\n=== PREVIOUS UNUSED SKILLS ===\n"
             + "\n".join(
                 "  " + _llm._untrusted_json_record("unused_skill", name, escape_tags=True)
-                for name in [scrub_text(str(s)) for s in unused_skills][:10]
+                for name in [str(s) for s in unused_skills][:10]
             )
             + "\n"
         )
@@ -5208,13 +5201,13 @@ def _render_proposer_context(
         "\n=== PREVIOUS REFINEMENTS ===\n" + history_lines + "\n" if history_lines else ""
     )
     context_block = (
-        _llm._untrusted_json_record("run_context", scrub_text(run_context), escape_tags=True)
+        _llm._untrusted_json_record("run_context", run_context, escape_tags=True)
         if run_context.strip()
         else "(none)"
     )
     reviewer_block = (
         _llm._untrusted_json_record(
-            "reviewer_recommendation", scrub_text(reviewer_context), escape_tags=True
+            "reviewer_recommendation", reviewer_context, escape_tags=True
         )
         if reviewer_context.strip()
         else "(none)"
@@ -5330,8 +5323,8 @@ def _propose_with_subagent(
     # The host caps goal at 16k and context at 32k characters. Both are built
     # from already-bounded inputs; clip defensively so a future renderer
     # change cannot turn a soft cap into a launch rejection loop.
-    goal = scrub_text(_PROPOSER_GOAL)[:15000]
-    context = scrub_text(context)[:30000]
+    goal = _PROPOSER_GOAL[:15000]
+    context = context[:30000]
     try:
         handle = lifecycle.launch(
             SubagentLaunchRequest(
@@ -5347,7 +5340,7 @@ def _propose_with_subagent(
             )
         )
     except Exception as exc:
-        logger.warning("Proposer subagent launch failed: %s", scrub_text(str(exc)))
+        logger.warning("Proposer subagent launch failed: %s", str(exc))
         meta = {
             "proposal_source": "structured",
             "subagent_fallback_reason": "launch_failed",
@@ -5373,7 +5366,7 @@ def _propose_with_subagent(
     try:
         result = lifecycle.result(handle)
     except Exception as exc:
-        logger.warning("Proposer subagent result unavailable: %s", scrub_text(str(exc)))
+        logger.warning("Proposer subagent result unavailable: %s", str(exc))
         meta = {
             "proposal_source": "structured",
             "subagent_fallback_reason": "result_unavailable",
@@ -5442,7 +5435,7 @@ def _propose_with_subagent(
             signal_path=signal_path,
         )
     except Exception as exc:
-        logger.warning("Proposer subagent finalize failed: %s", scrub_text(str(exc)))
+        logger.warning("Proposer subagent finalize failed: %s", str(exc))
         meta = dict(
             meta,
             proposal_source="structured",
@@ -5467,7 +5460,7 @@ def _refine_once(
 ) -> Dict[str, Any]:
     trigger = "auto" if auto else "manual"
     started = time.time()
-    safe_reason = scrub_text(reason)
+    safe_reason = reason
 
     # Fail closed when journal is unreadable: without history the budget, dedup,
     # and context guards are all bypassed. Must be distinguishable from no_op.
@@ -6222,7 +6215,6 @@ def _refine_once(
     # proposed from a partly-suppressed window is readable as such later.
     if _evidence_suppression:
         _run_llm_meta.update(_evidence_suppression)
-    proposal = sanitize(proposal)
     proposal = dict(
         proposal,
         expected_outcome=_llm.normalize_expected_outcome(
@@ -6286,7 +6278,7 @@ def _refine_once(
     # Omission is what made this unfalsifiable: an absent key reads as "old
     # entry", "no call made" and "call succeeded" at once.
     _run_llm_meta["result_code"] = (
-        scrub_text(str(proposal.get("failure", "")).strip()) or "ok"
+        str(proposal.get("failure", "")).strip() or "ok"
     )
     evidence_summary = {
         "session_id": session,
@@ -6356,7 +6348,7 @@ def _refine_once(
             response["journal_id"] = entry_id
         return response
 
-    failure = scrub_text(str(proposal.get("failure", "")).strip())
+    failure = str(proposal.get("failure", "")).strip()
     if failure:
         failure_messages = {
             "truncated": "The refine proposal was cut off before it completed.",
@@ -6374,7 +6366,7 @@ def _refine_once(
                 "The active host route uses a transport refine cannot safely use."
             ),
             "llm_trust_denied": "The host trust policy denied the refine model call.",
-            "local_safety": scrub_text(str(proposal.get("reason", "")))
+            "local_safety": str(proposal.get("reason", ""))
             or "The refine proposal could not be completed safely.",
         }
         failure_message = failure_messages.get(
@@ -6450,7 +6442,7 @@ def _refine_once(
             # Normalize each edit so the user sees the final form.
             edits = [
                 _normalize_edit(
-                    sanitize(edit), session, explicit_session=explicit_session,
+                    edit, session, explicit_session=explicit_session,
                     session_ending=session_ending,
                 )
                 for edit in proposal.get("edits", [])
@@ -6483,10 +6475,10 @@ def _refine_once(
             if name and content:
                 raw_diff = _build_diff(name, content)
                 if len(raw_diff) > max_diff_chars:
-                    diff_text = scrub_text(raw_diff[:max_diff_chars]) + "\n… [truncated]"
+                    diff_text = raw_diff[:max_diff_chars] + "\n… [truncated]"
                     truncated = True
                 else:
-                    diff_text = scrub_text(raw_diff)
+                    diff_text = raw_diff
         elif dry_proposal.get("action") == "multi":
             diff_parts = []
             for edit in dry_proposal.get("edits", []):
@@ -6498,10 +6490,10 @@ def _refine_once(
             if diff_parts:
                 combined = "\n".join(diff_parts)
                 if len(combined) > max_diff_chars:
-                    diff_text = scrub_text(combined[:max_diff_chars]) + "\n… [truncated]"
+                    diff_text = combined[:max_diff_chars] + "\n… [truncated]"
                     truncated = True
                 else:
-                    diff_text = scrub_text(combined)
+                    diff_text = combined
 
         # What the apply would decide. A preview that shows a proposal without
         # saying it is unapplyable is worse than no preview: it reads as approval.
@@ -6904,7 +6896,7 @@ def _apply_edit(
                 logger.warning(
                     "Cannot remove unused conflict backup for skill '%s': %s",
                     name,
-                    scrub_text(str(exc)),
+                    str(exc),
                 )
             entry_id = _journal_nonmutation(
                 trigger=trigger,
@@ -7007,7 +6999,7 @@ def _apply_edit(
     except Exception as exc:
         return {
             "success": False,
-            "message": f"Journal preparation failed; mutation aborted: {scrub_text(str(exc))}",
+            "message": f"Journal preparation failed; mutation aborted: {str(exc)}",
             "proposal": proposal,
             "reversible": False,
             "edits_applied": 0,
@@ -7021,11 +7013,11 @@ def _apply_edit(
         else:
             apply_result = _apply_memory(proposal)
     except Exception as exc:
-        apply_result = {"success": False, "error": scrub_text(str(exc))}
-    apply_result = sanitize(apply_result)
+        apply_result = {"success": False, "error": str(exc)}
+    apply_result = apply_result
 
     staged = bool(apply_result.get("success") and apply_result.get("staged"))
-    pending_id = scrub_text(str(apply_result.get("pending_id", ""))) if staged else ""
+    pending_id = str(apply_result.get("pending_id", "")) if staged else ""
     if staged and not pending_id:
         # The host may already have durably queued this write. Without its ID we
         # cannot claim pending_approval, but terminalizing as error would release
@@ -7041,7 +7033,7 @@ def _apply_edit(
             ),
             "journal_id": entry_id,
             "proposal": proposal,
-            "result": sanitize(apply_result),
+            "result": apply_result,
             "backup_path": backup_path,
             "reversible": False,
             "edits_applied": 1,
@@ -7128,17 +7120,17 @@ def _apply_edit(
         finalized = journal.finalize(
             entry_id,
             outcome,
-            error=scrub_text(str(apply_result.get("error", ""))),
+            error=str(apply_result.get("error", "")),
             pending_id=pending_id if staged else None,
         )
     except Exception as exc:
         if apply_result.get("success"):
             return {
                 "success": False,
-                "message": f"Mutation completed but journal finalization failed; recovery id: {entry_id}. Error: {scrub_text(str(exc))}",
+                "message": f"Mutation completed but journal finalization failed; recovery id: {entry_id}. Error: {str(exc)}",
                 "journal_id": entry_id,
                 "proposal": proposal,
-                "result": sanitize(apply_result),
+                "result": apply_result,
                 "backup_path": backup_path,
                 "reversible": not staged,
                 # The mutation landed and its prepared record already consumed
@@ -7148,9 +7140,9 @@ def _apply_edit(
             }
         return {
             "success": False,
-            "message": f"Apply failed and journal finalization also failed: {scrub_text(str(exc))}",
+            "message": f"Apply failed and journal finalization also failed: {str(exc)}",
             "proposal": proposal,
-            "result": sanitize(apply_result),
+            "result": apply_result,
             "reversible": False,
             "edits_applied": 0,
         }
@@ -7167,7 +7159,7 @@ def _apply_edit(
         except Exception as exc:
             logger.warning(
                 "Ledger unreadable; edit was applied but attribution was skipped: %s",
-                scrub_text(str(exc)),
+                str(exc),
             )
 
     if outcome == "applied":
@@ -7206,7 +7198,7 @@ def _apply_edit(
     if staged and pending_id:
         message += f" | pending_id={pending_id}"
     if apply_result.get("error"):
-        message += f" | error={scrub_text(str(apply_result['error']))[:100]}"
+        message += f" | error={str(apply_result['error'])[:100]}"
     # The operator sees ``message`` and nothing else -- ``/refine`` renders no
     # other field -- so the party who asked to be shown how full memory is at
     # every write was the only one who could not see it. A2 (store full) and B4
@@ -7226,7 +7218,7 @@ def _apply_edit(
         "success": success,
         "message": message,
         "proposal": proposal,
-        "result": sanitize(apply_result),
+        "result": apply_result,
         "backup_path": backup_path,
         "reversible": bool(
             success and outcome == "applied" and journal.is_reversible(finalized)
@@ -7374,7 +7366,7 @@ def _apply_transaction(
         }
     group_id = uuid.uuid4().hex[:12]
     summary = _llm.normalize_summary(proposal.get("summary", ""))
-    shared_reason = scrub_text(str(proposal.get("reason", "")))
+    shared_reason = str(proposal.get("reason", ""))
     shared_expected = _llm.normalize_expected_outcome(proposal.get("expected_outcome"))
     shared_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
     dropped = int(proposal.get("dropped_edits", 0) or 0)
@@ -7389,7 +7381,7 @@ def _apply_transaction(
         if not str(merged.get("pattern_fingerprint", "") or ""):
             merged["pattern_fingerprint"] = shared_fingerprint
         return _normalize_edit(
-            sanitize(merged), session, explicit_session=explicit_session,
+            merged, session, explicit_session=explicit_session,
             session_ending=session_ending,
         )
 
@@ -7669,9 +7661,9 @@ def _apply_transaction(
         success, outcome = False, "failed"
         message = f"transaction {group_id}: no edit was applied"
     if results and not results[-1].get("success"):
-        message += f" | stopped: {scrub_text(str(results[-1].get('message', '')))[:160]}"
+        message += f" | stopped: {str(results[-1].get('message', ''))[:160]}"
     elif skipped:
-        rendered_stop = scrub_text(stop_reason)[:160] or "edits were not attempted"
+        rendered_stop = stop_reason[:160] or "edits were not attempted"
         if rendered_stop.startswith("Daily "):
             rendered_stop = "daily " + rendered_stop[6:]
         message += f" | stopped: {rendered_stop}; {skipped} edit(s) not attempted"
@@ -7709,11 +7701,11 @@ def _completed_targets(result: Dict[str, Any]) -> List[str]:
     for proposal in proposals:
         if not isinstance(proposal, dict):
             continue
-        action = scrub_text(str(proposal.get("action", "")))
+        action = str(proposal.get("action", ""))
         if action in ("", "no_op", "multi"):
             continue
-        kind = scrub_text(str(proposal.get("kind", "")))
-        name = scrub_text(str(proposal.get("name", "")))
+        kind = str(proposal.get("kind", ""))
+        name = str(proposal.get("name", ""))
         targets.append(f"{action} {kind} '{name}'")
     return targets
 
@@ -7782,7 +7774,7 @@ def refine_run(
     if dry_run:
         # Dry-run: one proposal pass, no apply, no budget consumed.
         return _refine_once(
-            llm, reason=scrub_text(reason), session_id=session_id,
+            llm, reason=reason, session_id=session_id,
             auto=auto, dry_run=True, explicit_session=explicit_session,
             session_ending=session_ending, active_chat=active_chat,
         )
@@ -7793,7 +7785,7 @@ def refine_run(
     # overall and is re-checked after acquiring the mutation lock, before every
     # single edit.
     max_runs = max(1, config.max_edits_per_run())
-    run_reason = scrub_text(reason)
+    run_reason = reason
     for _ in range(max_runs):
         if journal.daily_limit_reached():
             break
@@ -7813,7 +7805,7 @@ def refine_run(
             "propose a different edit or no_op."
         )
         run_reason = f"{reason}\n{note}".strip() if reason else note
-        run_reason = scrub_text(run_reason)
+        run_reason = run_reason
 
     if not runs:
         # The budget was already exhausted before the first pass, so no
@@ -7911,5 +7903,5 @@ def refine_rollback(entry_id: str) -> Dict[str, Any]:
             try:
                 ledger.record_journal_state(latest)
             except Exception as exc:
-                logger.warning("Cannot mirror rollback state in ledger: %s", scrub_text(str(exc)))
-        return sanitize(result)
+                logger.warning("Cannot mirror rollback state in ledger: %s", str(exc))
+        return result

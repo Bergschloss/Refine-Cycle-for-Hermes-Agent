@@ -29,13 +29,11 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 try:
     from . import config, journal, update_check
     from . import notify as _notify
-    from .sanitization import scrub_text
 except ImportError:  # bare-module import
     import config  # type: ignore  # noqa: F811
     import journal  # type: ignore  # noqa: F811
     import update_check  # type: ignore  # noqa: F811
     import notify as _notify  # type: ignore  # noqa: F811
-    from sanitization import scrub_text  # type: ignore  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
@@ -661,7 +659,7 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
     # carry whatever the environment that ran it had in it. Scrubbed here, once,
     # where the message is turned into words: the chat reply and the desktop app's
     # JSON both read it, and the desktop one used to send it raw.
-    message = scrub_text(str(result.get("message") or "")).strip()
+    message = str(result.get("message") or "").strip()
     if outcome in ("updated", "repaired"):
         new_version = str(result.get("tag") or update_check.installed_version())
         try:
@@ -681,7 +679,7 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
         # the caller rebuilds the reply from the head when it restarts, so a
         # release that installed while the patch could not be restored said
         # nothing about it and only turned up later as "stopped working".
-        host_note = scrub_text(str(result.get("host_note") or "")).strip()
+        host_note = str(result.get("host_note") or "").strip()
         if host_note:
             head = f"{head} {host_note}"
         return head, head

@@ -20,10 +20,10 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 try:
     from .config import journal_dir, max_edits_per_day, max_model_runs_per_day
-    from .sanitization import LINE_BREAK_CHARS, sanitize, scrub_text
+    from .sanitization import LINE_BREAK_CHARS
 except ImportError:
     from config import journal_dir, max_edits_per_day, max_model_runs_per_day  # noqa: F811
-    from sanitization import LINE_BREAK_CHARS, sanitize, scrub_text  # noqa: F811
+    from sanitization import LINE_BREAK_CHARS  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
@@ -339,7 +339,7 @@ def read_model_override_state() -> "tuple[Optional[Dict[str, str]], str]":
         # not just the one expected here: anything escaping would be assembled
         # into a proposal call and journaled as an ordinary no_op with
         # success=true, which is the outcome this function exists to prevent.
-        logger.warning("Cannot read the model override: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read the model override: %s", str(exc))
         return None, "unreadable"
     if raw is None:
         return None, "absent"
@@ -421,7 +421,7 @@ def clear_model_override() -> str:
         except FileNotFoundError:
             return "absent"
         except Exception as exc:
-            logger.warning("Cannot remove the model override: %s", scrub_text(str(exc)))
+            logger.warning("Cannot remove the model override: %s", str(exc))
             try:
                 return "failed" if path.exists() else "removed"
             except OSError:
@@ -445,7 +445,7 @@ _MIGRATION_DIRS = [_BACKUPS_DIR_NAME]
 
 def migration_status() -> Dict[str, Any]:
     """Return the last process-local migration decision for status reporting."""
-    return sanitize(dict(_MIGRATION_STATUS))
+    return dict(_MIGRATION_STATUS)
 
 
 def _set_migration_status(
@@ -459,11 +459,11 @@ def _set_migration_status(
 ) -> str:
     _MIGRATION_STATUS.update({
         "outcome": outcome,
-        "source": scrub_text(str(source)),
-        "destination": scrub_text(str(destination)),
-        "active_dir": scrub_text(str(active_dir)),
-        "rename_warning": scrub_text(rename_warning),
-        "error": scrub_text(error),
+        "source": str(source),
+        "destination": str(destination),
+        "active_dir": str(active_dir),
+        "rename_warning": rename_warning,
+        "error": error,
     })
     return outcome
 
@@ -524,7 +524,7 @@ def _publish_lock(path: Path, payload: str) -> None:
             # must neither mask an earlier link error nor invalidate ownership
             # of the complete canonical lock; dead-owner cleanup can retry it.
             logger.warning(
-                "Cannot remove Refine lock claim file: %s", scrub_text(str(exc))
+                "Cannot remove Refine lock claim file: %s", str(exc)
             )
 
 
@@ -595,7 +595,7 @@ def _migration_lock(source: Path, timeout: float = 30.0) -> Iterator[None]:
                     _ORPHANED_LOCK_TOKENS[str(lock_path)] = token
                     logger.error(
                         "Could not release refine migration lock: %s",
-                        scrub_text(str(exc)),
+                        str(exc),
                     )
         finally:
             if lease is not None:
@@ -761,7 +761,7 @@ def migrate_legacy_journal_dir(
                     OSError,
                 )
             except OSError as exc:
-                rename_warning = scrub_text(str(exc))
+                rename_warning = str(exc)
                 logger.warning(
                     "Legacy journal dir could not be renamed: %s", rename_warning
                 )
@@ -773,7 +773,7 @@ def migrate_legacy_journal_dir(
                 rename_warning=rename_warning,
             )
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.warning("Journal directory migration failed: %s", safe_error)
         # Legacy was never deleted and is the only complete generation.
         _cfg._set_runtime_journal_dir(legacy, commit_marker=marker)
@@ -872,7 +872,7 @@ def _load_prompt_notes() -> Optional[List[Dict[str, str]]]:
             notes.append(note)
         return notes
     except Exception as exc:
-        logger.warning("Cannot read prompt-note store: %s", scrub_text(str(exc)))
+        logger.warning("Cannot read prompt-note store: %s", str(exc))
         return None
 
 
@@ -908,7 +908,7 @@ def prompt_note_content_exists(content: str) -> Optional[bool]:
 
 def normalize_prompt_note_content(content: str) -> str:
     """Canonicalize a note once so journal proof and storage always agree."""
-    return scrub_text(str(content)).strip()
+    return str(content).strip()
 
 
 def prompt_note_fingerprint_active(fingerprint: str) -> Optional[bool]:
@@ -978,7 +978,7 @@ def add_prompt_note(note: Dict[str, str]) -> Dict[str, Any]:
         except Exception as exc:
             return {
                 "success": False,
-                "error": f"Cannot persist prompt note: {scrub_text(str(exc))}",
+                "error": f"Cannot persist prompt note: {str(exc)}",
             }
         return {"success": True, "note_id": safe_note["id"]}
 
@@ -1061,7 +1061,7 @@ def clear_session_prompt_notes(
         except Exception as exc:
             logger.warning(
                 "Cannot clear session prompt notes because the journal is unreadable: %s",
-                scrub_text(str(exc)),
+                str(exc),
             )
             return None
 
@@ -1123,7 +1123,9 @@ def clear_session_prompt_notes(
         def cleanup_result(error: str = "") -> Dict[str, Any]:
             # Exactly one return path builds a result, so mirroring here sends
             # each resolved entry once.
-            entries_out = [sanitize(entry) for entry in resolved]
+            # Copies, not the loaded entries: ``mirror`` is an external callback
+            # and must not be able to rewrite the journal's own objects.
+            entries_out = [dict(entry) for entry in resolved]
             if mirror is not None:
                 for entry in entries_out:
                     try:
@@ -1135,14 +1137,14 @@ def clear_session_prompt_notes(
                         # transition or fail the cleanup that already happened.
                         logger.warning(
                             "Cannot mirror prompt-note cleanup in ledger: %s",
-                            scrub_text(str(exc)),
+                            str(exc),
                         )
             return {
                 "complete": not conflicts and not error,
                 "removed": len(removed),
                 "note_ids": [note["id"] for note, _entry in removed],
                 "conflicts": conflicts,
-                "error": scrub_text(error),
+                "error": error,
                 "journal_ids": [str(entry["id"]) for entry in resolved],
                 "entries": entries_out,
             }
@@ -1159,7 +1161,7 @@ def clear_session_prompt_notes(
             intent whose note was already gone reaches this without any store
             write -- so read ``journal_ids``/``removed`` rather than assuming it.
             """
-            logger.warning("Cannot complete session prompt cleanup: %s", scrub_text(reason))
+            logger.warning("Cannot complete session prompt cleanup: %s", reason)
             return cleanup_result(reason)
 
         try:
@@ -1231,7 +1233,7 @@ def clear_session_prompt_notes(
                             f"journal entry {entry_id} is no longer {source_outcome}"
                         )
         except Exception as exc:
-            safe_error = scrub_text(str(exc))
+            safe_error = str(exc)
             logger.warning("Cannot clear session prompt notes: %s", safe_error)
             # A prior terminal transition in this batch is already durable and
             # reconciliation will not emit it again. Return those exact entries
@@ -1385,7 +1387,7 @@ def _acquire_mutation_lock(*, wait: bool, timeout: float = 0.0) -> Iterator[bool
                 _ORPHANED_LOCK_TOKENS[str(path)] = token
                 logger.error(
                     "Could not release refine mutation lock (will retry on next acquisition): %s",
-                    scrub_text(str(exc)),
+                    str(exc),
                 )
 
         # A failed migrator can switch from legacy to the committed destination
@@ -1526,7 +1528,7 @@ def _clear_owned_orphan(path: Path) -> None:
     except FileNotFoundError:
         _ORPHANED_LOCK_TOKENS.pop(key, None)
     except Exception as exc:
-        logger.error("Could not recover owned refine lock: %s", scrub_text(str(exc)))
+        logger.error("Could not recover owned refine lock: %s", str(exc))
 
 
 def _replace_with_retry(temp_name: str, path: Path) -> None:
@@ -1561,7 +1563,7 @@ def _cleanup_interrupted_artifacts(directory: Path) -> None:
         except OSError as exc:
             logger.warning(
                 "Cannot inspect Refine atomic staging files: %s",
-                scrub_text(str(exc)),
+                str(exc),
             )
             continue
         for candidate in candidates:
@@ -1581,7 +1583,7 @@ def _cleanup_interrupted_artifacts(directory: Path) -> None:
             except OSError as exc:
                 logger.warning(
                     "Cannot remove interrupted Refine atomic staging file: %s",
-                    scrub_text(str(exc)),
+                    str(exc),
                 )
 
     entries_value, state = _load_entries_state()
@@ -1599,7 +1601,7 @@ def _cleanup_interrupted_artifacts(directory: Path) -> None:
         return
     except OSError as exc:
         logger.warning(
-            "Cannot inspect Refine recovery backups: %s", scrub_text(str(exc))
+            "Cannot inspect Refine recovery backups: %s", str(exc)
         )
         return
     for candidate in candidates:
@@ -1626,7 +1628,7 @@ def _cleanup_interrupted_artifacts(directory: Path) -> None:
         except OSError as exc:
             logger.warning(
                 "Cannot remove unreferenced Refine recovery backup: %s",
-                scrub_text(str(exc)),
+                str(exc),
             )
 
 
@@ -1760,7 +1762,7 @@ def _load_entries_state(
     except FileNotFoundError:
         return [], "absent"
     except Exception as exc:
-        logger.error("Failed to read journal: %s", scrub_text(str(exc)))
+        logger.error("Failed to read journal: %s", str(exc))
         return [], "unreadable"
     return entries_value, "ok"
 
@@ -1868,7 +1870,7 @@ def last_attempt_ts(trigger: Optional[str] = None) -> Optional[float]:
 
 def _append_entry(entry: Dict[str, Any]) -> None:
     """Append one fsynced JSON line without rewriting journal history."""
-    safe_entry = sanitize(entry)
+    safe_entry = entry
     record = json.dumps(safe_entry, ensure_ascii=False, separators=(",", ":")) + "\n"
     encoded = record.encode("utf-8")
     with mutation_lock():
@@ -2026,16 +2028,16 @@ def finalize(
             raise KeyError(f"Prepared journal entry {entry_id} not found")
         updated = dict(entry)
         updated["outcome"] = outcome
-        updated["error"] = scrub_text(error)
+        updated["error"] = error
         if pending_id is not None:
-            updated["pending_id"] = scrub_text(str(pending_id))
+            updated["pending_id"] = str(pending_id)
             recovery = dict(updated.get("recovery", {}))
             recovery["pending_id"] = updated["pending_id"]
             updated["recovery"] = recovery
         updated["finalized_ts"] = time.time()
         _validate_journal_transition(entry, updated)
         _append_entry(updated)
-        return sanitize(updated)
+        return updated
 
 
 def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
@@ -2246,7 +2248,7 @@ def _read_skill_state(name: str) -> tuple:
         raw = skill_view(name, preprocess=False)
         result = raw if isinstance(raw, dict) else json.loads(raw)
     except Exception as exc:
-        logger.warning("Cannot view skill '%s': %s", name, scrub_text(str(exc)))
+        logger.warning("Cannot view skill '%s': %s", name, str(exc))
         return False, None
     if not isinstance(result, dict):
         return False, None
@@ -2267,7 +2269,7 @@ def _read_skill_state(name: str) -> tuple:
     except FileNotFoundError:
         return True, None
     except Exception as exc:
-        logger.warning("Cannot read skill file '%s': %s", path, scrub_text(str(exc)))
+        logger.warning("Cannot read skill file '%s': %s", path, str(exc))
         return False, None
 
 
@@ -2353,7 +2355,7 @@ def prune_expired_backups() -> List[Path]:
         except Exception as exc:
             logger.warning(
                 "Cannot prune refine backups because the journal is unreadable: %s",
-                scrub_text(str(exc)),
+                str(exc),
             )
             return []
         referenced_names = set()
@@ -2378,7 +2380,7 @@ def prune_expired_backups() -> List[Path]:
         try:
             candidates = list(backups_dir().iterdir())
         except OSError as exc:
-            logger.warning("Cannot inspect refine backups for retention: %s", scrub_text(str(exc)))
+            logger.warning("Cannot inspect refine backups for retention: %s", str(exc))
             return []
         removed: List[Path] = []
         for candidate in candidates:
@@ -2399,7 +2401,7 @@ def prune_expired_backups() -> List[Path]:
                 logger.warning(
                     "Cannot prune expired refine backup %s: %s",
                     candidate.name,
-                    scrub_text(str(exc)),
+                    str(exc),
                 )
         return removed
 
@@ -2420,14 +2422,14 @@ def prepare_skill_recovery(name: str) -> Optional[Dict[str, Any]]:
         try:
             _atomic_write_text(backup, before)
         except Exception as exc:
-            logger.warning("Cannot back up skill '%s': %s", name, scrub_text(str(exc)))
+            logger.warning("Cannot back up skill '%s': %s", name, str(exc))
             return None
         # Retention is opportunistic: a cleanup failure must not invalidate the
         # newly created durable recovery copy that this edit still needs.
         try:
             prune_expired_backups()
         except Exception as exc:
-            logger.warning("Cannot prune expired refine backups: %s", scrub_text(str(exc)))
+            logger.warning("Cannot prune expired refine backups: %s", str(exc))
         return {
             "backup_path": str(backup),
             "snapshot": {
@@ -2459,7 +2461,7 @@ def snapshot_before_content(entry: Dict[str, Any]) -> Optional[str]:
         logger.warning(
             "Refine journal snapshot for '%s' does not match its digest; "
             "falling back to the backup file",
-            scrub_text(str(snapshot.get("name", ""))),
+            str(snapshot.get("name", "")),
         )
     backup_path = Path(str(entry.get("backup_path", "")))
     if not backup_path.is_file() and backup_path.name:
@@ -2475,7 +2477,7 @@ def snapshot_before_content(entry: Dict[str, Any]) -> Optional[str]:
         return backup_path.read_text(encoding="utf-8")
     except Exception as exc:
         logger.warning(
-            "Cannot read refine backup %s: %s", backup_path, scrub_text(str(exc))
+            "Cannot read refine backup %s: %s", backup_path, str(exc)
         )
         return None
 
@@ -2488,7 +2490,7 @@ def _memory_entries(target: str) -> Optional[List[str]]:
         store.load_from_disk()
         return list(store._entries_for(target))  # noqa: SLF001 - host has no public reader
     except Exception as exc:
-        logger.warning("Cannot read %s memory: %s", target, scrub_text(str(exc)))
+        logger.warning("Cannot read %s memory: %s", target, str(exc))
         return None
 
 
@@ -2546,7 +2548,7 @@ def _memory_file_lock(store: Any, target: str):
     except AttributeError as exc:
         logger.warning(
             "Host exposes no memory file lock; rolling back unlocked: %s",
-            scrub_text(str(exc)),
+            str(exc),
         )
         return nullcontext()
 
@@ -2735,7 +2737,7 @@ def _pending_exists(subsystem: str, pending_id: str) -> Optional[bool]:
         result = json.loads(raw) if isinstance(raw, str) else raw
         return bool(result)
     except Exception as exc:
-        logger.warning("Cannot query pending approval %s: %s", pending_id, scrub_text(str(exc)))
+        logger.warning("Cannot query pending approval %s: %s", pending_id, str(exc))
         return None
 
 
@@ -2767,15 +2769,15 @@ def _interrupted_pending_id(
             return ""
         logger.warning(
             "Cannot load host approval capability while recovering %s: %s",
-            scrub_text(str(entry.get("id", ""))),
-            scrub_text(str(exc)),
+            str(entry.get("id", "")),
+            str(exc),
         )
         return None
     except Exception as exc:
         logger.warning(
             "Cannot load host approval capability while recovering %s: %s",
-            scrub_text(str(entry.get("id", ""))),
-            scrub_text(str(exc)),
+            str(entry.get("id", "")),
+            str(exc),
         )
         return None
     enumerate_pending = getattr(approval, "list_pending", None)
@@ -2792,8 +2794,8 @@ def _interrupted_pending_id(
         logger.warning(
             "Cannot enumerate pending %s writes while recovering %s: %s",
             subsystem,
-            scrub_text(str(entry.get("id", ""))),
-            scrub_text(str(exc)),
+            str(entry.get("id", "")),
+            str(exc),
         )
         return None
     if not isinstance(records, list):
@@ -2816,7 +2818,7 @@ def _interrupted_pending_id(
         logger.warning(
             "Cannot verify pending %s enumeration: %s",
             subsystem,
-            scrub_text(str(exc)),
+            str(exc),
         )
         return None
 
@@ -2830,7 +2832,7 @@ def _interrupted_pending_id(
     logger.warning(
         "Host approval queue cannot causally identify interrupted %s for journal entry %s",
         "rollback" if rollback else "write",
-        scrub_text(str(entry.get("id", ""))),
+        str(entry.get("id", "")),
     )
     return None
 
@@ -3057,7 +3059,7 @@ def reconcile() -> List[Dict[str, Any]]:
                         finalize(entry_id, "applied", error="Rollback approval rejected")
                     )
         except Exception as exc:
-            logger.warning("Cannot reconcile journal entry %s: %s", entry_id, scrub_text(str(exc)))
+            logger.warning("Cannot reconcile journal entry %s: %s", entry_id, str(exc))
     return changed
 
 
@@ -3068,7 +3070,7 @@ def _restore_applied(entry_id: str, error: str) -> None:
     try:
         finalize(entry_id, "applied", error=error)
     except Exception as exc:
-        logger.warning("Cannot restore applied state for %s: %s", entry_id, scrub_text(str(exc)))
+        logger.warning("Cannot restore applied state for %s: %s", entry_id, str(exc))
 
 
 def rollback_skill(entry_id: str) -> Dict[str, Any]:
@@ -3119,7 +3121,7 @@ def _rollback_skill_locked(entry_id: str) -> Dict[str, Any]:
         if entry.get("outcome") != "rollback_prepared":
             entry = finalize(entry_id, "rollback_prepared")
     except Exception as exc:
-        return {"success": False, "error": f"Cannot journal rollback intent: {scrub_text(str(exc))}"}
+        return {"success": False, "error": f"Cannot journal rollback intent: {str(exc)}"}
 
     try:
         from tools.skill_manager_tool import skill_manage
@@ -3131,14 +3133,14 @@ def _rollback_skill_locked(entry_id: str) -> Dict[str, Any]:
         )
         result = raw if isinstance(raw, dict) else json.loads(raw)
     except Exception as exc:
-        error = f"Rollback failed: {scrub_text(str(exc))}"
+        error = f"Rollback failed: {str(exc)}"
         _restore_applied(entry_id, error)
         return {"success": False, "error": error}
 
     if not result.get("success"):
-        error = scrub_text(str(result.get("error", "Rollback host operation failed")))
+        error = str(result.get("error", "Rollback host operation failed"))
         _restore_applied(entry_id, error)
-        return sanitize(result)
+        return result
 
     if result.get("staged"):
         pending_id = str(result.get("pending_id", ""))
@@ -3162,11 +3164,11 @@ def _rollback_skill_locked(entry_id: str) -> Dict[str, Any]:
                 "pending_id": pending_id,
                 "error": (
                     "Rollback was reserved but pending state finalization failed; "
-                    f"recovery id: {entry_id}. {scrub_text(str(exc))}"
+                    f"recovery id: {entry_id}. {str(exc)}"
                 ),
             }
         result["message"] = "Rollback is pending approval; target has not been marked rolled back"
-        return sanitize(result)
+        return result
 
     current_entry = get_entry(entry_id) or entry
     if not rollback_target_matches(current_entry):
@@ -3180,11 +3182,11 @@ def _rollback_skill_locked(entry_id: str) -> Dict[str, Any]:
             "success": False,
             "error": (
                 "Rollback changed the target but journal finalization failed; "
-                f"recovery id: {entry_id}. {scrub_text(str(exc))}"
+                f"recovery id: {entry_id}. {str(exc)}"
             ),
         }
     result["message"] = result.get("message", f"Skill '{name}' rolled back")
-    return sanitize(result)
+    return result
 
 
 def rollback_memory(entry_id: str) -> Dict[str, Any]:
@@ -3258,8 +3260,8 @@ def _rollback_memory_locked(entry_id: str) -> Dict[str, Any]:
     except Exception as exc:
         latest = get_entry(entry_id) or entry
         if not rollback_target_matches(latest):
-            _restore_applied(entry_id, scrub_text(str(exc)))
-        return {"success": False, "error": f"Memory rollback failed: {scrub_text(str(exc))}"}
+            _restore_applied(entry_id, str(exc))
+        return {"success": False, "error": f"Memory rollback failed: {str(exc)}"}
 
     latest = get_entry(entry_id) or entry
     if not rollback_target_matches(latest):
@@ -3273,7 +3275,7 @@ def _rollback_memory_locked(entry_id: str) -> Dict[str, Any]:
             "success": False,
             "error": (
                 "Memory rollback changed the target but journal finalization failed; "
-                f"recovery id: {entry_id}. {scrub_text(str(exc))}"
+                f"recovery id: {entry_id}. {str(exc)}"
             ),
         }
     # ``target`` is the host's own name for the store ("memory" or "user"), so
@@ -3311,8 +3313,8 @@ def rollback_prompt_note(entry_id: str) -> Dict[str, Any]:
                 entry = finalize(entry_id, "rollback_prepared")
             _write_prompt_notes(notes[:index] + notes[index + 1:])
         except Exception as exc:
-            _restore_applied(entry_id, scrub_text(str(exc)))
-            return {"success": False, "error": f"Prompt-note rollback failed: {scrub_text(str(exc))}"}
+            _restore_applied(entry_id, str(exc))
+            return {"success": False, "error": f"Prompt-note rollback failed: {str(exc)}"}
 
         latest = get_entry(entry_id) or entry
         if not rollback_target_matches(latest):
@@ -3326,7 +3328,7 @@ def rollback_prompt_note(entry_id: str) -> Dict[str, Any]:
                 "success": False,
                 "error": (
                     "Prompt-note rollback changed the target but journal finalization failed; "
-                    f"recovery id: {entry_id}. {scrub_text(str(exc))}"
+                    f"recovery id: {entry_id}. {str(exc)}"
                 ),
             }
         return {"success": True, "message": f"Removed prompt note {note_id}"}

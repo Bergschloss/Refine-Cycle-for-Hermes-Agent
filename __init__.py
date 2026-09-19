@@ -106,7 +106,7 @@ def _session_llm() -> Optional[PluginLlm]:
     try:
         llm = _REGISTERED_CONTEXT.llm
     except Exception as exc:
-        logger.warning("Cannot resolve the active refine LLM: %s", core.scrub_text(str(exc)))
+        logger.warning("Cannot resolve the active refine LLM: %s", str(exc))
         return None
     return llm if core._llm._is_invocation_bound(llm) else None
 
@@ -328,7 +328,7 @@ def _run_auto_refine(
                         session_id, timeout=None if acquired else 0.0
                     )
     except Exception as exc:
-        safe_error = core.scrub_text(str(exc))
+        safe_error = str(exc)
         message = f"Automatic refine failed: {safe_error or 'unknown error'}"
         logger.error("%s", message)
         core.note_auto_event("auto_refine_failed", message)
@@ -870,7 +870,7 @@ def _on_pre_llm_call(**kwargs) -> Optional[dict]:
             scope = note.get("scope", "global")
             if scope == "session" and note.get("session_id") != session_id:
                 continue
-            content = core.scrub_text(note["content"]).strip()
+            content = note["content"].strip()
             content_error = core._stored_prompt_note_content_error(content)
             if content_error:
                 core.note_auto_event(
@@ -887,7 +887,7 @@ def _on_pre_llm_call(**kwargs) -> Optional[dict]:
                 "- " + note["content"].replace("\n", "\n  ")
                 for note in selected
             )
-            safe_rendered = core.scrub_text(rendered)
+            safe_rendered = rendered
             if len(safe_rendered) <= config.prompt_notes_max_chars():
                 return {"context": safe_rendered}
             selected = selected[1:]
@@ -920,7 +920,7 @@ def _clear_session_prompt_notes(
             core.note_auto_event("prompt_note_cleanup_failed", message)
             return False
         conflicts = cleanup.get("conflicts", [])
-        cleanup_error = core.scrub_text(str(cleanup.get("error", "")))
+        cleanup_error = str(cleanup.get("error", ""))
         if conflicts or cleanup_error or cleanup.get("complete") is False:
             # Name the exact notes. Refine will not remove a note it cannot prove
             # it owns, so this state does not clear itself; without the ids the
@@ -929,7 +929,7 @@ def _clear_session_prompt_notes(
             retained = ""
             if conflicts:
                 named = ", ".join(
-                    core.scrub_text(str(note_id)) for note_id in conflicts[:5]
+                    str(note_id) for note_id in conflicts[:5]
                 )
                 if len(conflicts) > 5:
                     named += f" (+{len(conflicts) - 5} more)"
@@ -953,7 +953,7 @@ def _clear_session_prompt_notes(
             return False
         return True
     except Exception as exc:
-        safe_error = core.scrub_text(str(exc))
+        safe_error = str(exc)
         message = f"Session prompt-note cleanup failed: {safe_error}"
         logger.warning(message)
         core.note_auto_event("prompt_note_cleanup_failed", message)
@@ -989,7 +989,7 @@ def _on_post_llm_call(
             _capture_subagent_parent(),
         )
     except Exception as exc:
-        safe_error = core.scrub_text(str(exc))
+        safe_error = str(exc)
         message = f"Post-LLM refine hook failed: {safe_error or 'unknown error'}"
         logger.warning("%s", message)
         core.note_auto_event("post_llm_hook_failed", message)
@@ -1084,7 +1084,7 @@ def _handle_model_subcommand(remainder: str) -> str:
                     "⚠ Provider is set but host trust denies overrides. Enable "
                     "plugins.entries.refine.llm.allow_provider_override to apply it."
                 )
-        return core.scrub_text("\n".join(lines))
+        return "\n".join(lines)
 
     if remainder == "auto":
         outcome = journal.clear_model_override()
@@ -1097,7 +1097,7 @@ def _handle_model_subcommand(remainder: str) -> str:
             # target printed next is the accurate answer either way.
             "failed": "⚠ Could not remove the override file.",
         }[outcome]
-        return core.scrub_text(
+        return (
             f"{prefix} Effective model: {effective.get('model') or '(host default)'} "
             f"(source: {effective['source']})"
         )
@@ -1121,7 +1121,7 @@ def _handle_model_subcommand(remainder: str) -> str:
             "⚠ Host trust denies provider overrides. The provider value is saved but "
             "will not be sent until plugins.entries.refine.llm.allow_provider_override is true."
         )
-    return core.scrub_text("\n".join(lines))
+    return "\n".join(lines)
 
 
 def _mistyped_subcommand_error(args: str) -> Optional[str]:
@@ -1149,7 +1149,7 @@ def _mistyped_subcommand_error(args: str) -> Optional[str]:
         return None
     name = _command_display_name()
     return (
-        f"❌ Unknown subcommand '{core.scrub_text(args)}'. Did you mean '{close[0]}'?\n"
+        f"❌ Unknown subcommand '{args}'. Did you mean '{close[0]}'?\n"
         f"Usage: {name} [audit | status | dry-run | model | "
         f"rollback <journal_id> | session <session_id>]\n"
         f"Any other text is a reason, e.g. {name} the tests keep failing"
@@ -1189,8 +1189,8 @@ async def _update_command() -> str:
             )
     except Exception as exc:
         logger.exception("refine update failed")
-        return f"{notices.BRAND} update failed. {core.scrub_text(str(exc))}"
-    return core.scrub_text(reply)
+        return f"{notices.BRAND} update failed. {str(exc)}"
+    return reply
 
 
 def _status_headline() -> list:
@@ -1240,7 +1240,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             return core.refine_audit().get("report", "No data.")
         except Exception as exc:
             logger.exception("refine audit failed")
-            return f"❌ Audit failed: {core.scrub_text(str(exc))}"
+            return f"❌ Audit failed: {str(exc)}"
 
     if args == "update":
         return _update_command()
@@ -1250,7 +1250,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             status = core.refine_status()
         except Exception as exc:
             logger.exception("refine status failed")
-            return f"❌ Status failed: {core.scrub_text(str(exc))}"
+            return f"❌ Status failed: {str(exc)}"
         command_blockers = list(status["blockers"])
         if _session_llm() is None:
             command_blockers.append({
@@ -1359,7 +1359,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         if status["warnings"]:
             lines.append("warnings:")
             lines.extend(f"  ⚠ {item['message']}" for item in status["warnings"])
-        return core.scrub_text("\n".join(_status_headline() + lines))
+        return "\n".join(_status_headline() + lines)
 
     if args == "dry-run" or args.startswith("dry-run "):
         dry_reason = args[7:].strip()  # len("dry-run") == 7
@@ -1389,7 +1389,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                     )
                 if lookup_status != "ok":
                     return (
-                        f"❌ No session '{core.scrub_text(dry_session)}' exists.\n"
+                        f"❌ No session '{dry_session}' exists.\n"
                         f"Usage: {_command_display_name()} dry-run session <session_id>\n"
                         f"Find ids in the sessions table of {config.state_db_path()}"
                     )
@@ -1407,7 +1407,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             )
         except Exception as exc:
             logger.exception("refine dry-run failed")
-            return f"❌ Dry-run failed: {core.scrub_text(str(exc))}"
+            return f"❌ Dry-run failed: {str(exc)}"
         if result.get("outcome") == "dry_run":
             proposal = result.get("proposal", {})
             lines = ["🔍 Dry run — nothing applied."]
@@ -1435,7 +1435,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 lines.append("```")
                 if result.get("diff_truncated"):
                     lines.append("(diff truncated)")
-            return core.scrub_text("\n".join(lines))
+            return "\n".join(lines)
         # Non-dry-run outcome (session_unknown, skipped, etc.)
         if not result.get("success"):
             return f"❌ {result.get('message', 'Unknown error')}"
@@ -1456,7 +1456,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 # as a traceback on exactly the unwritable journal_dir that
                 # /refine status exists to diagnose.
                 logger.exception("refine model command failed")
-                return f"❌ Model command failed: {core.scrub_text(str(exc))}"
+                return f"❌ Model command failed: {str(exc)}"
         if remainder and ("/" in remainder or " " not in remainder):
             return (
                 "❌ Invalid model target.\n"
@@ -1493,7 +1493,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 )
             if lookup_status != "ok":
                 return (
-                    f"❌ No session '{core.scrub_text(explicit_session)}' exists.\n"
+                    f"❌ No session '{explicit_session}' exists.\n"
                     f"Usage: {_command_display_name()} session <session_id>\n"
                     f"Find ids in the sessions table of {config.state_db_path()}"
                 )
@@ -1508,7 +1508,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 )
             except Exception as exc:
                 logger.exception("refine session command failed")
-                return f"❌ Refine failed: {core.scrub_text(str(exc))}"
+                return f"❌ Refine failed: {str(exc)}"
             return _format_run_result(result)
         # Anything else is prose and reaches the proposal path untouched.
 
@@ -1524,7 +1524,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             result = core.refine_rollback(entry_id)
         except Exception as exc:
             logger.exception("refine rollback failed")
-            return f"❌ Rollback failed: {core.scrub_text(str(exc))}"
+            return f"❌ Rollback failed: {str(exc)}"
         if result.get("success"):
             return f"✅ Rollback {entry_id}: {result.get('message', 'done')}"
         return f"❌ Rollback failed: {result.get('error', 'unknown error')}"
@@ -1549,7 +1549,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
         )
     except Exception as exc:
         logger.exception("refine command failed")
-        return f"❌ Refine failed: {core.scrub_text(str(exc))}"
+        return f"❌ Refine failed: {str(exc)}"
 
     return _format_run_result(result)
 
@@ -1635,7 +1635,7 @@ def _handle_refine_run(args: dict, **kw) -> str:
         if lookup_status != "ok":
             return json.dumps({
                 "success": False,
-                "error": f"No session '{core.scrub_text(session_id)}' exists.",
+                "error": f"No session '{session_id}' exists.",
             })
 
     try:
@@ -1651,7 +1651,7 @@ def _handle_refine_run(args: dict, **kw) -> str:
         )
     except Exception as exc:
         logger.exception("refine_run tool failed")
-        return json.dumps({"success": False, "error": core.scrub_text(str(exc))})
+        return json.dumps({"success": False, "error": str(exc)})
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -1722,7 +1722,7 @@ def _on_session_end(
             if collection_status != "ok":
                 logger.warning(
                     "refine auto: evidence unavailable (%s); recording durable failure",
-                    core.scrub_text(collection_status),
+                    collection_status,
                 )
                 entry_id = core.record_evidence_failure(
                     session_id,

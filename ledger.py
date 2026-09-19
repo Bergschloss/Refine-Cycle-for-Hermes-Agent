@@ -15,13 +15,11 @@ try:
     from . import config as _config
     from . import patterns
     from .config import journal_dir, state_db_path
-    from .sanitization import scrub_text
 except ImportError:
     import journal  # type: ignore
     import config as _config  # type: ignore
     import patterns  # type: ignore
     from config import journal_dir, state_db_path  # noqa: F811
-    from sanitization import scrub_text  # type: ignore
 
 logger = logging.getLogger(__name__)
 _STATS_FILE_NAME = "skill_stats.json"
@@ -59,7 +57,7 @@ def load_stats() -> Dict[str, Any]:
         return data
     except Exception as exc:
         logger.error("Cannot read skill stats: %s", exc)
-        raise IOError(f"Ledger unreadable: {scrub_text(str(exc))}") from exc
+        raise IOError(f"Ledger unreadable: {str(exc)}") from exc
 
 
 def _save_stats(stats: Dict[str, Any]) -> None:
@@ -221,7 +219,7 @@ def record_edit(
             "action": proposal.get("action", ""),
             "pattern_fingerprint": proposal.get("pattern_fingerprint", ""),
             "expected_outcome": (
-                scrub_text(proposal["expected_outcome"]).strip()
+                proposal["expected_outcome"].strip()
                 if isinstance(proposal.get("expected_outcome"), str)
                 else ""
             ),
@@ -232,9 +230,9 @@ def record_edit(
         # reconciliation calls that carry no model metadata.
         reported_model = ""
         if isinstance(llm_meta, dict) and llm_meta.get("reported_model"):
-            reported_model = scrub_text(str(llm_meta["reported_model"]))[:60]
+            reported_model = str(llm_meta["reported_model"])[:60]
         elif isinstance(previous, dict) and previous.get("reported_model"):
-            reported_model = scrub_text(str(previous["reported_model"]))[:60]
+            reported_model = str(previous["reported_model"])[:60]
         if reported_model:
             stats[key]["reported_model"] = reported_model
         # H3: a fingerprint the model offered but that was never observed in
@@ -418,7 +416,7 @@ def _merge_journal_stats(
             continue
         llm_meta = entry.get("llm_meta")
         reported_model = (
-            scrub_text(str(llm_meta["reported_model"]))[:60]
+            str(llm_meta["reported_model"])[:60]
             if isinstance(llm_meta, dict) and llm_meta.get("reported_model")
             else ""
         )
@@ -432,7 +430,7 @@ def _merge_journal_stats(
         # audit() can tell "refine did its job" from "the host was broken"
         # instead of showing one word for both. No journal format change.
         result_code = (
-            scrub_text(str(llm_meta["result_code"]))[:60]
+            str(llm_meta["result_code"])[:60]
             if isinstance(llm_meta, dict) and llm_meta.get("result_code")
             else ""
         )
@@ -476,7 +474,7 @@ def _merge_journal_stats(
             "action": proposal.get("action", ""),
             "pattern_fingerprint": proposal.get("pattern_fingerprint", ""),
             "expected_outcome": (
-                scrub_text(proposal["expected_outcome"]).strip()
+                proposal["expected_outcome"].strip()
                 if isinstance(proposal.get("expected_outcome"), str)
                 else ""
             ),
@@ -683,7 +681,7 @@ def audit(
     intended_prompt_note_ids = _latest_applied_prompt_note_ids(journal_entries)
     for key, meta in sorted(merged_stats.items()):
         if not isinstance(meta, dict):
-            logger.warning("Ignoring malformed ledger row for %s", scrub_text(str(key)))
+            logger.warning("Ignoring malformed ledger row for %s", str(key))
             continue
         # Legacy rows have no explicit name; their key is the name.
         name = str(meta.get("name") or key)
@@ -995,7 +993,7 @@ def audit(
                 else None
             ),
             "reported_model": (
-                scrub_text(str(meta.get("reported_model", "")))[:60]
+                str(meta.get("reported_model", ""))[:60]
                 if meta.get("reported_model")
                 else ""
             ),
@@ -1006,7 +1004,7 @@ def audit(
             # target and is not trustworthy -- had never printed.
             "model_substituted": bool(meta.get("model_substituted")),
             "expected_outcome": (
-                scrub_text(meta["expected_outcome"]).strip()
+                meta["expected_outcome"].strip()
                 if isinstance(meta.get("expected_outcome"), str)
                 else ""
             ),

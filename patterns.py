@@ -17,9 +17,9 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
-    from .sanitization import LINE_BREAK_RE, scrub_text
+    from .sanitization import LINE_BREAK_RE
 except ImportError:
-    from sanitization import LINE_BREAK_RE, scrub_text  # type: ignore
+    from sanitization import LINE_BREAK_RE  # type: ignore
 
 # Path normalization has to collapse volatile detail (``/users/8821`` and
 # ``/users/9134`` are one failure) *without* merging errors that only look alike
@@ -934,12 +934,12 @@ def format_patterns(
                 count=entry.get("count", 1),
                 sessions=entry.get("sessions_seen", 1),
                 tool=LINE_BREAK_RE.sub(
-                    " ", scrub_text(str(entry.get("tool") or "?"))
+                    " ", str(entry.get("tool") or "?")
                 ).replace("<", "&lt;").replace(">", "&gt;"),
                 sample=LINE_BREAK_RE.sub(
-                    " ", scrub_text(str(entry.get("sample") or ""))
+                    " ", str(entry.get("sample") or "")
                 )[:160].replace("<", "&lt;").replace(">", "&gt;"),
-                fp=scrub_text(str(entry.get("fingerprint", ""))),
+                fp=str(entry.get("fingerprint", "")),
             )
         )
         if "resolution_status" in entry:

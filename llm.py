@@ -34,10 +34,10 @@ except ImportError:
 
 try:
     from . import config
-    from .sanitization import LINE_BREAK_RE, sanitize, scrub_text
+    from .sanitization import LINE_BREAK_RE
 except ImportError:
     import config  # type: ignore
-    from sanitization import LINE_BREAK_RE, sanitize, scrub_text  # type: ignore
+    from sanitization import LINE_BREAK_RE  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ def _safe_trajectory_record(line: str) -> str:
     # Never manufacture a trusted opener around payload text. Current rendering
     # emits one complete physical line per record; any other reserved-tag shape
     # is foreign or legacy malformed input and is safer to omit than to repair.
-    preview = LINE_BREAK_RE.sub(" ", scrub_text(line[:80]))
+    preview = LINE_BREAK_RE.sub(" ", line[:80])
     logger.warning(
         "Omitted malformed trajectory record containing boundary tags "
         "(len=%d, first 80 chars: %s)",
@@ -353,7 +353,7 @@ def _pinned_target() -> Dict[str, str]:
         effective = config.effective_llm_target()
     except Exception as exc:
         logger.warning(
-            "Cannot resolve the refine model target: %s", scrub_text(str(exc))
+            "Cannot resolve the refine model target: %s", str(exc)
         )
         return {}
     # A "live" target is the host's own current model read back via a private API.
@@ -375,7 +375,7 @@ def _pinned_target() -> Dict[str, str]:
     if denials:
         logger.warning(
             "Refine target fields were not sent: %s",
-            scrub_text("; ".join(denials.values())),
+            "; ".join(denials.values()),
         )
     return target
 
@@ -836,11 +836,11 @@ def _salvage_parsed(result: Any, *, requested_max_tokens: int) -> _Reply:
     if final_text:
         value = _extract_first_json_object(final_text)
         if value is not None:
-            return _Reply(sanitize(value), salvaged=True)
+            return _Reply(value, salvaged=True)
     output_tokens = _output_tokens(result)
     if not final_text:
         if output_tokens:
-            model = scrub_text(str(getattr(result, "model", "")))
+            model = str(getattr(result, "model", ""))
             if output_tokens >= requested_max_tokens:
                 logger.warning(
                     "Refine model exhausted its output budget before a final answer "
@@ -916,12 +916,12 @@ def _propose_structured(
         text = getattr(block, "text", None)
         if text is None:
             raise TypeError("Refine accepts only text model inputs")
-        safe_blocks.append(PluginLlmTextInput(text=scrub_text(str(text))))
+        safe_blocks.append(PluginLlmTextInput(text=str(text)))
     resolved_target = (
         bound_route_kwargs(llm) if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
     )
     common = dict(
-        instructions=scrub_text(str(instructions)),
+        instructions=str(instructions),
         input=safe_blocks,
         schema_name=schema_name,
         purpose="refine",
@@ -930,7 +930,7 @@ def _propose_structured(
         timeout=_PROPOSAL_TIMEOUT_SECONDS,
         **resolved_target,
     )
-    system_prompt = scrub_text(REFINE_SYSTEM_PROMPT)
+    system_prompt = REFINE_SYSTEM_PROMPT
 
     def _call_json_mode() -> _Reply:
         call_started = time.time()
@@ -965,9 +965,9 @@ def _propose_structured(
     try:
         result = llm.complete_structured(
             system_prompt=system_prompt,
-            json_schema=sanitize(
+            json_schema=
                 REFINE_PROPOSAL_SCHEMA if json_schema is None else json_schema
-            ),
+            ,
             **common,
         )
         _record_call_meta(result, call_started)
@@ -1005,7 +1005,7 @@ def _propose_structured(
             raise
         logger.warning(
             "json_schema rejected (%s); falling back to json_mode",
-            scrub_text(str(first_exc)),
+            str(first_exc),
         )
         try:
             reply = _call_json_mode()
@@ -1018,21 +1018,21 @@ def _propose_structured(
 
 def _ensure_dict(parsed: Any) -> Optional[Dict[str, Any]]:
     if isinstance(parsed, dict):
-        return sanitize(parsed)
+        return parsed
     if hasattr(parsed, "model_dump"):
         try:
-            return sanitize(parsed.model_dump())
+            return parsed.model_dump()
         except Exception:
             pass
     if hasattr(parsed, "dict") and callable(parsed.dict):
         try:
-            return sanitize(parsed.dict())
+            return parsed.dict()
         except Exception:
             pass
     if isinstance(parsed, str):
         obj = _extract_first_json_object(parsed)
         if obj is not None:
-            return sanitize(obj) if isinstance(obj, dict) else None
+            return obj if isinstance(obj, dict) else None
     return None
 
 
@@ -1122,7 +1122,7 @@ def _extract_first_json_object(text: str) -> Optional[Dict[str, Any]]:
 def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Return one conservative reviewer verdict; all failures decline safely."""
     _call_meta.value = {}
-    safe_evidence = scrub_text(str(evidence_text))
+    safe_evidence = str(evidence_text)
     resolved_target = (
         bound_route_kwargs(llm) if _is_invocation_bound(llm) else target if target is not None else _pinned_target()
     )
@@ -1146,9 +1146,9 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                         "Assess this trajectory only for a durable lesson worth persisting. "
                         "Return the required JSON object."
                     ),
-                    system_prompt=scrub_text(REVIEWER_FALLBACK_SYSTEM_PROMPT)
+                    system_prompt=REVIEWER_FALLBACK_SYSTEM_PROMPT
                     + "\nReply with one JSON object only, without Markdown fences.",
-                    input=[PluginLlmTextInput(text=scrub_text(instructions))],
+                    input=[PluginLlmTextInput(text=instructions)],
                     json_mode=True,
                     schema_name="refine_reviewer",
                     purpose="refine",
@@ -1174,9 +1174,9 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                     "Assess this trajectory only for a durable lesson worth persisting. "
                     "Return the required JSON object."
                 ),
-                system_prompt=scrub_text(REVIEWER_FALLBACK_SYSTEM_PROMPT),
-                input=[PluginLlmTextInput(text=scrub_text(instructions))],
-                json_schema=sanitize(REVIEWER_FALLBACK_SCHEMA),
+                system_prompt=REVIEWER_FALLBACK_SYSTEM_PROMPT,
+                input=[PluginLlmTextInput(text=instructions)],
+                json_schema=REVIEWER_FALLBACK_SCHEMA,
                 schema_name="refine_reviewer",
                 purpose="refine",
                 temperature=0.0,
@@ -1209,7 +1209,7 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                 raise
             logger.warning(
                 "Reviewer json_schema rejected (%s); falling back to json_mode",
-                scrub_text(str(schema_exc)),
+                str(schema_exc),
             )
             try:
                 reply = _reviewer_json_mode_call()
@@ -1249,7 +1249,7 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
             "failure": failure,
         }
     except PluginLlmTrustError as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.warning("Reviewer trust denied: %s", safe_error)
         return {
             "should_refine": False,
@@ -1259,7 +1259,7 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
             "error": safe_error,
         }
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.warning("Reviewer fallback failed: %s", safe_error)
         if _is_timeout(exc):
             failure = _review_timeout_failure()
@@ -1293,8 +1293,8 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
                 "instructions": "",
                 "failure": "malformed",
             }
-        rationale = scrub_text(raw_rationale).strip()
-        instructions = scrub_text(raw_instructions).strip()
+        rationale = raw_rationale.strip()
+        instructions = raw_instructions.strip()
         if not rationale or not instructions:
             return {
                 "should_refine": False,
@@ -1315,11 +1315,11 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
     # meaningful rationale so the journal does not read as an empty
     # "Reviewer declined:".
     if isinstance(raw_rationale, str) and raw_rationale.strip():
-        rationale = scrub_text(raw_rationale).strip()[:1000]
+        rationale = raw_rationale.strip()[:1000]
     else:
         rationale = "No durable lesson grounded in this trajectory."
     instructions = (
-        scrub_text(raw_instructions).strip()[:2000]
+        raw_instructions.strip()[:2000]
         if isinstance(raw_instructions, str)
         else ""
     )
@@ -1334,14 +1334,14 @@ def normalize_expected_outcome(value: Any) -> str:
     """Return a compact, sanitized prediction or an empty optional value."""
     if not isinstance(value, str):
         return ""
-    return scrub_text(value).strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
+    return value.strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
 
 
 def normalize_summary(value: Any) -> str:
     """Return a compact, sanitized transaction summary for durable storage."""
     if not isinstance(value, str):
         return ""
-    return scrub_text(value).strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
+    return value.strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
 
 
 def refinement_history_max_chars(configured_chars: int) -> int:
@@ -1416,7 +1416,7 @@ def _valid_fingerprint(value: Any) -> str:
 
 def _overview_text(value: Any) -> str:
     """Sanitize untrusted host metadata into one physical prompt-line value."""
-    text = LINE_BREAK_RE.sub(" ", scrub_text(str(value)))
+    text = LINE_BREAK_RE.sub(" ", str(value))
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", text).strip()
     return text.replace("<", "&lt;").replace(">", "&gt;")
 
@@ -1429,7 +1429,7 @@ def _untrusted_json_record(
     Escaping markup is opt-in: reviewer text has no semantic markup, while a
     current skill must retain its literal content for a complete replacement.
     """
-    safe_content = scrub_text(str(content))
+    safe_content = str(content)
     record = json.dumps(
         {"type": label, "chars": len(safe_content), "content": safe_content},
         ensure_ascii=True,
@@ -1466,7 +1466,7 @@ def _render_notes_block(notes: List[Dict[str, str]]) -> str:
 
 def _semantic_failure(reason: str, failure: str = "malformed") -> Dict[str, Any]:
     """Return an unusable model result without disguising it as a valid no-op."""
-    return sanitize({"action": "no_op", "reason": reason, "failure": failure})
+    return {"action": "no_op", "reason": reason, "failure": failure}
 
 
 def _truncate_overview_line(value: str, limit: int) -> str:
@@ -1625,7 +1625,7 @@ def _repair_echo(parsed: Dict[str, Any]) -> str:
     for key in _REPAIR_ECHO_FIELDS:
         value = parsed.get(key)
         if isinstance(value, str) and value.strip():
-            parts.append(f"{key}: {scrub_text(value)[:MAX_REPAIR_ECHO_CHARS]}")
+            parts.append(f"{key}: {value[:MAX_REPAIR_ECHO_CHARS]}")
     return _untrusted_json_record(
         "original_proposal", "\n".join(parts), escape_tags=True
     )
@@ -1673,11 +1673,11 @@ def _repair_content(
     if reply is None:
         return "", None
     if reply.get("failure"):
-        return "", sanitize(reply)
+        return "", reply
     value = reply.get("content")
     if not isinstance(value, str):
         return "", None
-    return scrub_text(value).strip(), None
+    return value.strip(), None
 
 
 def _ground_parsed(
@@ -1781,9 +1781,9 @@ def _ground_parsed(
         # The repair never got an answer. That is the route failing, not the
         # model declining to comply, and it keeps the route own result code.
         _record_grounding_retry(cause)
-        return parsed, sanitize(reply), ""
+        return parsed, reply, ""
     selected = _valid_fingerprint((reply or {}).get("pattern_fingerprint"))
-    pointer = scrub_text(str((reply or {}).get("evidence", "") or "")).strip()
+    pointer = str((reply or {}).get("evidence", "") or "").strip()
     if reply is None:
         detail = "the repair returned no object"
     elif not selected:
@@ -1855,7 +1855,7 @@ def _finalize_edit(
         )
         if retry is not None:
             if retry.get("failure"):
-                return sanitize(retry)
+                return retry
             for key in (
                 "action", "kind", "name", "category", "reason",
                 "expected_outcome", "evidence", "pattern_fingerprint",
@@ -1883,9 +1883,9 @@ def _finalize_edit(
         return _semantic_failure(f"Invalid action: {action}")
     if action == "no_op":
         raw_reason = parsed.get("reason")
-        if not isinstance(raw_reason, str) or not scrub_text(raw_reason).strip():
+        if not isinstance(raw_reason, str) or not raw_reason.strip():
             return _semantic_failure("No-op proposal requires a non-empty string reason")
-        return sanitize({
+        return {
             "action": "no_op",
             "kind": "",
             "name": "",
@@ -1899,7 +1899,7 @@ def _finalize_edit(
             "pattern_fingerprint": _valid_fingerprint(
                 parsed.get("pattern_fingerprint")
             ),
-        })
+        }
     if kind not in ("skill", "memory", "prompt"):
         return _semantic_failure(f"Invalid kind: {kind}")
     if kind == "prompt" and action != "create":
@@ -2020,7 +2020,7 @@ def _finalize_edit(
                 instructions
                 + "\n\n=== PROMPT NOTE REPAIR ===\n"
                 + "The prompt note was refused: "
-                + scrub_text(str(note_error))
+                + str(note_error)
                 + "\nRewrite ONLY the note text. The action, kind, name, "
                 + "fingerprint, reason, evidence and scope are already fixed "
                 + "and will be reused unchanged; nothing you return can alter "
@@ -2054,9 +2054,9 @@ def _finalize_edit(
                 # different edit to a different store, decided by a retry.
                 return _semantic_failure(
                     "Prompt note was refused ("
-                    + scrub_text(str(note_error))
+                    + str(note_error)
                     + ") and one content repair was refused too ("
-                    + scrub_text(str(second_error))
+                    + str(second_error)
                     + "). Record this lesson as kind=memory or kind=skill "
                     + "instead.",
                     failure="prompt_note_repair_failed",
@@ -2086,12 +2086,12 @@ def _finalize_edit(
                 f"patch input is {MAX_CONTENT_CHARS}",
                 failure="local_safety",
             )
-        safe_current = scrub_text(current)
-        if safe_current != current:
-            return _semantic_failure(
-                "Current SKILL.md contains sensitive content; patch aborted before model call",
-                failure="local_safety",
-            )
+        # A "current SKILL.md contains sensitive content" stop used to sit here,
+        # comparing the body against its redacted form. It went with the rest of
+        # the credential grammar: the model that would receive this body has
+        # already been given the session it came from, so the stop cost a patch
+        # without withholding anything. The size and loadability stops above are
+        # about this call and stay.
         # Capture planning baseline digest from the content the model will see.
         # This value is NEVER read from model output — only from this loader read.
         try:
@@ -2110,7 +2110,7 @@ def _finalize_edit(
             + "restore them as literal brackets in the replacement.\n"
             + "=== CURRENT SKILL DATA (UNTRUSTED JSON) ===\n"
             + _untrusted_json_record(
-                "current_skill", safe_current, escape_tags=True
+                "current_skill", current, escape_tags=True
             )
         )
         retry = _ensure_dict(
@@ -2124,7 +2124,7 @@ def _finalize_edit(
         if retry is None:
             return _semantic_failure("LLM did not return a complete skill replacement")
         if retry.get("failure"):
-            return sanitize(retry)
+            return retry
         retry_action, retry_kind, retry_name, retry_content, retry_category = _normalize_fields(retry)
         if (retry_action, retry_kind, retry_name) != ("patch", "skill", name) or not retry_content:
             return _semantic_failure("Patch retry changed target or omitted complete content")
@@ -2195,13 +2195,13 @@ def _finalize_edit(
         if "evidence" in retry:
             initial_evidence = _ensure_list(retry.get("evidence"))
         retry_reason = retry.get("reason")
-        if isinstance(retry_reason, str) and scrub_text(retry_reason).strip():
+        if isinstance(retry_reason, str) and retry_reason.strip():
             initial_reason = retry_reason
         retry_expected_outcome = normalize_expected_outcome(retry.get("expected_outcome"))
         if retry_expected_outcome:
             initial_expected_outcome = retry_expected_outcome
 
-    result = sanitize({
+    result = {
         "action": action,
         "kind": kind,
         "name": name,
@@ -2211,7 +2211,7 @@ def _finalize_edit(
         "expected_outcome": initial_expected_outcome,
         "evidence": initial_evidence,
         "pattern_fingerprint": initial_fingerprint,
-    })
+    }
     if _planning_baseline is not None:
         result["refine_baseline"] = _planning_baseline
     return result
@@ -2272,14 +2272,14 @@ def _finalize_edits(
         if edit.get("failure"):
             return _semantic_failure(
                 "Inseparable transaction aborted: unusable edit: "
-                + scrub_text(str(edit.get("reason", "")))[:200],
+                + str(edit.get("reason", ""))[:200],
                 failure=str(edit.get("failure", "malformed")),
             )
         if edit.get("action") == "no_op":
             dropped += 1
             logger.warning(
                 "Dropping unusable edit from a refine transaction: %s",
-                scrub_text(str(edit.get("reason", "")))[:200],
+                str(edit.get("reason", ""))[:200],
             )
             continue
         claimed_target = (edit["kind"], edit["name"])
@@ -2288,7 +2288,7 @@ def _finalize_edits(
                 dropped += 1
                 logger.warning(
                     "Dropping a refine transaction edit that repeats target %s",
-                    scrub_text(f"{edit['kind']}:{edit['name']}"),
+                    f"{edit['kind']}:{edit['name']}",
                 )
                 continue
             claimed.add(claimed_target)
@@ -2304,8 +2304,8 @@ def _finalize_edits(
             f"out of {len(raw_edits)} proposed"
         )
     if len(edits) == 1:
-        return sanitize(edits[0])
-    return sanitize({
+        return edits[0]
+    return {
         "action": "multi",
         "kind": "",
         "name": "",
@@ -2320,7 +2320,7 @@ def _finalize_edits(
         # Reported so a transaction the model called inseparable cannot be
         # journaled as complete after part of it was discarded.
         "dropped_edits": dropped,
-    })
+    }
 
 
 def finalize_proposal(
@@ -2347,7 +2347,7 @@ def finalize_proposal(
     if parsed is None:
         return _semantic_failure("LLM returned non-object output")
     if parsed.get("failure"):
-        return sanitize(parsed)
+        return parsed
     # The grounding repair lives HERE and nowhere else, for the same reason
     # this function exists: both proposer arms and both transports converge on
     # it. Putting the repair on the json_schema path alone would have fixed one
@@ -2391,7 +2391,7 @@ def memory_capacity_block(line: str) -> str:
     The overview lists entries but not how full the store is, so a proposer
     facing a full MEMORY.md kept writing memory lessons the host then refused.
     """
-    return f"  ({scrub_text(line)})\n" if line else ""
+    return f"  ({line})\n" if line else ""
 
 
 def propose(
@@ -2423,17 +2423,17 @@ def propose(
     except ImportError:
         import patterns as _patterns  # type: ignore
 
-    # Sanitize independently at this final model boundary even when callers have
-    # already sanitized their evidence. This keeps every prompt piece safe.
-    evidence_text = scrub_text(str(evidence_text))
+    # Copy every caller-owned collection at this boundary so prompt assembly
+    # cannot mutate what the caller still holds.
+    evidence_text = str(evidence_text)
     existing_skills = list(existing_skills or [])
     existing_memories = list(existing_memories or [])
-    error_patterns = sanitize(error_patterns or [])
-    user_corrections = [scrub_text(str(item)) for item in (user_corrections or [])]
-    unused_skills = [scrub_text(str(item)) for item in (unused_skills or [])]
-    refinement_history = sanitize(refinement_history or [])
-    run_context = scrub_text(str(run_context))
-    reviewer_context = scrub_text(str(reviewer_context))
+    error_patterns = list(error_patterns or [])
+    user_corrections = [str(item) for item in (user_corrections or [])]
+    unused_skills = [str(item) for item in (unused_skills or [])]
+    refinement_history = list(refinement_history or [])
+    run_context = str(run_context)
+    reviewer_context = str(reviewer_context)
     overview_max_entries = config.overview_max_entries()
     overview_max_chars = config.overview_max_chars()
     history_max_entries = config.history_max_entries()
@@ -2553,7 +2553,7 @@ def propose(
         logger.warning("Bound plugin LLM route failed: %s", exc.code)
         return _invocation_failure(exc)
     except PluginLlmTrustError as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.warning("PluginLlm trust denied: %s", safe_error)
         return {
             "action": "no_op",
@@ -2561,7 +2561,7 @@ def propose(
             "failure": "llm_trust_denied",
         }
     except Exception as exc:
-        safe_error = scrub_text(str(exc))
+        safe_error = str(exc)
         logger.error("LLM proposal failed: %s", safe_error, exc_info=True)
         timed_out = _is_timeout(exc)
         return {
@@ -2585,11 +2585,11 @@ def _review_timeout_failure() -> Dict[str, str]:
 
 
 def _ensure_list(value: Any) -> List[str]:
-    return [scrub_text(str(item)) for item in value[:10]] if isinstance(value, list) else []
+    return [str(item) for item in value[:10]] if isinstance(value, list) else []
 
 
 def _normalize_skill_name(name: str) -> str:
-    name = scrub_text(name).lower().strip()
+    name = name.lower().strip()
     name = re.sub(r"[^a-z0-9_-]+", "-", name)
     name = re.sub(r"-{2,}", "-", name)
     return name.strip("-")[:64]
