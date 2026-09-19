@@ -42,8 +42,9 @@ correctly → **49.6–57.0%** with the plugin.
 - Every change is recorded. When it can be safely undone, it gives you one
   command to reverse it.
 - It never rewrites Hermes's base instructions or deletes your skills.
-- API keys and other credentials are removed before conversation evidence is
-  sent to the model.
+- API keys and other credentials are stripped where conversation evidence leaves
+  Hermes's database, so they are not copied into what this plugin writes: your
+  memory, your skills, or its own journal.
 - If the evidence, model reply, or Hermes state is unclear, it stops instead of
   pretending that a lesson was applied.
 
