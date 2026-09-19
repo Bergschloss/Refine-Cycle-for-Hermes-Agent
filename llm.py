@@ -1919,20 +1919,12 @@ def _finalize_edit(
     # inside a multi proposal with no ceiling at all (``core._validate_proposal``
     # checks MAX_CONTENT_CHARS=15000, never the entry ceiling), which is
     # precisely the path the model uses when it has more than one lesson.
-    # Measured on the SANITIZED text, because that is what reaches the store and
-    # what core._validate_proposal measures at the other enforcement point.
-    # Redaction is not length-preserving in either direction --
-    # "password=hunter2" (16) becomes "password=[REDACTED]" (19), while an
-    # "sk-<40 chars>" token (43) becomes "[REDACTED]" (10) -- so measuring the
-    # raw text here made the two points disagree about one limit. An entry at the
-    # ceiling naming a credential passed this check and was then refused by the
-    # apply, with the retry this block exists to run never getting to fire; and an
-    # over-length entry whose secret shrinks away was sent for a pointless retry.
-    # Same shape as the token/character budget pair that drifted to 2048 vs 15000.
-    def _stored_len(text: str) -> int:
-        return len(scrub_text(text))
-
-    if kind == "memory" and content and _stored_len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
+    # Measured on the entry's own text, which is what reaches the store and what
+    # ``core._validate_proposal`` measures at the other enforcement point -- one
+    # limit, one measurement, so the two cannot disagree. This was counted after
+    # credential redaction while that redaction existed, which made the length of
+    # a lesson depend on whether a grammar recognised something inside it.
+    if kind == "memory" and content and len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
         if allow_content_retry:
             # C: the shortening retry asks for TEXT, not for a proposal.
             #
@@ -1949,7 +1941,7 @@ def _finalize_edit(
             repair_prompt = (
                 instructions
                 + "\n\n=== MEMORY ENTRY REPAIR ===\n"
-                + f"The memory entry you proposed is {_stored_len(content)} "
+                + f"The memory entry you proposed is {len(content)} "
                 + "characters; the hard limit is "
                 + f"{MEMORY_ENTRY_HARD_LIMIT_CHARS}.\n"
                 + "Rewrite ONLY the entry text. The action, kind, name, "
@@ -1978,7 +1970,7 @@ def _finalize_edit(
                 # entry is still over the limit" are two facts, and a shared
                 # code would make them one line in the journal.
                 return _semantic_failure(
-                    f"The memory entry is {_stored_len(content)} characters "
+                    f"The memory entry is {len(content)} characters "
                     f"against a hard limit of {MEMORY_ENTRY_HARD_LIMIT_CHARS}, "
                     "and one shortening repair returned no usable text. An "
                     "entry that fits only by dropping the trigger, a "
@@ -1991,9 +1983,9 @@ def _finalize_edit(
             # reply that could not carry them.
             content = shortened
             parsed = dict(parsed, content=shortened)
-        if _stored_len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
+        if len(content) > MEMORY_ENTRY_HARD_LIMIT_CHARS:
             return _semantic_failure(
-                f"Memory entry is {_stored_len(content)} characters; the hard limit is "
+                f"Memory entry is {len(content)} characters; the hard limit is "
                 f"{MEMORY_ENTRY_HARD_LIMIT_CHARS}"
                 + (" after one shortening retry" if allow_content_retry else ""),
                 failure="memory_entry_too_long",

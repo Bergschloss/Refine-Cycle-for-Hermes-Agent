@@ -943,8 +943,10 @@ def note_session_id(session_id: str) -> None:
     if not isinstance(session_id, str) or not session_id.strip():
         return
     clean = session_id.strip()
-    # Reject anything that scrubbing would alter — it might be content, not an id.
-    if scrub_text(clean) != clean or len(clean) > 128:
+    # Shape, not the credential filter: an id is letters, digits, '.', '_' and
+    # '-' (journal.SESSION_ID_RE, measured against every session in the live
+    # store) and at most 128 characters. Anything else is content, not an id.
+    if not journal.SESSION_ID_RE.match(clean) or len(clean) > 128:
         return
     with _LAST_SESSION_LOCK:
         _LAST_SESSION_ID = clean
@@ -3252,11 +3254,17 @@ def _prompt_note_repair_validator(content: Any) -> Optional[str]:
 
 
 def _stored_prompt_note_content_error(content: Any) -> Optional[str]:
-    """Return the semantic injection error for a structurally stored note."""
-    safe_content = scrub_text(str(content)).strip()
-    if not safe_content:
-        return "Prompt note is empty after scrubbing"
-    return _prompt_note_content_error(safe_content, check_rendered_size=False)
+    """Return the semantic injection error for a structurally stored note.
+
+    Emptiness is measured on the note's own text. It used to be measured after
+    credential redaction, so a note whose body happened to match that grammar
+    reported itself "empty after scrubbing" -- a note with words in it described
+    as having none.
+    """
+    text = str(content).strip()
+    if not text:
+        return "Prompt note is empty"
+    return _prompt_note_content_error(text, check_rendered_size=False)
 
 
 def _validate_proposal(proposal: Dict[str, Any]) -> Optional[str]:

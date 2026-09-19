@@ -3807,67 +3807,56 @@ class RefineTests(unittest.TestCase):
         )
         self.assertEqual(refused.get("failure"), "memory_entry_too_long")
 
-    def test_the_ceiling_measures_the_content_that_will_actually_be_stored(self):
-        """Two enforcement points, one limit, and they measured different strings.
+    def test_the_ceiling_measures_the_entry_itself_at_both_enforcement_points(self):
+        """Two enforcement points, one limit, one measurement.
 
-        llm._finalize_edit reads len(content) on the model's raw text, then
-        sanitizes on the way out. core._validate_proposal reads len(content) on
-        the sanitized value -- which is what reaches the store. Redaction is not
-        length-preserving: 'password=hunter2' (16) becomes 'password=[REDACTED]'
-        (19). So an entry at the ceiling that names a credential passes the
-        proposer and is then refused by the apply, with the shortening retry --
-        the whole point of the ceiling being enforced there -- never getting a
-        chance to fire. Same failure mode as the token/character budget pair that
-        drifted apart at 2048 vs 15000: two views of one limit.
+        The ceiling used to be measured after credential redaction in
+        ``llm._finalize_edit`` and on the raw text in
+        ``core._validate_proposal``. Both now read the entry's own length, so the
+        two cannot disagree -- and the length of a lesson no longer depends on
+        whether a credential grammar recognised something inside it.
+
+        The two cases below are the borderlines that redaction used to move: a
+        body that redaction would have made LONGER (``password=hunter2`` ->
+        ``password=[REDACTED]``), and one it would have made SHORTER
+        (``sk-<40>`` -> ``[REDACTED]``).
         """
+        # At the ceiling, and it stays at the ceiling: accepted by both points.
         secret = "password=hunter2"
-        filler = "a" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - len(secret))
-        content = filler + secret
-        stored = sanitization.scrub_text(content)
-        self.assertEqual(len(content), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS)
-        self.assertGreater(
-            len(stored), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS,
-            "fixture no longer exercises an expanding redaction",
-        )
-
-        # The apply refuses it, because it measures the stored form.
-        self.assertIsNotNone(core._validate_proposal({
+        at_ceiling = "a" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - len(secret)) + secret
+        self.assertEqual(len(at_ceiling), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS)
+        self.assertIsNone(core._validate_proposal({
             "action": "create", "kind": "memory", "name": "credential-lesson",
-            "content": stored, "reason": "r", "evidence": [],
+            "content": at_ceiling, "reason": "r", "evidence": [],
         }))
-        # So the proposer must refuse it too, rather than declaring it applyable.
-        result = llm._finalize_edit(
-            MockLlm({"action": "no_op", "reason": "unused"}),
-            "short", "instructions",
-            {"action": "create", "kind": "memory", "name": "credential-lesson",
-             "content": content, "reason": "r", "evidence": []},
-            allow_content_retry=False,
-        )
-        self.assertEqual(result.get("failure"), "memory_entry_too_long")
-
-    def test_a_redacted_entry_that_fits_once_stored_is_still_accepted(self):
-        """The other direction: measuring the stored form must not refuse an
-        entry that fits. A redaction that SHRINKS ('sk-...' -> '[REDACTED]') can
-        bring an over-length entry under the ceiling, and the stored form is what
-        the limit is about."""
-        secret = "sk-" + "a" * 40
-        filler = "b" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - 11) + " "
-        content = filler + secret
-        stored = sanitization.scrub_text(content)
-        self.assertGreater(len(content), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS)
-        self.assertLessEqual(
-            len(stored), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS,
-            "fixture no longer exercises a shrinking redaction",
-        )
         model = MockLlm({"action": "no_op", "reason": "must not be called"})
-        result = llm._finalize_edit(
+        accepted = llm._finalize_edit(
             model, "short", "instructions",
-            {"action": "create", "kind": "memory", "name": "shrinking-secret",
-             "content": content, "reason": "r", "evidence": []},
+            {"action": "create", "kind": "memory", "name": "credential-lesson",
+             "content": at_ceiling, "reason": "r", "evidence": []},
             allow_content_retry=True,
         )
-        self.assertNotIn("failure", result)
-        self.assertEqual(len(model.calls), 0, "no retry was needed")
+        self.assertNotIn("failure", accepted)
+        self.assertEqual(len(model.calls), 0, "an entry at the ceiling needs no retry")
+
+        # Over the ceiling, and it stays over: refused by both points. Under the
+        # old rule the token shrank away and this was declared applyable.
+        over = "b" * (llm.MEMORY_ENTRY_HARD_LIMIT_CHARS - 11) + " " + "sk-" + "a" * 40
+        self.assertGreater(len(over), llm.MEMORY_ENTRY_HARD_LIMIT_CHARS)
+        self.assertIsNotNone(core._validate_proposal({
+            "action": "create", "kind": "memory", "name": "long-secret",
+            "content": over, "reason": "r", "evidence": [],
+        }))
+        refused = llm._finalize_edit(
+            MockLlm({"action": "no_op", "reason": "unused"}),
+            "short", "instructions",
+            {"action": "create", "kind": "memory", "name": "long-secret",
+             "content": over, "reason": "r", "evidence": []},
+            allow_content_retry=False,
+        )
+        self.assertEqual(refused.get("failure"), "memory_entry_too_long")
+        self.assertIn(str(len(over)), refused.get("reason", ""),
+                      "the refusal must quote the entry's own length")
 
     def test_a_renamed_shortening_reply_keeps_the_original_target(self):
         """The measured regression this rule came from, inverted.
@@ -7114,11 +7103,12 @@ class RefineTests(unittest.TestCase):
         """A lone token that cannot be an id must not analyse the current session."""
         with patch.object(plugin_init.core, "refine_run") as run:
             long_id = plugin_init._handle_refine_command("session " + "a" * 80)
-            secret_like = plugin_init._handle_refine_command(
-                "session sk-" + "b" * 32
-            )
+            # Outside the identifier character class, which is what "cannot be an
+            # id" means now that the test is shape-based rather than asking
+            # whether a credential filter would alter the value.
+            malformed = plugin_init._handle_refine_command("session bad!token")
         run.assert_not_called()
-        for output in (long_id, secret_like):
+        for output in (long_id, malformed):
             self.assertIn("not a usable session id", output)
 
     def test_session_prose_remains_a_refine_reason(self):
@@ -7162,7 +7152,7 @@ class RefineTests(unittest.TestCase):
                 "dry-run session no-such-session"
             )
             invalid = plugin_init._handle_refine_command(
-                "dry-run session sk-" + "b" * 32
+                "dry-run session bad!token"
             )
         run.assert_not_called()
         self.assertIn("/refine dry-run session <session_id>", bare)
@@ -10116,7 +10106,7 @@ class RefineTests(unittest.TestCase):
             "min_signal_required": True,
             "reviewer_fallback_enabled": True,
             "reviewer_min_messages": 20,
-            "llm": {"model": "sk-" + "a" * 24},
+            "llm": {"model": "not a model"},
         })
         # The model the reviewer reports must match the intended (live) target;
         # otherwise the decline would be flagged as model_substituted.
@@ -10146,7 +10136,7 @@ class RefineTests(unittest.TestCase):
             "min_signal_required": True,
             "reviewer_fallback_enabled": True,
             "reviewer_min_messages": 20,
-            "llm": {"model": "sk-" + "a" * 24},
+            "llm": {"model": "not a model"},
         })
         # MockResult defaults to model="test-model", which differs from the
         # intended model, so the reviewer ran on a substituted model.
@@ -13786,19 +13776,10 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(target["provider"], "other-prov")
         self.assertEqual(target["model"], "deepseek-v4")
 
-    def test_credential_shaped_model_is_never_persisted(self):
-        token = "ghp_" + "A" * 36
-        result = plugin_init._handle_refine_command(f"model {token}")
-        self.assertIn("failed", result.lower())
-        self.assertIsNone(journal.read_model_override())
-        path = journal.model_override_read_path()
-        if path.exists():
-            self.assertNotIn(token, path.read_text(encoding="utf-8"))
-
     def test_unsafe_override_on_disk_is_ignored(self):
         journal.ensure_dirs()
         journal.model_override_read_path().write_text(
-            json.dumps({"provider": "", "model": "sk-" + "b" * 24}),
+            json.dumps({"provider": "", "model": "not a model"}),
             encoding="utf-8",
         )
         self.assertIsNone(journal.read_model_override())
@@ -13869,7 +13850,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         FakeHost.entry_config()["llm"] = {"model": "cfg-model"}
         journal.ensure_dirs()
         journal.model_override_read_path().write_text(
-            json.dumps({"provider": "", "model": "sk-" + "b" * 24}),
+            json.dumps({"provider": "", "model": "not a model"}),
             encoding="utf-8",
         )
         target = config.effective_llm_target()
@@ -13914,14 +13895,25 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("llm.model", text)
         self.assertIn("model_override.json", text)
 
-    def test_refusal_names_the_rule_without_echoing_the_value(self):
-        token = "ghp_" + "A" * 36
-        result = plugin_init._handle_refine_command(f"model {token}")
-        self.assertIn("credential pattern", result)
-        self.assertNotIn(token, result)
+    def test_refusal_names_the_rule_that_rejected_the_value(self):
+        """A refused model pin must say which rule refused it.
+
+        The rule used to be "it matches a credential pattern", which also fired
+        on legitimate names such as ``my-token-model:latest``. Shape is the whole
+        test now, so the message names the identifier rule.
+        """
         shapeless = plugin_init._handle_refine_command("model ---")
+        self.assertIn("Invalid model target", shapeless)
         self.assertIsNone(journal.read_model_override())
-        self.assertNotIn("credential", shapeless or "")
+        # The validator behind it names the rule, and it is the shape rule.
+        self.assertIn("model identifier", journal.model_override_field_problem("---"))
+        # And a name that merely looks like a token is a valid identifier: it is
+        # accepted rather than refused on resemblance.
+        accepted = plugin_init._handle_refine_command("model my-token-model:latest")
+        self.assertNotIn("identifier", accepted)
+        self.assertEqual(
+            (journal.read_model_override() or {}).get("model"), "my-token-model:latest"
+        )
 
     def test_unreadable_override_is_distinguished_from_absent(self):
         journal.write_model_override("", "pinned-model")
@@ -14055,7 +14047,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
 
     def test_unsafe_config_model_is_dropped_and_reported(self):
         FakeHost.entry_config()["llm"] = {
-            "model": "sk-" + "c" * 24,
+            "model": "not a model",
             "allow_model_override": True,
         }
         target = config.effective_llm_target()
@@ -14389,7 +14381,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_refine_run_tool_rejects_bad_sessions_before_model_call(self):
         with patch.object(plugin_init.core, "refine_run") as run:
             invalid = json.loads(plugin_init._handle_refine_run({
-                "session_id": "sk-" + "b" * 32,
+                "session_id": "bad!session",
                 "dry_run": True,
             }))
             unknown = json.loads(plugin_init._handle_refine_run({
@@ -14603,11 +14595,6 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         core.note_session_id("")
         core.note_session_id("   ")
         self.assertEqual(core._noted_session_id(), "real-session")
-
-    def test_note_session_id_rejects_scrub_altering_values(self):
-        core._LAST_SESSION_ID = ""
-        core.note_session_id("ghp_" + "A" * 36)
-        self.assertEqual(core._noted_session_id(), "")
 
     def test_gateway_like_env_uses_hook(self):
         """In the gateway, get_session_env returns '' but hooks provide the id."""
@@ -15749,7 +15736,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn(token, json.dumps(meta))
 
     def test_target_issues_are_recorded_in_llm_meta(self):
-        FakeHost.entry_config()["llm"] = {"model": "sk-" + "a" * 24}
+        FakeHost.entry_config()["llm"] = {"model": "not a model"}
         model = MockLlm(MockResult(
             {"action": "no_op", "reason": "nothing", "evidence": [],
              "kind": "", "name": "", "content": ""},
@@ -15764,10 +15751,10 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(latest.get("outcome"), "target_issue")
         meta = latest.get("llm_meta", {})
         self.assertTrue(meta.get("target_issues"))
-        self.assertIn("credential", meta["target_issues"][0])
+        self.assertIn("model identifier", meta["target_issues"][0])
 
     def test_ignored_bad_target_does_not_fail_valid_live_model_noop(self):
-        FakeHost.entry_config()["llm"] = {"model": "sk-" + "a" * 24}
+        FakeHost.entry_config()["llm"] = {"model": "not a model"}
         model = MockLlm(MockResult({
             "action": "no_op", "reason": "nothing", "evidence": [],
             "kind": "", "name": "", "content": "",
@@ -25322,6 +25309,58 @@ class AuditRound2Tests(unittest.TestCase):
         self.assertFalse(journal.was_applied_recently(proposal, 30))
         self.assertLessEqual(core.auto_cooldown_remaining_minutes(),
                              config.auto_cooldown_minutes())
+
+    def test_identifiers_are_judged_by_shape_not_by_a_credential_grammar(self):
+        """Five refusals came from asking "would the scrubber change this?".
+
+        That made "is this an identifier" depend on a credential grammar, so a
+        session id, a model name or a note whose text happened to match one was
+        dropped -- silently, in the session-id cases. Each is now a shape check.
+
+        The session-id character class was measured against the live store before
+        it was chosen: 254 sessions across all seven sources, lengths 22-36, none
+        rejected.
+        """
+        token_shaped = "ghp_" + "A" * 36
+
+        # 1. the hook session id: recorded now, silently dropped before.
+        core._LAST_SESSION_ID = ""
+        core.note_session_id(token_shaped)
+        self.assertEqual(core._noted_session_id(), token_shaped)
+        # and the shape rule still refuses what is content rather than an id.
+        for bad in ("has a space", "two\nlines", "semi;colon", "a" * 129, "", "   "):
+            core._LAST_SESSION_ID = ""
+            core.note_session_id(bad)
+            self.assertEqual(core._noted_session_id(), "", f"accepted as an id: {bad!r}")
+
+        # 2. the prompt-note session id: kept now, discarded before.
+        self.assertEqual(
+            journal.normalize_prompt_note_session_id(token_shaped), token_shaped
+        )
+        self.assertEqual(journal.normalize_prompt_note_session_id("a b"), "")
+        self.assertEqual(journal.normalize_prompt_note_session_id("a" * 65), "")
+
+        # 3. the model override: a legitimate name that looks like a token.
+        self.assertEqual(journal.model_override_field_problem("my-token-model:latest"), "")
+        self.assertEqual(journal.model_override_field_problem(token_shaped), "")
+        # Shape is still enforced, so prose is still refused.
+        self.assertNotEqual(journal.model_override_field_problem("not a model name"), "")
+
+        # 4. a stored note whose body quotes a credential-shaped string: it has
+        # words in it, so it is not "empty".
+        error = core._stored_prompt_note_content_error(f"When a deploy fails with "
+                                                      f"{token_shaped}, retry the request.")
+        self.assertNotIn("empty", (error or "").lower())
+        self.assertIn("empty", (core._stored_prompt_note_content_error("   ") or "").lower())
+
+        # 5. note storage no longer rejects a body for matching that grammar.
+        stored = journal._normalize_prompt_note({
+            "id": "ab12cd34ef56",
+            "content": f"When the deploy fails with token={token_shaped}, rotate it.",
+            "scope": "global",
+        })
+        self.assertIsNotNone(stored, "a note quoting a credential shape was dropped")
+        self.assertIn(token_shaped, stored["content"])
 
     def test_an_unfinished_tail_keeps_the_budget_gate_closed(self):
         """Skipping a crash's unfinished tail must not reopen the budget gate.

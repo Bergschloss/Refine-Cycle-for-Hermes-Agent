@@ -68,6 +68,19 @@ _MODEL_TOKEN_CHARS = r"[A-Za-z0-9._:\-]{1,120}"
 _MODEL_TOKEN = re.compile(rf"^{_MODEL_TOKEN_CHARS}$")
 _MODEL_ID = re.compile(rf"^{_MODEL_TOKEN_CHARS}(?:/{_MODEL_TOKEN_CHARS})*$")
 
+# What a host session id may contain. One definition for the two places that
+# accept one -- ``core.note_session_id`` (bound 128) and
+# ``normalize_prompt_note_session_id`` (bound 64) -- because two character
+# classes drift and the drift is silent: each site keeps working while
+# disagreeing about which ids exist.
+#
+# Measured against the live store before choosing it: 254 sessions across all
+# seven sources (acp, cli, desktop, subagent, telegram, tui, whatsapp), lengths
+# 22 to 36, and none of them is rejected by this class. It replaces a test that
+# asked whether the credential scrubber would alter the id, which made "is this
+# an identifier" depend on a credential grammar.
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
 # A duplicate journal id is a state transition, not a replacement record. The
 # loader and writer share this table so hand-edited/cross-process records cannot
 # bypass checks that finalize() applies to normal writes.
@@ -220,14 +233,10 @@ def model_override_field_problem(value: str, *, allow_namespace: bool = False) -
             + (", '/'" if allow_namespace else "")
             + ", at least one alphanumeric)"
         )
-    # The check that matters most. ``ghp_`` + 36 characters is a valid identifier,
-    # so shape alone would persist a pasted token verbatim while the command echo
-    # reported it redacted — telling the user a value was protected when it
-    # was not. It can also fire on a legitimate name such as
-    # ``my-token-model:latest``; refusing that is the safe side of the trade, and
-    # the message says which rule rejected it.
-    if scrub_text(value) != value:
-        return "it matches a credential pattern, so it is refused rather than stored"
+    # Shape is the whole test. A "looks like a credential" refusal used to sit
+    # here and it rejected legitimate names such as ``my-token-model:latest``
+    # while protecting nothing: a model id is a routing value the user typed, not
+    # a secret harvested from a trajectory.
     return ""
 
 
@@ -778,10 +787,17 @@ def migrate_legacy_journal_dir(
 
 
 def normalize_prompt_note_session_id(session_id: Any) -> str:
-    """Accept only a stable, already-safe hook/session identifier."""
+    """Accept only a stable, already-safe hook/session identifier.
+
+    Shape, not the credential filter. This used to accept an id only if the
+    scrubber left it unchanged, which made "is this an identifier" depend on a
+    credential grammar: an id that happened to match one was silently discarded
+    and the note lost its session scope. The bound is 64 here against
+    ``core``'s 128 because a note's id is stored and rendered, not just held in
+    memory; both use the one character class above so they cannot drift apart.
+    """
     raw = str(session_id).strip()
-    safe = scrub_text(raw).strip()
-    return safe if raw and raw == safe and len(safe) <= 64 else ""
+    return raw if SESSION_ID_RE.match(raw) and len(raw) <= 64 else ""
 
 
 def _normalize_prompt_note(note: Any) -> Optional[Dict[str, str]]:
@@ -797,7 +813,6 @@ def _normalize_prompt_note(note: Any) -> Optional[Dict[str, str]]:
         or any(char not in "0123456789abcdef" for char in note_id)
         or not isinstance(content, str)
         or not content.strip()
-        or scrub_text(content) != content
         or not prompt_note_content_is_structurally_safe(content)
         or scope not in ("global", "session")
     ):
