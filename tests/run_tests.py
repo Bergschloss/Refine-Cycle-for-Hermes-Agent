@@ -25271,6 +25271,29 @@ class AuditRound2Tests(unittest.TestCase):
         self.assertEqual(patterns.fingerprint("cmd", 'err: "timeout"'),
                          patterns.fingerprint("cmd", 'err: "timeout'))
 
+    def test_a_truncated_single_quote_does_not_split_the_same_error(self):
+        """The single-quote half of the same finding, which had no test.
+
+        Tool output is cut at a byte budget, so the closing delimiter is missing
+        about as often for ``'`` as for ``"``. Without the unterminated
+        alternative the quote survives normalization and one failure fingerprints
+        as two, which is the fabricated-recurrence direction.
+        """
+        self.assertEqual(
+            patterns.fingerprint("cmd", "KeyError: 'user_id'"),
+            patterns.fingerprint("cmd", "KeyError: 'user_id"),
+        )
+        self.assertNotIn("'", patterns.normalize_error("KeyError: 'user_id"))
+        # And the guard that rule was written around: an apostrophe inside a
+        # contraction is not an opening delimiter, so it must not be stripped
+        # into ``dont``.
+        self.assertIn("don't", patterns.normalize_error("the host don't answer"))
+        # Two genuinely different truncated errors must still stay apart.
+        self.assertNotEqual(
+            patterns.fingerprint("cmd", "KeyError: 'user_id"),
+            patterns.fingerprint("cmd", "KeyError: 'account_id"),
+        )
+
     def test_an_exception_group_matches_the_plain_exception(self):
         group = ("  + Exception Group Traceback (most recent call last):\n"
                  '  |   File "/tmp/x.py", line 3, in <module>\n'
@@ -28100,6 +28123,91 @@ class InstallerPatchSelectionTests(InstallerPluginOnlyTests):
             ))
         self.assertEqual(self._target_snapshot(), before)
 
+    def test_rollback_refuses_a_recorded_patch_that_no_longer_ships(self):
+        """A record this installer cannot place must stop the rollback.
+
+        ``restore_targets`` falls back to the hardcoded legacy topology when the
+        recorded patch file is gone. That is harmless only while the record's own
+        topology IS the legacy one; for a nine-file 0.21 record it would restore
+        the wrong file set and call it an undo. This is the state a host patched by
+        a newer installer and rolled back by an older copy is in.
+
+        Scope note: this covers the refusal as shipped, which keys on the recorded
+        name's marker table. A name the installer has never seen takes
+        ``PATCH_MARKERS.get(name, FILE_MARKERS)``, compares equal to the default
+        and still slips through -- a separate finding, deliberately not fixed here,
+        because every candidate fix changes what a damaged host restores.
+        """
+        import install
+
+        env = patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False)
+        with self._as_stock_host(), env:
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+
+        meta_path = install.metadata_dir(self.src) / install.METADATA_NAME
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        # A cross-family record: the 0.21 topology is nine files, not the legacy
+        # eight. patch_by_name returns None for it, standing in for the revision
+        # having been dropped from this installer's assets/.
+        cross_family = "invocation-route-v0.21.0.patch"
+        self.assertNotEqual(
+            install.PATCH_MARKERS[cross_family], install.FILE_MARKERS,
+            "this test needs a bundled patch whose topology differs from the default",
+        )
+        meta["host"]["patch"] = cross_family
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        before = self._target_snapshot()
+
+        with env, patch.object(install, "patch_by_name", return_value=None), \
+             patch.object(install, "fail", side_effect=SystemExit(1)) as fail:
+            with self.assertRaises(SystemExit):
+                install.do_rollback(types.SimpleNamespace(
+                    hermes_src=str(self.src), plugin_mode="remove",
+                    patch_only=False, plugin_only=False,
+                ))
+        message = fail.call_args.args[0]
+        self.assertIn(cross_family, message, "the refusal must name the record it cannot place")
+        self.assertIn("topology", message)
+        self.assertIn("host-backup-", message, "the refusal must point at the backup it did not use")
+        self.assertEqual(
+            self._target_snapshot(), before,
+            "a refused rollback must not restore anything",
+        )
+
+    def test_rollback_recreates_a_directory_that_was_removed_under_it(self):
+        """Restoring a file whose parent folder is gone must recreate the folder.
+
+        ``shutil.copy2`` into a missing directory raises, so a rollback after the
+        operator (or an upgrade) removed a package directory failed part-way
+        through the restore -- with some files already written back.
+        """
+        import install
+
+        env = patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False)
+        before = self._target_snapshot()
+        with self._as_stock_host(), env:
+            install.do_install(self._args(patch_only=True, plugin_only=False))
+
+        detected, _applied, _total = install.detected_patch_topology(self.src)
+        restored_rel = install.patch_content_files(detected)[0]
+        removed_dir = (self.src / restored_rel).parent
+        self.assertNotEqual(
+            removed_dir.resolve(), self.src.resolve(),
+            "this test needs a target inside a subdirectory",
+        )
+        shutil.rmtree(removed_dir)
+        self.assertFalse(removed_dir.exists())
+
+        with env, patch.object(install, "patch_candidates", lambda: [self.patch_file]):
+            install.do_rollback(types.SimpleNamespace(
+                hermes_src=str(self.src), plugin_mode="remove",
+                patch_only=False, plugin_only=False,
+            ))
+
+        self.assertTrue((self.src / restored_rel).is_file(),
+                        "the restored file's directory was not recreated")
+        self.assertEqual(self._target_snapshot(), before)
+
     def test_replacing_a_superseded_revision_names_the_files_and_the_snapshot(self):
         """The one mutation the dirty check cannot cover, said out loud.
 
@@ -28844,6 +28952,308 @@ class PluginGuardInstallabilityTests(unittest.TestCase):
             report.get("verdict"), "dangerous",
             f"scanner verdict is dangerous ({report.get('total')} findings)",
         )
+
+
+class FakeHostContractTests(unittest.TestCase):
+    """The fake Hermes this suite installs is a claim about the real one. Check it.
+
+    This exists because of the memory-rollback bug: the plugin called
+    ``store.save_to_disk(target)``, the fake had that method, the real Hermes did
+    not, and so every memory rollback on a real host raised while all 1300 tests
+    stayed green. A fake that has grown a method the host lacks makes the suite
+    prove the opposite of what it claims.
+
+    What is checked is the surface the plugin ACTUALLY uses, derived from the
+    source rather than from a hand-written list that rots: every
+    ``from <host module> import ...`` in the plugin, plus the memory-store members
+    it reaches for. Each is looked up on the fake (in-process) and on a real
+    checkout (in a subprocess, because importing the real ``tools`` package would
+    collide with the fake in ``sys.modules``).
+
+    Skips when no real checkout is present -- that is CI, and an environment gap
+    must not turn the suite red (AGENTS.md).
+    """
+
+    HOST_ROOTS = ("tools", "agent", "hermes_cli", "hermes_constants", "gateway")
+
+    # Store members the plugin calls with no fallback: if the host lacks one, the
+    # path that uses it cannot work at all.
+    REQUIRED_STORE_MEMBERS = ("load_from_disk", "_entries_for", "memory_entries")
+    # Writers: the plugin discovers these with getattr and needs AT LEAST ONE
+    # complete option. This is the exact assertion the rollback bug needed --
+    # ``save_to_disk`` alone was assumed, and the real host had neither it nor a
+    # checked alternative.
+    STORE_WRITER_OPTIONS = (("save_to_disk",), ("_write_file", "_path_for"))
+    # Members the plugin uses but degrades without (AttributeError is caught and
+    # the pass continues), so their absence on a host is not a contract breach.
+    DEGRADING_STORE_MEMBERS = ("_file_lock", "_path_for", "_reload_target", "memory_char_limit")
+
+    _PROBE = (
+        "import importlib, inspect, json, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "request = json.loads(sys.argv[2])\n"
+        "out = {'modules': {}, 'unimportable': {}, 'store': {}}\n"
+        "def shape(value):\n"
+        "    info = {'exists': True, 'callable': callable(value)}\n"
+        "    try:\n"
+        "        params = list(inspect.signature(value).parameters.values())\n"
+        "        info['required_positional'] = len([\n"
+        "            p for p in params\n"
+        "            if p.default is inspect.Parameter.empty\n"
+        "            and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)\n"
+        "            and p.name != 'self'\n"
+        "        ])\n"
+        "    except (TypeError, ValueError):\n"
+        "        info['required_positional'] = None\n"
+        "    return info\n"
+        "def lookup(module, name, dotted):\n"
+        "    if hasattr(module, name):\n"
+        "        return shape(getattr(module, name))\n"
+        "    try:\n"
+        "        # `from tools import write_approval` imports a SUBMODULE, which is\n"
+        "        # not an attribute of the package until it has been imported.\n"
+        "        return shape(importlib.import_module(dotted))\n"
+        "    except BaseException:\n"
+        "        return {'exists': False}\n"
+        "for name, attrs in request['modules'].items():\n"
+        "    try:\n"
+        "        module = importlib.import_module(name)\n"
+        "    except BaseException as exc:\n"
+        "        out['unimportable'][name] = type(exc).__name__\n"
+        "        continue\n"
+        "    out['modules'][name] = {\n"
+        "        attr: lookup(module, attr, f'{name}.{attr}') for attr in attrs\n"
+        "    }\n"
+        "try:\n"
+        "    store_cls = importlib.import_module('tools.memory_tool').MemoryStore\n"
+        "except BaseException as exc:\n"
+        "    out['unimportable']['tools.memory_tool:MemoryStore'] = type(exc).__name__\n"
+        "else:\n"
+        "    instance = None\n"
+        "    instance_error = None\n"
+        "    for attr in request['store']:\n"
+        "        value = getattr(store_cls, attr, None)\n"
+        "        if value is not None:\n"
+        "            out['store'][attr] = shape(value)\n"
+        "            continue\n"
+        "        # An attribute the constructor sets (memory_entries) is not on the\n"
+        "        # class. Build one instance, read-only, to tell 'absent' from\n"
+        "        # 'instance-level'. A constructor that refuses leaves it UNPROVEN\n"
+        "        # (exists: null) rather than reported as missing.\n"
+        "        if instance is None and instance_error is None:\n"
+        "            try:\n"
+        "                instance = store_cls()\n"
+        "            except BaseException as exc:\n"
+        "                instance_error = type(exc).__name__\n"
+        "        if instance is not None:\n"
+        "            out['store'][attr] = (\n"
+        "                shape(getattr(instance, attr)) if hasattr(instance, attr)\n"
+        "                else {'exists': False}\n"
+        "            )\n"
+        "        else:\n"
+        "            out['store'][attr] = {'exists': None, 'why': instance_error}\n"
+        "print(json.dumps(out))\n"
+    )
+
+    @classmethod
+    def _plugin_host_imports(cls) -> "dict[str, set[str]]":
+        """{module: {attr}} for host imports the plugin makes UNGUARDED.
+
+        An import inside ``try: ... except ImportError`` is a deliberate
+        "this host may not have it" and the plugin has a fallback for it, so it is
+        not part of the contract. Only what the plugin imports at face value is.
+        """
+        wanted: "dict[str, set[str]]" = {}
+        for path in sorted(ROOT.glob("*.py")):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:  # pragma: no cover - the suite compiles these
+                continue
+            guarded = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Try):
+                    continue
+                if not any(
+                    handler.type is None
+                    or "Error" in ast.dump(handler.type)
+                    or "Exception" in ast.dump(handler.type)
+                    for handler in node.handlers
+                ):
+                    continue
+                for guarded_node in ast.walk(node):
+                    if isinstance(guarded_node, ast.ImportFrom):
+                        guarded.add(id(guarded_node))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom) or not node.module:
+                    continue
+                if node.module.split(".")[0] not in cls.HOST_ROOTS:
+                    continue
+                if id(node) in guarded:
+                    continue
+                for alias in node.names:
+                    if alias.name != "*":
+                        wanted.setdefault(node.module, set()).add(alias.name)
+        return wanted
+
+    @staticmethod
+    def _real_checkout():
+        """A Hermes checkout carrying the host modules, or None.
+
+        Same reasoning as the plugin-guard probe: the running interpreter is the
+        strongest signal, because this suite is run with the Hermes venv's python.
+        A sibling test's throwaway HERMES_HOME must not be mistaken for a checkout.
+        """
+        candidates = []
+        env_src = os.environ.get("HERMES_SRC", "").strip()
+        if env_src:
+            candidates.append(Path(env_src))
+        candidates.extend(Path(sys.executable).resolve().parents)
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            candidates.append(Path(local_app_data) / "hermes" / "hermes-agent")
+        home = Path.home()
+        candidates.extend([home / ".hermes" / "hermes-agent", home / "hermes-agent"])
+        for candidate in candidates:
+            if (candidate / "tools" / "memory_tool.py").is_file():
+                return candidate
+        return None
+
+    def _probe_real_host(self, request: dict) -> dict:
+        checkout = self._real_checkout()
+        if checkout is None:
+            self.skipTest("no real Hermes checkout found; nothing to compare the fake against")
+        with tempfile.TemporaryDirectory(prefix="refine-contract-") as td:
+            probe = Path(td) / "contract_probe.py"
+            probe.write_text(self._PROBE, encoding="utf-8")
+            done = subprocess.run(
+                [sys.executable, str(probe), str(checkout), json.dumps(request)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=300, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+        lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
+        if done.returncode != 0 or not lines:
+            self.skipTest(
+                "the real host could not be probed: "
+                + ((done.stderr or "").strip()[-200:] or "no stderr")
+            )
+        return json.loads(lines[-1])
+
+    # -- the fake side: always checked, no host needed ----------------------
+
+    def test_the_fake_provides_every_host_attribute_the_plugin_imports(self):
+        """A missing fake attribute means the suite is testing a different plugin."""
+        missing = []
+        for module_name, attrs in self._plugin_host_imports().items():
+            module = sys.modules.get(module_name)
+            if module is None:
+                # The plugin guards these imports with try/except ImportError, so a
+                # host (or fake) without them is a supported shape, not a breach.
+                continue
+            for attr in sorted(attrs):
+                if not hasattr(module, attr):
+                    missing.append(f"{module_name}.{attr}")
+        self.assertEqual(missing, [], f"the fake host is missing: {missing}")
+
+    def test_the_fake_store_offers_a_writer_the_plugin_can_find(self):
+        store_cls = sys.modules["tools.memory_tool"].MemoryStore
+        for option in self.STORE_WRITER_OPTIONS:
+            if all(getattr(store_cls, name, None) is not None for name in option):
+                return
+        self.fail(
+            "the fake memory store offers none of the writer shapes the plugin "
+            f"discovers: {self.STORE_WRITER_OPTIONS}"
+        )
+
+    # -- the real side: the check that was missing --------------------------
+
+    def test_the_real_host_provides_what_the_plugin_imports(self):
+        imports = {name: sorted(attrs) for name, attrs in self._plugin_host_imports().items()}
+        report = self._probe_real_host(
+            {"modules": imports, "store": list(self.REQUIRED_STORE_MEMBERS)}
+        )
+        if not report["modules"]:
+            self.skipTest(
+                "no host module could be imported from the checkout: "
+                f"{report['unimportable']}"
+            )
+        missing = [
+            f"{module_name}.{attr}"
+            for module_name, attrs in report["modules"].items()
+            for attr, shape in attrs.items()
+            if not shape.get("exists")
+        ]
+        self.assertEqual(
+            missing, [],
+            "the real Hermes does not provide what the plugin imports, and the fake "
+            f"hid it: {missing}. Unimportable (not judged): {report['unimportable']}",
+        )
+
+    def test_the_real_store_provides_the_members_the_plugin_needs(self):
+        """The rollback bug's own shape: required members, and at least one writer."""
+        probed = list(self.REQUIRED_STORE_MEMBERS)
+        for option in self.STORE_WRITER_OPTIONS:
+            probed.extend(option)
+        report = self._probe_real_host({"modules": {}, "store": sorted(set(probed))})
+        store = report["store"]
+        if not store:
+            self.skipTest(f"MemoryStore could not be imported: {report['unimportable']}")
+
+        # ``exists: None`` means the probe could not judge (the constructor
+        # refused), which is an environment gap, not a contract breach.
+        missing_required = [
+            name for name in self.REQUIRED_STORE_MEMBERS
+            if store.get(name, {}).get("exists") is False
+        ]
+        self.assertEqual(
+            missing_required, [],
+            f"the real MemoryStore lacks members the plugin uses unguarded: {missing_required}",
+        )
+        satisfied = [
+            option for option in self.STORE_WRITER_OPTIONS
+            if all(store.get(name, {}).get("exists") for name in option)
+        ]
+        self.assertTrue(
+            satisfied,
+            "the real MemoryStore offers none of the writer shapes the plugin "
+            f"discovers, so memory rollback cannot work on this host: "
+            f"{ {name: bool(info.get('exists')) for name, info in store.items()} }",
+        )
+
+    def test_the_fake_and_the_real_store_agree_on_how_a_writer_is_called(self):
+        """A shape difference is as silent as a missing member.
+
+        Argument counts, not names: upstream renaming a parameter cannot break a
+        positional call, while gaining a required one can.
+        """
+        probed = [name for option in self.STORE_WRITER_OPTIONS for name in option]
+        probed.extend(self.REQUIRED_STORE_MEMBERS)
+        report = self._probe_real_host({"modules": {}, "store": sorted(set(probed))})
+        real_store = report["store"]
+        if not real_store:
+            self.skipTest(f"MemoryStore could not be imported: {report['unimportable']}")
+        fake_store = sys.modules["tools.memory_tool"].MemoryStore
+
+        drift = []
+        for name, real_shape in sorted(real_store.items()):
+            if not real_shape.get("exists"):
+                continue
+            fake_value = getattr(fake_store, name, None)
+            if fake_value is None or not callable(fake_value) or not real_shape.get("callable"):
+                continue
+            try:
+                params = list(inspect.signature(fake_value).parameters.values())
+            except (TypeError, ValueError):
+                continue
+            fake_required = len([
+                p for p in params
+                if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                and p.name != "self"
+            ])
+            real_required = real_shape.get("required_positional")
+            if real_required is not None and fake_required != real_required:
+                drift.append(f"{name}: fake takes {fake_required}, real takes {real_required}")
+        self.assertEqual(drift, [], f"fake and real MemoryStore disagree: {drift}")
 
 
 class InstallerMemoryBudgetTests(unittest.TestCase):
