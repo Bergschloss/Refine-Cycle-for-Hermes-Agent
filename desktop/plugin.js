@@ -228,7 +228,8 @@ function RefineStatus() {
   }
 
   return jsx(Tip, {
-    label: state.brand,
+    // Said before the press: an update or a fix restarts Hermes.
+    label: !busy && (fix || update) ? `${fix ? 'Fix' : 'Update'}: Hermes will restart` : state.brand,
     children: jsxs('span', {
       className: cn('inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem]', 'text-(--ui-text-tertiary)'),
       children
@@ -296,6 +297,10 @@ function RefineCard() {
         },
         'action'
       )
+    )
+    // Said before the press: it restarts Hermes and cuts off work in progress.
+    children.push(
+      jsx('span', { className: cn('text-xs text-(--muted-foreground)'), children: 'Hermes will restart' }, 'warning')
     )
   }
 

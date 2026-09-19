@@ -191,6 +191,8 @@ await advance(1)
 check('a finished job is toasted once', messages(), ['RC is up to date.'])
 check('the status bar offers the update', label(), 'RC · update available: 1.3.13')
 check('with a button that says so', button().p.children, 'Update')
+check('the bar says before the press that it restarts Hermes',
+  rendered().p.label, 'Update: Hermes will restart')
 await advance(20 * 60 * 1000)
 check('the toast is not repeated on later polls', messages(), ['RC is up to date.'])
 dispose()
@@ -317,6 +319,8 @@ const cardTree = typeof card.t === 'function' ? card.t(card.p || {}) : card
 const cardButton = walk(cardTree, (node) =>
   typeof node.p?.onClick === 'function' && typeof node.p?.children === 'string' ? node : null)
 check('the card offers the action for this state', cardButton && cardButton.p.children, 'Fix')
+check('the card says before the press that it restarts Hermes',
+  Boolean(walk(cardTree, (node) => node.p?.children === 'Hermes will restart' ? node : null)), true)
 const beforeCardClick = calls.request.length
 cardButton.p.onClick()
 await advance(1)

@@ -167,12 +167,21 @@ def tap(command: str, *, messaging: bool = True) -> str:
     return "/" + (command.replace("-", "_") if messaging else command)
 
 
+def action_line(command: str, *, messaging: bool = True) -> str:
+    """The command to tap, and what tapping it does to the user's session.
+
+    Updating or fixing restarts Hermes, which cuts off work in progress, so the
+    line says so before the tap, never only after it.
+    """
+    return f"{tap(command, messaging=messaging)} — Hermes will restart."
+
+
 def update_available_text(latest: str) -> str:
-    return f"{BRAND} — update available: {plain_version(latest)}.\n{tap(UPDATE_COMMAND)}"
+    return f"{BRAND} — update available: {plain_version(latest)}.\n{action_line(UPDATE_COMMAND)}"
 
 
 def stopped_text() -> str:
-    return f"{BRAND} stopped working after the Hermes update.\n{tap(FIX_COMMAND)}"
+    return f"{BRAND} stopped working after the Hermes update.\n{action_line(FIX_COMMAND)}"
 
 
 def paused_text(hermes_version: str) -> str:

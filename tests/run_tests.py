@@ -24692,6 +24692,11 @@ class NoticesTests(unittest.TestCase):
         self.assertIn("/refine_update", texts[0])
         self.assertIn("/refine_fix", texts[1])
         self.assertNotIn("patch", " ".join(texts).lower())
+        # A tap restarts Hermes and cuts off work in progress: said before the tap.
+        self.assertTrue(texts[0].endswith("/refine_update — Hermes will restart."))
+        self.assertTrue(texts[1].endswith("/refine_fix — Hermes will restart."))
+        self.assertIn("Hermes will restart",
+                      self.notices.action_line(self.notices.UPDATE_COMMAND, messaging=False))
 
     def test_a_release_is_announced_once_and_github_is_asked_once_a_day(self):
         self.notices.remember_chat(("telegram", "6667956926", ""))
@@ -25134,12 +25139,12 @@ class NoticesTests(unittest.TestCase):
 
     def test_the_status_headline_names_the_state_and_the_command_to_tap(self):
         with self._working(False):
-            self.assertEqual(plugin_init._status_headline()[1], "/refine-fix")
+            self.assertEqual(plugin_init._status_headline()[1], "/refine-fix — Hermes will restart.")
             self.assertIn("not working", plugin_init._status_headline()[0])
         with self._working(True), patch.object(self.notices, "latest_known", return_value="v1.3.13"):
             head = plugin_init._status_headline()
             self.assertIn("update available: 1.3.13", head[0])
-            self.assertEqual(head[1], "/refine-update")
+            self.assertEqual(head[1], "/refine-update — Hermes will restart.")
         with self._working(True), patch.object(self.notices, "latest_known", return_value=None), \
              patch.object(core, "_memory_usage", return_value=(3222, 4400)):
             head = plugin_init._status_headline()
@@ -25147,7 +25152,7 @@ class NoticesTests(unittest.TestCase):
         self.assertTrue(head[0].endswith("· working · memory 3222/4400"), head[0])
         with patch.object(plugin_init, "_capture_active_chat", return_value=("telegram", "1", "")), \
              self._working(False):
-            self.assertEqual(plugin_init._status_headline()[1], "/refine_fix")
+            self.assertEqual(plugin_init._status_headline()[1], "/refine_fix — Hermes will restart.")
 
     def test_the_desktop_button_starts_the_work_in_the_background_and_reports_it(self):
         """Hermes desktop stops waiting for a plugin command after 30 seconds, so the

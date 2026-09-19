@@ -1205,11 +1205,11 @@ def _status_headline() -> list:
         messaging = _capture_active_chat() is not None
         head = f"{notices.BRAND} {notices.plain_version(version)}"
         if not notices.plugin_working():
-            return [f"{head} · not working", notices.tap(notices.FIX_COMMAND, messaging=messaging)]
+            return [f"{head} · not working", notices.action_line(notices.FIX_COMMAND, messaging=messaging)]
         latest = notices.latest_known()
         if latest:
             return [f"{head} · update available: {notices.plain_version(latest)}",
-                    notices.tap(notices.UPDATE_COMMAND, messaging=messaging)]
+                    notices.action_line(notices.UPDATE_COMMAND, messaging=messaging)]
         used, limit = core._memory_usage()
         memory = f" · memory {used}/{limit}" if used is not None and limit is not None else ""
         return [f"{head} · working{memory}"]

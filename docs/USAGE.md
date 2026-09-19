@@ -116,8 +116,8 @@ Every message starts with `♾️ Refine Cycle` and is sent once per event, to t
 
 | When | Message |
 |---|---|
-| A new release is out (checked once a day across all Hermes processes) | `♾️ Refine Cycle — update available: 1.3.12.` + `/refine_update` |
-| A Hermes update stopped the plugin | `♾️ Refine Cycle stopped working after the Hermes update.` + `/refine_fix` |
+| A new release is out (checked once a day across all Hermes processes) | `♾️ Refine Cycle — update available: 1.3.12.` + `/refine_update — Hermes will restart.` |
+| A Hermes update stopped the plugin | `♾️ Refine Cycle stopped working after the Hermes update.` + `/refine_fix — Hermes will restart.` |
 | No bundled patch fits the new Hermes | `♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.` |
 | Hermes restarted on the new version | `♾️ Refine Cycle 1.3.12 is running.` |
 | Hermes restarted after a fix | `♾️ Refine Cycle is working again.` |
