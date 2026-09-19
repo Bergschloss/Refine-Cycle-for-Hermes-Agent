@@ -25,14 +25,17 @@ journal record, and as a `.bak` file under `journal_dir/backups`. Both come from
 one host read, so they cannot disagree. Rollback prefers the snapshot, so losing
 the backup file no longer costs the rollback.
 
-Credential scrubbing needs two layers here, because the journal redacts
-credentials from everything it writes — including a snapshot. The first layer is
-the proposal path: a skill whose current `SKILL.md` is changed by scrubbing is
-never patched at all, and the patch becomes a `no_op` before the model is
-called. The second is a SHA-256 digest of the real pre-edit content stored beside
-the snapshot. If the stored text no longer matches that digest, the snapshot is
-refused and the raw `.bak` file is used instead, so redacted text is never
-written over a skill.
+A snapshot holds the pre-edit text as it was. This needed two layers of care
+while the plugin still redacted credentials from everything it wrote, including
+snapshots: the proposal path refused to patch a skill whose body the filter would
+change, and a digest beside the snapshot caught a snapshot that no longer matched
+the real content. The filter is gone, so the first layer went with it and a
+credential in a skill body no longer costs the patch or the snapshot.
+
+The digest stays, because it answers a different question: a SHA-256 of the real
+pre-edit content stored beside the snapshot. If the stored text no longer matches
+it, the snapshot is refused and the raw `.bak` file is used instead, so tampered
+or truncated text is never written over a skill.
 
 `is_reversible` asks the restore path the same question rollback does, so an
 entry is never advertised as reversible when neither source survives. In that

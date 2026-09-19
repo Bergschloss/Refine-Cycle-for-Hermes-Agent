@@ -92,10 +92,11 @@ only when there is not. The override is stored in `model_override.json` inside
 `journal_dir` — refine does not put its own settings in the Hermes config. It
 writes there exactly once, for one key that is not its own: see below.
 
-Both stores are validated the same way: a provider must be a single token, a
-model id may be namespaced, and a value matching a credential pattern is refused
-rather than stored. A configured value that fails either rule is dropped and
-reported in `/refine status` and `/refine model`.
+Both stores are validated the same way, and the test is the shape of the
+identifier: a provider must be a single token and a model id may be namespaced.
+A name that merely resembles a credential (`my-token-model:latest`) is a valid
+identifier and is accepted. A configured value that fails the shape rule is
+dropped and reported in `/refine status` and `/refine model`.
 
 In the command, **the first slash is always the provider separator** and every
 later one belongs to the model id: `/refine model openrouter/deepseek/deepseek-chat`
@@ -173,7 +174,7 @@ only whether there is a durable lesson worth persisting. The reviewer has its
 own cooldown.
 
 A reviewer decline, malformed verdict, or reviewer error never reaches the
-proposal call. Declines are recorded as sanitized `no_op` journal entries so
+proposal call. Declines are recorded as `no_op` journal entries so
 they can be audited. An approval supplies narrow instructions to the normal
 proposal flow but remains advisory: it is journaled as `reviewer_only` and is
 never applied without the ordinary recurrence evidence.
@@ -303,7 +304,7 @@ Two consequences worth knowing:
 
 One ambiguity remains and is not solvable from the host API: an entry written by
 something else that is byte-identical to refine's own. The host refuses exact
-duplicates, so this requires another writer reproducing refine's scrubbed text
+duplicates, so this requires another writer reproducing refine's text
 verbatim.
 
 ### When other writers rewrite MEMORY.md, and when it is full
@@ -396,7 +397,7 @@ Candidates for removal:
 The audit deletes nothing. It prints a rollback command only for recorded
 candidates. Skill rows keep their plain names; memory and prompt-note rows use
 `memory:` / `prompt:` prefixes so same-named entries remain distinguishable.
-Every row shows the model's sanitized expected outcome (`—` when omitted)
+Every row shows the model's expected outcome, bounded to one line (`—` when omitted)
 alongside its observed result. Later edits of the same entry advance a version;
 version 3 or later is labelled `churning` only when the normal verdict would
 otherwise be `unclear`. Skills that remain unused are fed into later proposals

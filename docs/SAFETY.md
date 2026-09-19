@@ -4,10 +4,10 @@ Split out of the README. What leaves the host, and what the plugin will not do.
 
 ## What gets sent to the model
 
-Refine sends sanitized aggregated error patterns, explicit correction excerpts,
+Refine sends aggregated error patterns, explicit correction excerpts,
 a bounded structured overview of existing skills (name, description, category,
 and a known local version) and memory snippets, the optional manual
-reason/prior-pass note, and up to 8,000 characters of sanitized recent
+reason/prior-pass note, and up to 8,000 characters of recent
 trajectory to the configured provider. Each overview line is bounded by
 `overview_max_chars`; each kind is capped by `overview_max_entries`, with a
 visible `+N more` marker. It also sends up to `history_max_entries` of its own
@@ -16,16 +16,20 @@ can inform the next proposal. Empty history sends no history block; the existing
 negative examples for unused skills remain separate.
 
 If the mechanical signal gate has no signal, the reviewer receives only the
-bounded sanitized trajectory and returns a tiny verdict. When a skill patch is
+bounded trajectory and returns a tiny verdict. When a skill patch is
 selected, a second structured request receives the target's current complete
-`SKILL.md` only if it is safe and no larger than the shared 15,000-character
+`SKILL.md` if it can be read and is no larger than the shared 15,000-character
 input/output limit. The proposal budget derives from that limit locally because
-Hermes exposes no model output-limit capability. Unsafe or oversized current
-skill content becomes `no_op`; it is never redacted, truncated, or used to
-generate a destructive replacement.
+Hermes exposes no model output-limit capability. Unreadable or oversized current
+skill content becomes `no_op`; it is never truncated or used to generate a
+destructive replacement.
 
-Credentials are redacted first, but remaining content is ordinary conversation
-or skill content. Automatic analysis is on by default; set
+**Nothing is redacted on the way out.** The plugin had a credential filter that
+replaced key- and token-shaped text with `[REDACTED]`; it was removed, because
+Hermes hands the same conversation to the same model itself and the filter cost
+real correctness in exchange (it broke JSON tool results, and it could merge two
+different errors into one fingerprint). What reaches the model is the
+conversation it is already being given. Automatic analysis is on by default; set
 `auto_enabled: false` if model-bound session analysis must be manually
 initiated.
 
@@ -39,8 +43,10 @@ With `update_check` on (the default), the plugin makes one anonymous request to 
 
 ## Safety & limits
 
-- **Credential scrubbing** covers evidence, reasons, proposals, reviewer
-  verdicts, host errors, prompt notes, and recursively nested journal fields.
+- **No credential redaction.** Evidence, reasons, proposals, reviewer verdicts,
+  host errors, prompt notes, the journal and the trace log all hold the text the
+  pass actually saw. Every one of those artefacts is local, in
+  `<HERMES_HOME>`, beside the `state.db` the evidence came from.
 - **Stale-plan guard** — a skill patch proposal carries a SHA-256 baseline
   digest captured at planning time. Before backup, and again against the
   recovery snapshot captured for rollback, the plugin re-reads the live host

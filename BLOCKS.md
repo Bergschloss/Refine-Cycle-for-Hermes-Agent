@@ -8,17 +8,17 @@ the block's boundary. "Dependents" lists blocks that break if this one breaks.
 |---|-------|------------------|---------------------|------------|
 | 1 | **Plugin registration** | `__init__.py`: `register()`, command/tool wiring | Hermes plugin API → `/refine`, `refine_run`, hooks | everything (entry point) |
 | 2 | **Config resolution** | `config.py`: `hermes_home()`, `state_db_path()`, `get_*`, `_get_fail_closed_bool` | config.yaml → typed values; paths | all blocks reading config |
-| 3 | **Scrubbing** | `sanitization.py`: `scrub_text`, credential patterns | raw strings → redacted strings | every path out of state.db |
+| 3 | **Line-structure hygiene** | `sanitization.py`: `LINE_BREAK_CHARS`, `LINE_BREAK_RE` | text → one agreed set of line-ending codepoints | content guardrails, one-line prompt values |
 | 4 | **Detection / session resolution** | `core.py`: `resolve_session_id`, session-db lookup | session_id or live db → resolved session + source | evidence, run orchestration |
 | 5 | **Normalisation & fingerprinting** | `patterns.py`: error normalisation, `fingerprint` | error rows → stable fingerprints | aggregation, dedup |
-| 6 | **Evidence collection** | `core.py`: `_collect_evidence` (ro SQL over state.db) | resolved session → scrubbed evidence pack | signal gate, proposers |
+| 6 | **Evidence collection** | `core.py`: `_collect_evidence` (ro SQL over state.db) | resolved session → bounded evidence pack | signal gate, proposers |
 | 7 | **Cross-session aggregation** | `core.py`: `collect_cross_session_patterns` + `patterns.extract_patterns`/`merge_patterns` (the first pass's `patterns.aggregate` no longer exists) | fingerprints + journal → chronic set | signal gate |
 | 8 | **Signal gate** | `patterns.py`: `has_signal`, `prioritize_signal_patterns` (was `passes_signal_gate`) | aggregated stats → go/no-go | proposer chain |
 | 9 | **Proposer context assembly** | `core.py`: `_render_proposer_context`, `_active_prompt_notes_safe`, `llm._render_notes_block` | evidence + prompt notes → context text | structured & subagent proposers |
 | 10 | **Structured proposer** | `llm.py`: `propose`, schema, `json_mode` fallback, parse/validate | context + route → validated proposal | run orchestration |
 | 11 | **Subagent proposer** | `core.py`: `_propose_with_subagent`, lifecycle wait/result, strict gate | context + notes → proposal (or strict error) | run orchestration |
 | 12 | **Content guardrails** | `core.py`: `_skill_or_memory_injection_error`, `_prompt_note_content_error`, `_validate_proposal` | proposal → accept/refusal reason | apply |
-| 13 | **Resource & credential checks** | `core.py`: `_RESOURCE_*` regexes, `_memory_host_reference`, `_prompt_note_credential_field` | content → refusal reason | guardrails |
+| 13 | **Prompt-note resource checks** | `core.py`: `_RESOURCE_*` regexes, `_memory_host_reference`, `_prompt_note_credential_field` — notes only; the memory resource ban was removed | note content → refusal reason | guardrails |
 | 14 | **Journal state machine** | `journal.py`: append, `mutation_lock`, dedup, prompt-note store, `memory_baseline` | events → durable JSONL + notes store | apply, audit, rollback |
 | 15 | **Apply** | `core.py`: `_apply_proposal` (backup → write → verify) | validated proposal → applied edit + backup path | ledger |
 | 16 | **Rollback** | `journal.py`: `rollback_skill` / `rollback_memory` / `rollback_prompt_note` (split from the first pass's single `rollback`) | journal id → reverted state | CLI, user request |

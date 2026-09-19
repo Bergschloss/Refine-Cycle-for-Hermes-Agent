@@ -90,7 +90,7 @@ llm:
   `/refine model` then reports `source: host_default` rather than claiming a
   target it does not have.
 - **Text-only trust boundary:** `PluginLlmTextInput` accepts text but no typed
-  trust level. Refine wraps and scrubs untrusted trajectory content, which is a
+  trust level. Refine wraps and tag-escapes untrusted trajectory content, which is a
   mitigation rather than hard separation; a guarantee requires a typed
   trust-level input from Hermes.
 - **Approval terminal states are not exported:** the plugin can observe pending

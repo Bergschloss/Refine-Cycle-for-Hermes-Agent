@@ -23,6 +23,11 @@ model, quoted here, or committed. Where a claim is synthetic, it says so.
 
 ## H1 — The credential choke point can invalidate JSON, and error classification runs *after* it
 
+> **Closed by removal.** This was confirmed and is now moot: the credential filter
+> was deleted outright (commit `c0917b3`), so there is no choke point left to
+> invalidate JSON. The measurement below is why the removal was a correctness fix
+> and not only a simplification. Everything it describes is history.
+
 **What could be wrong.** `scrub_text` replaces an unquoted value with the bare token
 `[REDACTED]`, which is not a JSON scalar; both evidence paths classify the **scrubbed**
 string, so `_structured_error_status` loses its verdict on those rows and the decision falls

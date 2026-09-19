@@ -67,11 +67,11 @@ Recurrence is decided by the plugin, not the model. `patterns.py` normalizes req
 | `patterns.py` | 919 | Error fingerprinting and aggregation |
 | `config.py` | 814 | Settings, host config writes |
 | `lesson_effect_checker.py` | 555 | Frozen grader for the experiment programme |
-| `sanitization.py` | 332 | Credential redaction, line-structure hygiene |
+| `sanitization.py` | 47 | Line-structure hygiene (the credential filter was removed) |
 | `notify.py` | 272 | User notifications through the CLI entry point |
 | `notices.py` | 675 | What the user is told and when: releases, a broken or paused plugin, a full memory store; one-tap update and fix, restart |
 | `desktop/plugin.js` | 245 | The desktop app's status-bar item with Update / Fix; all decisions stay in `notices.py` |
-| `refine_trace.py` | 187 | Sanitized invocation trace |
+| `refine_trace.py` | 170 | Invocation trace, in a plugin-owned log |
 
 ## What it may write
 
@@ -176,7 +176,7 @@ Refine-Cycle-for-Hermes-Agent/
 ├── __init__.py          # command, tool, and hook registration
 ├── config.py            # plugins.entries.refine config reader
 ├── core.py              # evidence, guardrails, serialized apply orchestration
-├── sanitization.py      # recursive credential redaction
+├── sanitization.py      # line-break codepoint set shared by the guardrails
 ├── patterns.py          # normalization, fingerprints, aggregation, signal gate
 ├── ledger.py            # timestamp-aware usefulness ledger and audit report
 ├── llm.py               # structured proposal, reviewer, and patch regeneration
@@ -199,7 +199,7 @@ Moved from the README. The pipeline summary above is the short form of this.
 ![How the Refine Cycle plugin works: a session ends, repeated failures are found across sessions, the gate opens only on recurrence, one edit is proposed, safety checks run, the edit is journaled then applied, and it is checked later — with three exits where the plugin stops, rejects, or rolls back](../assets/refine-cycle.gif)
 
 ```
-trajectory (state.db) → scrub → fingerprint + aggregate → signal gate
+trajectory (state.db) → fingerprint + aggregate → signal gate
                                                   ├→ reviewer decline → journaled no_op
                                                   └→ proposal → guardrails + prepare
                                                               → apply → finalized outcome
@@ -208,10 +208,10 @@ trajectory (state.db) → scrub → fingerprint + aggregate → signal gate
 
 | Stage | What happens |
 |---|---|
-| **1. Collect evidence** | Reads the last N messages of the selected session from `<HERMES_HOME>/state.db` with `mode=ro`. Credentials are redacted before downstream use. |
+| **1. Collect evidence** | Reads the last N messages of the selected session from `<HERMES_HOME>/state.db` with `mode=ro`. Rows are bounded and classified; nothing is redacted. |
 | **2. Aggregate** | Normalizes errors to invariant shapes, records complete 12-character fingerprints, and counts recurrence within and across sessions. |
-| **3. Signal gate and reviewer** | Repeated patterns or explicit corrections reach the proposal model. If neither exists, a substantial session may receive one small, conservative reviewer call; a decline is a sanitized, journaled `no_op`. |
-| **4. LLM proposal** | Requests one structured `create`, `patch`, or `no_op` proposal with an optional one-sentence, falsifiable `expected_outcome`. Kinds are `skill`, `memory`, and `prompt`. A proposal may instead carry an `edits` array of inseparable edits under one shared reason, `expected_outcome`, and `summary`. Every model-bound field is sanitized. The proposal output budget is derived locally from the shared 15,000-character content limit and scales with `max_edits_per_proposal`; the reviewer remains separately capped at 2,400 tokens. A cut-off, malformed, or reasoning-only reply is journaled as `llm_incomplete` rather than presented as a normal `no_op`. Skill patches receive the current complete `SKILL.md` only when it is unchanged by scrubbing and no larger than 15,000 characters. |
+| **3. Signal gate and reviewer** | Repeated patterns or explicit corrections reach the proposal model. If neither exists, a substantial session may receive one small, conservative reviewer call; a decline is a journaled `no_op`. |
+| **4. LLM proposal** | Requests one structured `create`, `patch`, or `no_op` proposal with an optional one-sentence, falsifiable `expected_outcome`. Kinds are `skill`, `memory`, and `prompt`. A proposal may instead carry an `edits` array of inseparable edits under one shared reason, `expected_outcome`, and `summary`. Every model-bound field is bounded and tag-escaped. The proposal output budget is derived locally from the shared 15,000-character content limit and scales with `max_edits_per_proposal`; the reviewer remains separately capped at 2,400 tokens. A cut-off, malformed, or reasoning-only reply is journaled as `llm_incomplete` rather than presented as a normal `no_op`. Skill patches receive the current complete `SKILL.md` when it can be read and is no larger than 15,000 characters. |
 | **5. Guardrails** | Enforces agent-created patch targets, fresh create names, content/frontmatter, prompt-note policy shape, size limits, daily budget, and recent-duplicate rejection. Every check runs per edit, so a later edit of a transaction is measured against the edits already applied before it. |
 | **6. Prepare** | Captures a skill's pre-edit content as both a journal snapshot and a readable `.bak` file, or memory/prompt-note recovery metadata, then appends and `fsync`s a `prepared` journal record before mutation. |
 | **7. Apply and reconcile** | Runs the standard host API for skills/memory (`patch` maps to host `edit`) or atomically writes the plugin-owned prompt-note store. It proves target state and records `applied`, `pending_approval`, `conflict`, or `error`. A `conflict` occurs when a skill patch was planned against content that changed before apply, disappeared, or can no longer be read reliably; the budget is not consumed and the edit is not advertised as reversible. Host pending approvals reconcile lazily before later runs, audit, or rollback. |
