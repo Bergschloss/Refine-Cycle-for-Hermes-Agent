@@ -656,9 +656,8 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
     result = update_check.run_update()
     outcome = result.get("outcome")
     # The installer's own stdout and stderr are quoted in this message, so it can
-    # carry whatever the environment that ran it had in it. Scrubbed here, once,
-    # where the message is turned into words: the chat reply and the desktop app's
-    # JSON both read it, and the desktop one used to send it raw.
+    # carry whatever the environment that ran it had in it. Turned into words here,
+    # once: the chat reply and the desktop app's JSON both read it.
     message = str(result.get("message") or "").strip()
     if outcome in ("updated", "repaired"):
         new_version = str(result.get("tag") or update_check.installed_version())

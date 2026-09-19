@@ -228,8 +228,6 @@ def notify(text: str, chat: Optional[Tuple[str, str, str]] = None) -> bool:
                 _NO_TARGET, "no active chat and no notify_target configured"
             )
             return False
-        # Invariant 4: everything leaving for the user goes through the single
-        # scrubbing choke point, even text the caller already scrubbed.
         safe_text = text
 
         result: dict = {"ok": False}

@@ -895,7 +895,7 @@ def _propose_structured(
     schema_name: str = "refine_proposal",
     json_schema: Optional[Dict[str, Any]] = None,
 ) -> Any:
-    """Invoke the model only with recursively sanitized text inputs.
+    """Invoke the model with the proposal contract and bounded text inputs.
 
     ``schema_name``/``json_schema`` default to the full proposal contract, so
     every existing caller is byte-identical. A repair sub-call passes a narrow
@@ -1331,14 +1331,14 @@ def review_fallback(llm: PluginLlm, evidence_text: str, *, target: Optional[Dict
 
 
 def normalize_expected_outcome(value: Any) -> str:
-    """Return a compact, sanitized prediction or an empty optional value."""
+    """Return a compact prediction or an empty optional value."""
     if not isinstance(value, str):
         return ""
     return value.strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
 
 
 def normalize_summary(value: Any) -> str:
-    """Return a compact, sanitized transaction summary for durable storage."""
+    """Return a compact transaction summary for durable storage."""
     if not isinstance(value, str):
         return ""
     return value.strip()[:MAX_PERSISTED_PROPOSAL_TEXT_CHARS]
@@ -1415,7 +1415,7 @@ def _valid_fingerprint(value: Any) -> str:
 
 
 def _overview_text(value: Any) -> str:
-    """Sanitize untrusted host metadata into one physical prompt-line value."""
+    """Flatten untrusted host metadata into one physical prompt-line value."""
     text = LINE_BREAK_RE.sub(" ", str(value))
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", text).strip()
     return text.replace("<", "&lt;").replace(">", "&gt;")
@@ -1614,7 +1614,7 @@ MAX_REPAIR_ECHO_CHARS = 600
 
 
 def _repair_echo(parsed: Dict[str, Any]) -> str:
-    """Show a repair call the proposal it must not rewrite, bounded and scrubbed.
+    """Show a repair call the proposal it must not rewrite, bounded.
 
     The model needs the original to choose sensibly -- a fingerprint cannot be
     matched to "this edit" without seeing the edit -- but the original is model
@@ -1656,8 +1656,7 @@ def _repair_content(
     are different facts, and one shared result code would merge them into one
     unreadable line in the journal.
 
-    The returned text is already scrubbed, so what gets validated here is
-    exactly the string that would reach the store.
+    What gets validated here is exactly the string that would reach the store.
     """
     reply = _ensure_dict(
         _propose_structured(
@@ -2341,7 +2340,7 @@ def finalize_proposal(
     Single owner of the parse→finalize transition for BOTH production paths:
     the structured ``propose()`` call and the subagent proposer. Keeping them
     on one function guarantees a subagent proposal is validated, regenerated
-    (skill patches) and sanitized exactly like a structured one — the
+    (skill patches) and bounded exactly like a structured one — the
     subagent changes only how the proposal is produced.
     """
     if parsed is None:

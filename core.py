@@ -911,7 +911,7 @@ _PERSISTENCE_WARNING_BYTES = 100 * 1024 * 1024
 
 
 def note_auto_event(code: str, message: str) -> None:
-    """Remember bounded, scrubbed background events for /refine status."""
+    """Remember bounded background events for /refine status."""
     event = {
         "code": _one_line(code)[:64],
         "message": _one_line(message)[:300],
@@ -1040,7 +1040,7 @@ def _open_db() -> Optional[sqlite3.Connection]:
 
 
 def _get_session_source_status(session_id: str) -> Tuple[str, str]:
-    """Return a scrubbed source plus ``ok``, ``missing``, or ``error``."""
+    """Return the source plus ``ok``, ``missing``, or ``error``."""
     if not session_id:
         return "", "missing"
     connection = _open_db()
@@ -1758,8 +1758,8 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
             })
 
         for row in chronological_rows:
-            # Every string from SQLite is scrubbed at this single extraction
-            # boundary so evidence, journals, and returned tool results inherit it.
+            # Every string from SQLite is bounded and normalized at this single
+            # extraction boundary so evidence, journals, and returned results agree.
             role = _one_line(str(row["role"] or ""))[:32].lower()
             if role not in {"user", "assistant", "tool", "system"}:
                 role = "unknown"
@@ -1994,9 +1994,7 @@ def collect_cross_session_patterns(
             nonlocal rows_seen, cap_reached, untimed_dropped
             for row in cursor:
                 rows_seen += 1
-                # Classified raw, kept scrubbed -- see the same boundary in
-                # ``collect_evidence`` for why the scrubber cannot be trusted to
-                # leave a JSON payload parseable. Only the bool leaves here.
+                # Classified on the raw row; only the bool leaves here.
                 raw_content = str(row["content"] or "")
                 # The session budget is spent on sessions that carry a failure, not
                 # on the newest sessions. Rows arrive newest-first, so admitting a
@@ -4508,9 +4506,9 @@ _RESOLUTION_STOP_RE = re.compile(r"\b(?:stop(?: retrying)?|do not retry|abandon|
 def _resolution_for_occurrence(
     messages: List[Dict[str, Any]], failure_index: int, fingerprint: str, *, lookahead: int = 24
 ) -> str:
-    """Classify one sanitized failure by its bounded immediate outcome.
+    """Classify one failure by its bounded immediate outcome.
 
-    The caller supplies only database-egress-scrubbed messages. A later user turn
+    The caller supplies messages read from the session database. A later user turn
     ends the observation window, so this cannot attribute a future task's success
     to the earlier failure. ``repeated`` wins over a later success because it is
     evidence that the first action did not repair the failure. An observed
@@ -4536,7 +4534,7 @@ def _resolution_for_occurrence(
             continue
         tool_name = str(message.get("tool_name", ""))
         # Successful results are intentionally excluded by the evidence choke
-        # point, but still resolve the preceding already-scrubbed failure.
+        # point, but still resolve the preceding failure.
         status = _structured_error_status(content, tool_name=tool_name)
         if status is False:
             # An observed repair beats prose-inferred abandonment; ``repeated``
@@ -5164,7 +5162,7 @@ def _render_proposer_context(
     history_safe_fields_only: bool = False,
     memory_capacity: str = "",
 ) -> str:
-    """Render the bounded, scrubbed context handed to the proposer subagent."""
+    """Render the bounded context handed to the proposer subagent."""
     skills_list = _llm._render_overview(
         list(existing_skills or []),
         entry_kind="skill",

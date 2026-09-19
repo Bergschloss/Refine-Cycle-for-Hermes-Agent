@@ -1,4 +1,4 @@
-"""Sanitized trace for plugin LLM invocations.
+"""Trace for plugin LLM invocations.
 
 No API keys, bearer tokens, endpoints, trajectory, or evidence.
 Only uses available PluginLlm fields: session_id, provider, model, usage.
@@ -83,7 +83,7 @@ def build_trace(
     model: Optional[str] = None,
     output_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Build a sanitized trace dict using only verified PluginLlm fields."""
+    """Build a trace dict using only verified PluginLlm fields."""
     return {
         "trace_id": str(uuid.uuid4()),
         "session_id": session_id,

@@ -882,7 +882,7 @@ def load_prompt_notes() -> Optional[List[Dict[str, str]]]:
 
 
 def _write_prompt_notes(notes: List[Dict[str, str]]) -> None:
-    """Atomically persist only validated, already-scrubbed note objects."""
+    """Atomically persist only validated note objects."""
     safe_notes = []
     seen_ids = set()
     for raw_note in notes:

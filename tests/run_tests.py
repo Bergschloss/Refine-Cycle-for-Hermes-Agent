@@ -4178,17 +4178,13 @@ class RefineTests(unittest.TestCase):
             "",
         )
 
-    def test_expected_outcome_is_capped_and_scrubbed_in_journal_and_report(self):
-        secret = _fixture("expected-outcome", "-secret-123!")
-        proposal = skill_proposal("scrubbed-expected-outcome")
-        proposal["expected_outcome"] = f'api_key="{secret}" ' + ("x" * 400)
+    def test_expected_outcome_is_capped_in_the_journal(self):
+        proposal = skill_proposal("capped-expected-outcome")
+        proposal["expected_outcome"] = "x" * 420
         result = self.run_proposal(proposal)
         entry = journal.get_entry(result["journal_id"])
         stored = entry["proposal"]["expected_outcome"]
         self.assertLessEqual(len(stored), llm.MAX_PERSISTED_PROPOSAL_TEXT_CHARS)
-
-        audit = core.refine_audit()
-
 
     def test_multi_text_fields_share_storage_cap_and_history_render_floor(self):
         expected = "expected-" + ("x" * 400)
