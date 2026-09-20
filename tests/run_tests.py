@@ -3431,12 +3431,17 @@ class RefineTests(unittest.TestCase):
         self.assertIsNotNone(refusal)
         self.assertEqual(refusal[0], "thin_evidence")
 
-    def test_the_reviewer_path_pins_nothing_and_still_cannot_apply(self):
+    def test_the_reviewer_path_pins_nothing_and_its_verdict_tracks_grounding(self):
         """The reviewer path never reaches the repair, so a reviewer patch has
         nothing pinned -- one model call, the regeneration, and the regeneration's
         own fingerprint wins exactly as it did before this fix. Spending a repair
-        call here would buy nothing: the gate refuses reviewer output as advisory
-        before it looks at a fingerprint at all."""
+        call here would buy nothing.
+
+        Change B: the gate no longer refuses reviewer output wholesale as
+        advisory. It judges the reviewer proposal on the same evidence as any
+        other, so a GROUNDED reviewer patch (its fingerprint observed and clear
+        of the apply bar) is applyable, while an UNGROUNDED one stays
+        reviewer_only. Both directions are pinned here."""
         self._application_gate_patch.stop()
         model = MockLlm(self._patch_replacement("aaaa1111bbbb"))
         result = self._finalize_patch(
@@ -3446,13 +3451,25 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(llm.last_call_meta().get("grounding_retry_attempted"))
         self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
 
-        refusal = core._application_evidence_refusal(
+        # Grounded: observed fingerprint that clears the apply bar -> applyable,
+        # the same None a signal-gate proposal would get.
+        self.assertIsNone(
+            core._application_evidence_refusal(
+                result,
+                [{"fingerprint": "aaaa1111bbbb", "count": 9, "sessions_seen": 5}],
+                signal_path="reviewer_approved",
+                explicit_session=False,
+            )
+        )
+        # Ungrounded: the same reviewer patch with no observed fingerprint is the
+        # one case still turned away as advisory reviewer_only.
+        ungrounded = core._application_evidence_refusal(
             result,
-            [{"fingerprint": "aaaa1111bbbb", "count": 9, "sessions_seen": 5}],
+            [{"fingerprint": "eeee2222dddd", "count": 9, "sessions_seen": 5}],
             signal_path="reviewer_approved",
             explicit_session=False,
         )
-        self.assertEqual(refusal[0], "reviewer_only")
+        self.assertEqual(ungrounded[0], "reviewer_only")
 
     # --- Task D: content-only repair for a grounded prompt note ------------
     #
@@ -28920,11 +28937,18 @@ class Release0144ContractTests(unittest.TestCase):
             )[0],
             "contradicted_by_trajectory",
         )
+        # Change B: a reviewer-approved proposal no longer bypasses the
+        # trajectory refusal by being turned away wholesale as reviewer_only
+        # first. It goes through the SAME evidence checks, so this GROUNDED
+        # retry-against-an-abandoned-trajectory is caught by the identical
+        # contradiction code -- a stronger form of "reviewer cannot bypass it"
+        # than the old blanket refusal, because the reviewer path is now held to
+        # the same standard as the signal-gate path rather than a separate one.
         self.assertEqual(
             core._application_evidence_refusal(
                 proposal, [pattern], signal_path="reviewer_approved", explicit_session=False,
             )[0],
-            "reviewer_only",
+            "contradicted_by_trajectory",
         )
         self.assertIsNone(
             core._application_evidence_refusal(
@@ -29132,20 +29156,133 @@ class Release0144ContractTests(unittest.TestCase):
         entry = journal.get_entry(result["journal_id"])
         self.assertIs(entry["llm_meta"]["would_apply"], False)
 
-    def test_case_c_reviewer_approved_preview_parity(self):
-        """C: the reviewer-only refusal the real apply returns for a
-        reviewer_approved create is exactly what the preview must report. The
-        end-to-end reviewer preview is asserted in
-        test_reviewer_approved_dry_run_reports_not_applyable; here we pin the
-        shared decision both paths consume."""
-        proposal = dict(skill_proposal("case-c"), pattern_fingerprint="abcdef123456")
+    def test_case_c_reviewer_approved_verdict_matches_the_signal_gate_path(self):
+        """C (Change B): a reviewer_approved proposal is judged by the SAME
+        evidence gate as a signal-gate proposal, so the preview and apply both
+        consume one decision -- and that decision now depends on grounding, not
+        on which path produced the proposal.
+
+        Grounded (fingerprint observed, clears the apply bar) -> applyable, the
+        identical None a gate_opened proposal gets. Ungrounded (no observed
+        fingerprint) -> reviewer_only, the one case that stays advisory. Before
+        Change B the grounded case was refused wholesale as reviewer_only, which
+        is what discarded real reviewer-approved lessons."""
         pattern = {"fingerprint": "abcdef123456", "count": 5, "sessions_seen": 2}
+
+        grounded = dict(skill_proposal("case-c"), pattern_fingerprint="abcdef123456")
+        # A grounded reviewer proposal reaches the same verdict as the signal
+        # gate: applyable.
+        self.assertIsNone(
+            core._application_evidence_refusal(
+                grounded, [pattern], signal_path="reviewer_approved",
+                explicit_session=False,
+            )
+        )
+        self.assertIsNone(
+            core._application_evidence_refusal(
+                grounded, [pattern], signal_path="gate_opened",
+                explicit_session=False,
+            )
+        )
+
+        # An ungrounded reviewer proposal is the one case still turned away as
+        # advisory reviewer_only.
+        ungrounded = dict(skill_proposal("case-c"), pattern_fingerprint="ffffffffffff")
         code, message = core._application_evidence_refusal(
-            proposal, [pattern], signal_path="reviewer_approved",
+            ungrounded, [pattern], signal_path="reviewer_approved",
             explicit_session=False,
         )
         self.assertEqual(code, "reviewer_only")
         self.assertIn("advisory", message.lower())
+        # The same ungrounded proposal from the signal-gate path is
+        # unbacked_pattern -- the codes differ only by which path had no signal.
+        self.assertEqual(
+            core._application_evidence_refusal(
+                ungrounded, [pattern], signal_path="gate_opened",
+                explicit_session=False,
+            )[0],
+            "unbacked_pattern",
+        )
+
+    def test_change_b_grounded_reviewer_lesson_that_clears_the_bar_is_applyable(self):
+        """Change B, the whole point: a reviewer-approved lesson grounded in a
+        real recurring failure that clears the apply bar is APPLYABLE, not
+        refused.
+
+        Fails on the pre-change code, where signal_path=='reviewer_approved'
+        returned reviewer_only before any fingerprint was looked at -- which is
+        what discarded 10 of 11 reviewer-approved lessons. Mutation checked:
+        restoring the blanket `if signal_path == 'reviewer_approved': return
+        ('reviewer_only', ...)` short-circuit makes this assertion fail (None
+        becomes reviewer_only)."""
+        proposal = dict(skill_proposal("grounded-reviewer"),
+                        pattern_fingerprint="abcdef123456")
+        pattern = {"fingerprint": "abcdef123456", "count": 6, "sessions_seen": 3,
+                   "tool": "http", "sample": "request failed"}
+        self.assertIsNone(
+            core._application_evidence_refusal(
+                proposal, [pattern], signal_path="reviewer_approved",
+                explicit_session=False,
+            )
+        )
+
+    def test_change_b_thin_reviewer_lesson_is_refused_with_the_normal_path_code(self):
+        """Change B: a reviewer proposal grounded in an observed-but-thin pattern
+        is refused with the SAME thin_evidence code a signal-gate proposal gets,
+        not a reviewer_only that hides why. Both paths, one code.
+
+        Fails on the pre-change code: reviewer_approved returned reviewer_only
+        for this thin pattern instead of thin_evidence."""
+        proposal = dict(skill_proposal("thin-reviewer"),
+                        pattern_fingerprint="abcdef123456")
+        # Observed but below the apply bar: 1 session, 1 occurrence.
+        thin = {"fingerprint": "abcdef123456", "count": 1, "sessions_seen": 1,
+                "tool": "http", "sample": "request failed"}
+        reviewer_code = core._application_evidence_refusal(
+            proposal, [thin], signal_path="reviewer_approved",
+            explicit_session=False,
+        )[0]
+        gate_code = core._application_evidence_refusal(
+            proposal, [thin], signal_path="gate_opened",
+            explicit_session=False,
+        )[0]
+        self.assertEqual(reviewer_code, "thin_evidence")
+        self.assertEqual(reviewer_code, gate_code)
+
+    def test_change_b_preview_and_apply_agree_for_a_reviewer_proposal(self):
+        """Change B: because the dry-run preview and the real apply both consume
+        the one _application_evidence_refusal, changing that function keeps the
+        two verdicts identical for every reviewer case -- grounded-applyable,
+        ungrounded-reviewer_only, and thin. This pins the agreement directly on
+        the shared decision the preview wrapper and the apply path both call."""
+        grounded = dict(skill_proposal("agree-grounded"),
+                        pattern_fingerprint="abcdef123456")
+        cases = [
+            # (all_error_patterns, expected refusal or None)
+            ([{"fingerprint": "abcdef123456", "count": 6, "sessions_seen": 3}], None),
+            ([{"fingerprint": "aaaaaaaaaaaa", "count": 6, "sessions_seen": 3}],
+             "reviewer_only"),
+            ([{"fingerprint": "abcdef123456", "count": 1, "sessions_seen": 1}],
+             "thin_evidence"),
+        ]
+        for observed, expected in cases:
+            with self.subTest(expected=expected):
+                # The preview wrapper's evidence step and the real apply call the
+                # identical function with the identical args, so their verdicts
+                # cannot diverge. Assert both explicitly.
+                preview_decision = core._application_evidence_refusal(
+                    grounded, observed, signal_path="reviewer_approved",
+                    explicit_session=False, explicit_user_correction=False,
+                )
+                apply_decision = core._application_evidence_refusal(
+                    grounded, observed, signal_path="reviewer_approved",
+                    explicit_session=False, explicit_user_correction=False,
+                )
+                self.assertEqual(preview_decision, apply_decision)
+                if expected is None:
+                    self.assertIsNone(preview_decision)
+                else:
+                    self.assertEqual(preview_decision[0], expected)
 
     def test_case_d_unbacked_fingerprint_is_repaired_once_then_refused(self):
         """D: a fingerprint that was never observed in this evidence must not

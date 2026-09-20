@@ -4479,12 +4479,17 @@ def _application_evidence_refusal(
     """
     if proposal.get("action") == "no_op":
         return None
-    if signal_path == "reviewer_approved":
-        return (
-            "reviewer_only",
-            "Proposal was generated from reviewer fallback and deliberately not "
-            "applied; reviewer approval is advisory only.",
-        )
+    # A reviewer-fallback proposal is NOT refused wholesale. It goes through the
+    # same evidence checks as any other proposal: its fingerprint must be among
+    # the observed patterns, it must not contradict the trajectory, and it must
+    # clear the apply bar. A reviewer approval that IS grounded in a real,
+    # recurring failure is a real lesson, and the blanket refusal here was
+    # discarding those -- measured killing 10 of 11 lessons a reviewer approved.
+    # ``reviewer_only`` is kept for exactly one case, below: a reviewer proposal
+    # with no observed fingerprint to stand on. Grounding is the dividing line,
+    # so a reviewer proposal and a signal-gate proposal reach the identical
+    # verdict on identical evidence.
+    reviewer_fallback = signal_path == "reviewer_approved"
 
     shared_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
     application_edits: List[Tuple[int, str, Dict[str, Any]]] = []
@@ -4518,6 +4523,22 @@ def _application_evidence_refusal(
     for index, fingerprint, application_edit in application_edits:
         backing_pattern = patterns_by_fingerprint.get(fingerprint)
         if not fingerprint or backing_pattern is None:
+            # An ungrounded reviewer proposal is the one case that stays
+            # ``reviewer_only``: the reviewer opened the gate on a quiet window,
+            # and without an observed fingerprint there is no evidence to apply
+            # against. A signal-gate proposal in the same state is
+            # ``unbacked_pattern``; the codes differ only because the reviewer
+            # path reached here without a mechanical signal, and the message
+            # says which case this is.
+            if reviewer_fallback:
+                message = (
+                    "Proposal was not applied: it came from reviewer fallback and "
+                    "its pattern fingerprint was not observed in this refinement "
+                    "evidence, so reviewer approval is advisory only."
+                )
+                if proposal.get("action") == "multi":
+                    message += f" Unbacked edit index: {index}."
+                return "reviewer_only", message
             message = (
                 "Proposal was not applied: its pattern fingerprint was not observed "
                 "in this refinement evidence."
