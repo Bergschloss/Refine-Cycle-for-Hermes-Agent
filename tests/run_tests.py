@@ -1224,173 +1224,13 @@ class RefineTests(unittest.TestCase):
         )
         counts = [p.get("count") for p in evidence.get("error_patterns") or []]
         self.assertIn(3, counts, f"The repeat was not aggregated: {counts}")
-        # The excerpt now brings the offered failure rows in alongside the tail,
-        # so the model sees the failure it is asked to write about -- but it
-        # stays hard-capped at twice the window, so this is a way to show the
-        # right rows, not a way to grow the prompt unboundedly.
-        self.assertLessEqual(len(evidence["messages"]), 120)
-        # The failing row itself is now in the excerpt, not only in the counts:
-        # before this it sat before the 60-row window and the model never saw it.
-        self.assertTrue(
-            any(
-                "connection refused" in message["content"]
-                for message in evidence["messages"]
-            ),
-            "The offered failure row was not brought into the excerpt.",
-        )
+        # The excerpt itself stays bounded -- this must not become a way to grow
+        # the prompt, only a way to count correctly.
+        self.assertLessEqual(len(evidence["messages"]), 60)
         # And the snippets shown agree with what was counted, rather than being
         # drawn from a window that no longer holds those failures.
         self.assertTrue(evidence["tool_errors"])
         self.assertIn("connection refused", evidence["tool_errors"][-1]["snippet"])
-
-    def test_offered_failure_at_session_start_reaches_the_excerpt_in_a_long_session(self):
-        """Change A: in a >300-row session with the failure at the very start,
-        the failing rows are brought into the excerpt (with their two-row
-        context), not just counted.
-
-        Fails on the pre-change code, where the excerpt was messages[-limit:]
-        alone: the failing rows sit ~340 rows before the window, so
-        collect_evidence returned an excerpt that never mentioned the failure
-        the kept pattern is about. Mutation checked: reverting the excerpt back
-        to `messages[-limit:]` makes this assertion fail (the failure text is
-        absent from every excerpt row).
-        """
-        now = time.time()
-        rows = [
-            ("session", "tool", "ERROR: connection refused to scheduler service",
-             "cronjob", now - 5000 + index, 1)
-            for index in range(3)
-        ] + [
-            ("session", "assistant", f"acknowledged step {index}", "", now - 4000 + index, 1)
-            for index in range(340)
-        ]
-        FakeHost.make_db(rows)
-
-        evidence = core.collect_evidence("session", limit=60)
-
-        # The pattern is real and counted.
-        self.assertEqual(evidence["error_count"], 3)
-        # The failing rows are now shown to the model, though they predate the
-        # 60-row tail window by hundreds of rows.
-        failure_rows_in_excerpt = [
-            message for message in evidence["messages"]
-            if "connection refused" in message["content"]
-        ]
-        self.assertTrue(
-            failure_rows_in_excerpt,
-            "The offered failure never reached the excerpt in a long session.",
-        )
-        # It is present as the tool row it actually was, not reworded.
-        self.assertTrue(
-            any(m["role"] == "tool" for m in failure_rows_in_excerpt)
-        )
-
-    def test_the_excerpt_never_exceeds_twice_the_window_however_many_failures(self):
-        """Change A cap: the whole excerpt stays at or below 2*limit no matter
-        how many distinct offered failures there are.
-
-        Fails on a mutant that drops the extra_budget cap (or sets it to an
-        unbounded value): with far more failures than 2*limit, the excerpt would
-        grow past 120. Mutation checked: setting extra_budget to len(messages)
-        with no cap makes this assertion fail.
-        """
-        now = time.time()
-        # 90 distinct failing fingerprints early, then a full 60-row tail on top,
-        # so both the tail and a large pool of offered-failure rows compete for
-        # the excerpt.
-        rows = []
-        for index in range(90):
-            base = now - 5000 + index * 3
-            rows.append(("session", "tool", f"ERROR: distinct failure kind {index}",
-                         f"tool{index}", base, 1))
-            rows.append(("session", "tool", f"ERROR: distinct failure kind {index}",
-                         f"tool{index}", base + 1, 1))
-            rows.append(("session", "tool", f"ERROR: distinct failure kind {index}",
-                         f"tool{index}", base + 2, 1))
-        rows += [
-            ("session", "assistant", f"tail row {index}", "", now - 100 + index, 1)
-            for index in range(60)
-        ]
-        FakeHost.make_db(rows)
-
-        evidence = core.collect_evidence("session", limit=60)
-        self.assertLessEqual(
-            len(evidence["messages"]), 120,
-            f"Excerpt exceeded 2*limit: {len(evidence['messages'])} rows.",
-        )
-
-    def test_a_short_session_excerpt_is_unchanged_by_change_a(self):
-        """Change A must not touch a session that already fits the window: when
-        every row is inside the newest `limit`, the excerpt is exactly what it
-        was before -- same rows, same order.
-
-        Fails on a mutant that injects fingerprint rows unconditionally (e.g.
-        one that appends context rows even when they are already in the tail and
-        does not dedup): the short-session excerpt would gain duplicates or grow.
-        """
-        now = time.time()
-        FakeHost.make_db([
-            ("session", "user", "please fetch the item", "", now - 5, 1),
-            ("session", "tool", "ERROR: request failed for /item/100", "http", now - 4, 1),
-            ("session", "assistant", "retrying once", "", now - 3, 1),
-            ("session", "tool", "ERROR: request failed for /item/200", "http", now - 2, 1),
-            ("session", "tool", "ERROR: request failed for /item/300", "http", now - 1, 1),
-        ])
-        evidence = core.collect_evidence("session", limit=60)
-        # Every one of the five rows fits the window, in chronological order,
-        # with no injected or duplicated rows.
-        self.assertEqual(
-            [m["content"] for m in evidence["messages"]],
-            [
-                "please fetch the item",
-                "ERROR: request failed for /item/100",
-                "retrying once",
-                "ERROR: request failed for /item/200",
-                "ERROR: request failed for /item/300",
-            ],
-        )
-
-    def test_the_excerpt_contains_no_duplicate_rows(self):
-        """Change A: a row is never listed twice, even when it is both in the
-        tail window and part of an offered failure's context, or shared between
-        two overlapping failure contexts.
-
-        The excerpt is keyed by the underlying message_order, so identity is by
-        row, not by rendered text (two genuinely distinct rows may share text).
-        Fails on a mutant that concatenates tail + context lists without keying
-        by message_order.
-        """
-        now = time.time()
-        # Failures near the start, and a tail whose first rows overlap the
-        # two-row context that follows the last early failure.
-        rows = [
-            ("session", "tool", "ERROR: connection refused to scheduler", "cronjob",
-             now - 500 + index, 1)
-            for index in range(3)
-        ] + [
-            ("session", "assistant", f"work row {index}", "", now - 200 + index, 1)
-            for index in range(70)
-        ]
-        FakeHost.make_db(rows)
-
-        evidence = core.collect_evidence("session", limit=60)
-        # Re-derive row identity: collect_evidence strips _message_order, so
-        # assert no two excerpt entries are the SAME dict object and that the
-        # (role, content, tool_name) tuples that CAN collide only do so for
-        # genuinely repeated rows. The strongest available check here is that
-        # the excerpt length never exceeds the number of distinct source rows
-        # and stays within the cap.
-        self.assertLessEqual(len(evidence["messages"]), 120)
-        # A duplicated tail/context row would push identical adjacent entries;
-        # assert the tail rows (unique text) each appear exactly once.
-        tail_texts = [f"work row {index}" for index in range(70)]
-        for text in tail_texts:
-            occurrences = sum(
-                1 for m in evidence["messages"] if m["content"] == text
-            )
-            self.assertLessEqual(
-                occurrences, 1, f"Row {text!r} appeared {occurrences} times."
-            )
 
     def test_failures_inside_the_window_are_counted_once_not_twice(self):
         """Two collection paths over overlapping rows is how double counting starts.
@@ -3431,17 +3271,12 @@ class RefineTests(unittest.TestCase):
         self.assertIsNotNone(refusal)
         self.assertEqual(refusal[0], "thin_evidence")
 
-    def test_the_reviewer_path_pins_nothing_and_its_verdict_tracks_grounding(self):
+    def test_the_reviewer_path_pins_nothing_and_still_cannot_apply(self):
         """The reviewer path never reaches the repair, so a reviewer patch has
         nothing pinned -- one model call, the regeneration, and the regeneration's
         own fingerprint wins exactly as it did before this fix. Spending a repair
-        call here would buy nothing.
-
-        Change B: the gate no longer refuses reviewer output wholesale as
-        advisory. It judges the reviewer proposal on the same evidence as any
-        other, so a GROUNDED reviewer patch (its fingerprint observed and clear
-        of the apply bar) is applyable, while an UNGROUNDED one stays
-        reviewer_only. Both directions are pinned here."""
+        call here would buy nothing: the gate refuses reviewer output as advisory
+        before it looks at a fingerprint at all."""
         self._application_gate_patch.stop()
         model = MockLlm(self._patch_replacement("aaaa1111bbbb"))
         result = self._finalize_patch(
@@ -3451,25 +3286,13 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(llm.last_call_meta().get("grounding_retry_attempted"))
         self.assertEqual(result.get("pattern_fingerprint"), "aaaa1111bbbb")
 
-        # Grounded: observed fingerprint that clears the apply bar -> applyable,
-        # the same None a signal-gate proposal would get.
-        self.assertIsNone(
-            core._application_evidence_refusal(
-                result,
-                [{"fingerprint": "aaaa1111bbbb", "count": 9, "sessions_seen": 5}],
-                signal_path="reviewer_approved",
-                explicit_session=False,
-            )
-        )
-        # Ungrounded: the same reviewer patch with no observed fingerprint is the
-        # one case still turned away as advisory reviewer_only.
-        ungrounded = core._application_evidence_refusal(
+        refusal = core._application_evidence_refusal(
             result,
-            [{"fingerprint": "eeee2222dddd", "count": 9, "sessions_seen": 5}],
+            [{"fingerprint": "aaaa1111bbbb", "count": 9, "sessions_seen": 5}],
             signal_path="reviewer_approved",
             explicit_session=False,
         )
-        self.assertEqual(ungrounded[0], "reviewer_only")
+        self.assertEqual(refusal[0], "reviewer_only")
 
     # --- Task D: content-only repair for a grounded prompt note ------------
     #
@@ -28937,18 +28760,11 @@ class Release0144ContractTests(unittest.TestCase):
             )[0],
             "contradicted_by_trajectory",
         )
-        # Change B: a reviewer-approved proposal no longer bypasses the
-        # trajectory refusal by being turned away wholesale as reviewer_only
-        # first. It goes through the SAME evidence checks, so this GROUNDED
-        # retry-against-an-abandoned-trajectory is caught by the identical
-        # contradiction code -- a stronger form of "reviewer cannot bypass it"
-        # than the old blanket refusal, because the reviewer path is now held to
-        # the same standard as the signal-gate path rather than a separate one.
         self.assertEqual(
             core._application_evidence_refusal(
                 proposal, [pattern], signal_path="reviewer_approved", explicit_session=False,
             )[0],
-            "contradicted_by_trajectory",
+            "reviewer_only",
         )
         self.assertIsNone(
             core._application_evidence_refusal(
@@ -29156,133 +28972,20 @@ class Release0144ContractTests(unittest.TestCase):
         entry = journal.get_entry(result["journal_id"])
         self.assertIs(entry["llm_meta"]["would_apply"], False)
 
-    def test_case_c_reviewer_approved_verdict_matches_the_signal_gate_path(self):
-        """C (Change B): a reviewer_approved proposal is judged by the SAME
-        evidence gate as a signal-gate proposal, so the preview and apply both
-        consume one decision -- and that decision now depends on grounding, not
-        on which path produced the proposal.
-
-        Grounded (fingerprint observed, clears the apply bar) -> applyable, the
-        identical None a gate_opened proposal gets. Ungrounded (no observed
-        fingerprint) -> reviewer_only, the one case that stays advisory. Before
-        Change B the grounded case was refused wholesale as reviewer_only, which
-        is what discarded real reviewer-approved lessons."""
+    def test_case_c_reviewer_approved_preview_parity(self):
+        """C: the reviewer-only refusal the real apply returns for a
+        reviewer_approved create is exactly what the preview must report. The
+        end-to-end reviewer preview is asserted in
+        test_reviewer_approved_dry_run_reports_not_applyable; here we pin the
+        shared decision both paths consume."""
+        proposal = dict(skill_proposal("case-c"), pattern_fingerprint="abcdef123456")
         pattern = {"fingerprint": "abcdef123456", "count": 5, "sessions_seen": 2}
-
-        grounded = dict(skill_proposal("case-c"), pattern_fingerprint="abcdef123456")
-        # A grounded reviewer proposal reaches the same verdict as the signal
-        # gate: applyable.
-        self.assertIsNone(
-            core._application_evidence_refusal(
-                grounded, [pattern], signal_path="reviewer_approved",
-                explicit_session=False,
-            )
-        )
-        self.assertIsNone(
-            core._application_evidence_refusal(
-                grounded, [pattern], signal_path="gate_opened",
-                explicit_session=False,
-            )
-        )
-
-        # An ungrounded reviewer proposal is the one case still turned away as
-        # advisory reviewer_only.
-        ungrounded = dict(skill_proposal("case-c"), pattern_fingerprint="ffffffffffff")
         code, message = core._application_evidence_refusal(
-            ungrounded, [pattern], signal_path="reviewer_approved",
+            proposal, [pattern], signal_path="reviewer_approved",
             explicit_session=False,
         )
         self.assertEqual(code, "reviewer_only")
         self.assertIn("advisory", message.lower())
-        # The same ungrounded proposal from the signal-gate path is
-        # unbacked_pattern -- the codes differ only by which path had no signal.
-        self.assertEqual(
-            core._application_evidence_refusal(
-                ungrounded, [pattern], signal_path="gate_opened",
-                explicit_session=False,
-            )[0],
-            "unbacked_pattern",
-        )
-
-    def test_change_b_grounded_reviewer_lesson_that_clears_the_bar_is_applyable(self):
-        """Change B, the whole point: a reviewer-approved lesson grounded in a
-        real recurring failure that clears the apply bar is APPLYABLE, not
-        refused.
-
-        Fails on the pre-change code, where signal_path=='reviewer_approved'
-        returned reviewer_only before any fingerprint was looked at -- which is
-        what discarded 10 of 11 reviewer-approved lessons. Mutation checked:
-        restoring the blanket `if signal_path == 'reviewer_approved': return
-        ('reviewer_only', ...)` short-circuit makes this assertion fail (None
-        becomes reviewer_only)."""
-        proposal = dict(skill_proposal("grounded-reviewer"),
-                        pattern_fingerprint="abcdef123456")
-        pattern = {"fingerprint": "abcdef123456", "count": 6, "sessions_seen": 3,
-                   "tool": "http", "sample": "request failed"}
-        self.assertIsNone(
-            core._application_evidence_refusal(
-                proposal, [pattern], signal_path="reviewer_approved",
-                explicit_session=False,
-            )
-        )
-
-    def test_change_b_thin_reviewer_lesson_is_refused_with_the_normal_path_code(self):
-        """Change B: a reviewer proposal grounded in an observed-but-thin pattern
-        is refused with the SAME thin_evidence code a signal-gate proposal gets,
-        not a reviewer_only that hides why. Both paths, one code.
-
-        Fails on the pre-change code: reviewer_approved returned reviewer_only
-        for this thin pattern instead of thin_evidence."""
-        proposal = dict(skill_proposal("thin-reviewer"),
-                        pattern_fingerprint="abcdef123456")
-        # Observed but below the apply bar: 1 session, 1 occurrence.
-        thin = {"fingerprint": "abcdef123456", "count": 1, "sessions_seen": 1,
-                "tool": "http", "sample": "request failed"}
-        reviewer_code = core._application_evidence_refusal(
-            proposal, [thin], signal_path="reviewer_approved",
-            explicit_session=False,
-        )[0]
-        gate_code = core._application_evidence_refusal(
-            proposal, [thin], signal_path="gate_opened",
-            explicit_session=False,
-        )[0]
-        self.assertEqual(reviewer_code, "thin_evidence")
-        self.assertEqual(reviewer_code, gate_code)
-
-    def test_change_b_preview_and_apply_agree_for_a_reviewer_proposal(self):
-        """Change B: because the dry-run preview and the real apply both consume
-        the one _application_evidence_refusal, changing that function keeps the
-        two verdicts identical for every reviewer case -- grounded-applyable,
-        ungrounded-reviewer_only, and thin. This pins the agreement directly on
-        the shared decision the preview wrapper and the apply path both call."""
-        grounded = dict(skill_proposal("agree-grounded"),
-                        pattern_fingerprint="abcdef123456")
-        cases = [
-            # (all_error_patterns, expected refusal or None)
-            ([{"fingerprint": "abcdef123456", "count": 6, "sessions_seen": 3}], None),
-            ([{"fingerprint": "aaaaaaaaaaaa", "count": 6, "sessions_seen": 3}],
-             "reviewer_only"),
-            ([{"fingerprint": "abcdef123456", "count": 1, "sessions_seen": 1}],
-             "thin_evidence"),
-        ]
-        for observed, expected in cases:
-            with self.subTest(expected=expected):
-                # The preview wrapper's evidence step and the real apply call the
-                # identical function with the identical args, so their verdicts
-                # cannot diverge. Assert both explicitly.
-                preview_decision = core._application_evidence_refusal(
-                    grounded, observed, signal_path="reviewer_approved",
-                    explicit_session=False, explicit_user_correction=False,
-                )
-                apply_decision = core._application_evidence_refusal(
-                    grounded, observed, signal_path="reviewer_approved",
-                    explicit_session=False, explicit_user_correction=False,
-                )
-                self.assertEqual(preview_decision, apply_decision)
-                if expected is None:
-                    self.assertIsNone(preview_decision)
-                else:
-                    self.assertEqual(preview_decision[0], expected)
 
     def test_case_d_unbacked_fingerprint_is_repaired_once_then_refused(self):
         """D: a fingerprint that was never observed in this evidence must not

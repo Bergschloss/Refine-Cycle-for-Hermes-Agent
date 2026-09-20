@@ -1867,117 +1867,9 @@ def collect_evidence(session_id: Optional[str] = None, limit: int = 60) -> Dict[
                 resolved_suppressed += int(pattern.get("count", 0) or 0)
                 continue
             kept_patterns.append(pattern)
-        # The excerpt handed to the proposer is the newest ``limit`` rows. In a
-        # long session the failure a kept pattern is ABOUT sits before that
-        # window opens (measured: the first failure was outside the window in
-        # 58% of repeated-failure groups, and in ~95% of sessions over 300
-        # rows), so the model wrote the lesson from general knowledge and it
-        # came out as a restatement. Bring the rows that carry the offered
-        # failure fingerprints into the excerpt too, each with the two rows that
-        # immediately follow it for context, so the model sees the failure it is
-        # being asked to write about.
-        #
-        # Only the fingerprints that actually reach the prompt bring their rows:
-        # ``format_patterns``/``offered_fingerprints`` render at most
-        # ``FORMAT_PATTERNS_LIMIT`` patterns, so a pattern ranked below that was
-        # never shown and its rows would be noise. ``kept_patterns`` is already
-        # in the prioritized order the renderer uses, so its head is the offered
-        # set.
-        tail_messages = messages[-limit:]
-        tail_orders = {item["_message_order"] for item in tail_messages}
-        offered_fingerprints = {
-            str(pattern.get("fingerprint", "") or "")
-            for pattern in kept_patterns[: patterns.FORMAT_PATTERNS_LIMIT]
-            if pattern.get("fingerprint")
-        }
-        # The message_order of every offered-failure occurrence, oldest first --
-        # the missing failure is the oldest, so when the extra budget is tight
-        # the earliest occurrences are the ones worth keeping.
-        offered_failure_orders: List[Any] = []
-        seen_failure_orders: set = set()
-        for item in error_items:
-            fingerprint = patterns.fingerprint(
-                item.get("tool", ""), item.get("content", "")
-            )
-            if fingerprint not in offered_fingerprints:
-                continue
-            order = item.get("message_order")
-            if order is None or order in seen_failure_orders:
-                continue
-            seen_failure_orders.add(order)
-            offered_failure_orders.append(order)
-        offered_failure_orders.sort()
-
-        # The whole excerpt may not exceed twice the window. The tail is always
-        # kept; the failure rows fill whatever budget remains.
-        extra_budget = max(0, 2 * limit - len(tail_messages))
-
-        def _fingerprint_context_rows() -> Dict[Any, Dict[str, Any]]:
-            """Rows for each offered failure plus its two immediate successors.
-
-            Keyed by message_order so a row already in the tail window (or shared
-            between two overlapping failure contexts) is never duplicated. The
-            same per-row bounds and single-line/length treatment the tail excerpt
-            uses are applied here, so a fingerprint row is indistinguishable from
-            a tail row once rendered.
-            """
-            collected: Dict[Any, Dict[str, Any]] = {}
-            for order in offered_failure_orders:
-                if len(collected) >= extra_budget:
-                    break
-                failure_row = failure_rows_by_order.get(order)
-                if failure_row is None:
-                    continue
-                failure_ts = failure_row["timestamp"]
-                context_rows = connection.execute(
-                    "SELECT m.rowid AS message_order, m.role, m.content, "
-                    "m.tool_name, m.timestamp FROM messages m "
-                    "WHERE m.session_id = ? AND m.active = 1 "
-                    "AND m.timestamp > ? AND m.timestamp <= ? "
-                    # The failing row itself is the lower bound (>= on the
-                    # (timestamp, rowid) order key), then the two rows after it:
-                    # three rows total, the failure plus its two-row context.
-                    "AND (m.timestamp > ? OR (m.timestamp = ? AND m.rowid >= ?)) "
-                    "ORDER BY m.timestamp ASC, m.rowid ASC LIMIT 3",
-                    (
-                        resolved, _ts_low, _ts_high,
-                        failure_ts, failure_ts, order,
-                    ),
-                ).fetchall()
-                for row in context_rows:
-                    row_order = row["message_order"]
-                    if row_order in tail_orders or row_order in collected:
-                        continue
-                    if len(collected) >= extra_budget:
-                        break
-                    row_role = _one_line(str(row["role"] or ""))[:32].lower()
-                    if row_role not in {"user", "assistant", "tool", "system"}:
-                        row_role = "unknown"
-                    row_content = str(row["content"] or "")
-                    collected[row_order] = {
-                        "role": row_role,
-                        "content": row_content[:400]
-                        + ("…" if len(row_content) > 400 else ""),
-                        "tool_name": _one_line(str(row["tool_name"] or ""))[:120],
-                        "_message_order": row_order,
-                    }
-            return collected
-
-        excerpt_by_order: Dict[Any, Dict[str, Any]] = {}
-        if extra_budget and offered_failure_orders:
-            excerpt_by_order.update(_fingerprint_context_rows())
-        for item in tail_messages:
-            excerpt_by_order[item["_message_order"]] = item
-        # Chronological by message_order (rowid), so the excerpt reads in the
-        # same order it was produced and the one-record-per-line renderer keeps
-        # its ordering guarantee. No row appears twice: the dict is keyed by
-        # message_order and the tail overwrites any shared context row in place.
-        ordered_excerpt = [
-            excerpt_by_order[order] for order in sorted(excerpt_by_order)
-        ]
         safe_messages = [
             {key: value for key, value in item.items() if key != "_message_order"}
-            for item in ordered_excerpt
+            for item in messages[-limit:]
         ]
         return {
             "messages": safe_messages,
@@ -4479,17 +4371,12 @@ def _application_evidence_refusal(
     """
     if proposal.get("action") == "no_op":
         return None
-    # A reviewer-fallback proposal is NOT refused wholesale. It goes through the
-    # same evidence checks as any other proposal: its fingerprint must be among
-    # the observed patterns, it must not contradict the trajectory, and it must
-    # clear the apply bar. A reviewer approval that IS grounded in a real,
-    # recurring failure is a real lesson, and the blanket refusal here was
-    # discarding those -- measured killing 10 of 11 lessons a reviewer approved.
-    # ``reviewer_only`` is kept for exactly one case, below: a reviewer proposal
-    # with no observed fingerprint to stand on. Grounding is the dividing line,
-    # so a reviewer proposal and a signal-gate proposal reach the identical
-    # verdict on identical evidence.
-    reviewer_fallback = signal_path == "reviewer_approved"
+    if signal_path == "reviewer_approved":
+        return (
+            "reviewer_only",
+            "Proposal was generated from reviewer fallback and deliberately not "
+            "applied; reviewer approval is advisory only.",
+        )
 
     shared_fingerprint = str(proposal.get("pattern_fingerprint", "") or "")
     application_edits: List[Tuple[int, str, Dict[str, Any]]] = []
@@ -4523,22 +4410,6 @@ def _application_evidence_refusal(
     for index, fingerprint, application_edit in application_edits:
         backing_pattern = patterns_by_fingerprint.get(fingerprint)
         if not fingerprint or backing_pattern is None:
-            # An ungrounded reviewer proposal is the one case that stays
-            # ``reviewer_only``: the reviewer opened the gate on a quiet window,
-            # and without an observed fingerprint there is no evidence to apply
-            # against. A signal-gate proposal in the same state is
-            # ``unbacked_pattern``; the codes differ only because the reviewer
-            # path reached here without a mechanical signal, and the message
-            # says which case this is.
-            if reviewer_fallback:
-                message = (
-                    "Proposal was not applied: it came from reviewer fallback and "
-                    "its pattern fingerprint was not observed in this refinement "
-                    "evidence, so reviewer approval is advisory only."
-                )
-                if proposal.get("action") == "multi":
-                    message += f" Unbacked edit index: {index}."
-                return "reviewer_only", message
             message = (
                 "Proposal was not applied: its pattern fingerprint was not observed "
                 "in this refinement evidence."
