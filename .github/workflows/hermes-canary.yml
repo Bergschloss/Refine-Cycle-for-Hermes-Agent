@@ -1,0 +1,88 @@
+name: hermes-canary
+
+# Every night: does the route patch still apply to Hermes main, and does it still
+# work there? Seven patch revisions in a month, each found by a user whose plugin
+# had stopped. This finds the next one first, while there is still time to ship a
+# rebased revision before anyone updates.
+#
+# It uses the installer's own selection (newest bundled patch that applies), so a
+# pass here means a user's `/refine_fix` would pass too. A failure opens one issue,
+# and comments on it while it stays open, instead of a new issue every night.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: hermes-canary
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: refine
+
+      - uses: actions/checkout@v5
+        with:
+          repository: NousResearch/hermes-agent
+          ref: main
+          path: hermes
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Hermes commit
+        id: host
+        working-directory: hermes
+        run: echo "sha=$(git rev-parse --short=10 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Hermes
+        working-directory: hermes
+        run: |
+          python -m pip install -q -U pip
+          python -m pip install -q -e . pytest pytest-asyncio
+
+      - name: Host state before
+        id: before
+        run: |
+          python refine/install.py --status --json --hermes-src hermes | tee before.json
+          echo "state=$(python -c 'import json;print(json.load(open("before.json"))["state"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Apply the route patch the way a user's install would
+        run: python refine/install.py --patch-only --hermes-src hermes
+
+      - name: Host state after
+        run: |
+          python refine/install.py --status --json --hermes-src hermes | tee after.json
+          python -c 'import json,sys; s=json.load(open("after.json"))["state"]; print("state:", s); sys.exit(0 if s=="patched" else 1)'
+
+      - name: The patch's own tests, on this Hermes
+        working-directory: hermes
+        run: python -m pytest -q -p no:cacheprovider tests/agent/test_plugin_invocation_route.py
+
+      - name: Open or update the canary issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOST: ${{ steps.host.outputs.sha }}
+          STATE: ${{ steps.before.outputs.state }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Hermes canary: route patch fails on Hermes main"
+          body="Hermes main \`${HOST}\`: the route patch no longer applies or no longer passes its tests (host state before: \`${STATE:-unknown}\`). Run: ${RUN}"
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
