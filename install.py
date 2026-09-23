@@ -108,6 +108,14 @@ PATCH_MARKERS = {
     # the host's newer _session_home_scope (the patch only deletes it because
     # its base predates it; the patch's own additions are unchanged).
     "invocation-route-v2026.9.16.patch": _V021_MARKERS,
+    # Same nine files and markers again, rebased onto main at 2e1afdf0ec
+    # (0.21.4). Upstream now binds the session env around plugin slash
+    # commands, on the gateway and in the TUI, in the exact spots the patch
+    # binds the invocation route; both bindings are kept, the route nested
+    # inside, and a sync command still sees the route on the gateway pool
+    # because that pool copies the context. The patch's own gateway test now
+    # drives the pool hop on a real thread.
+    "invocation-route-v2026.9.23.patch": _V021_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 

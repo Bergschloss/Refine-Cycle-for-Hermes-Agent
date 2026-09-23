@@ -19,6 +19,7 @@ and an invocation-bound smoke test to reach the proposer.
 | 0.21.1 main after the release (`a0749d583a` and later) | yes, after confirming a `caution` scan | yes | yes | yes, with `invocation-route-v2026.9.10.patch` |
 | 0.21.3 (release tag `v2026.9.14`), and main from `1c671beab2` to before `4e9d3c713a` | yes | yes | yes | yes, with `invocation-route-v2026.9.14.patch` |
 | main from `4e9d3c713a` (checked through `4716ec0ba4`) | not checked | not checked | not checked | yes, with `invocation-route-v2026.9.16.patch` (contributed in #14) |
+| 0.21.4, main at `2e1afdf0ec` | yes | yes | yes | yes, with `invocation-route-v2026.9.23.patch` |
 
 Both 0.21.1 rows carry the same version string, which is why the installer picks
 by applicability instead: upstream inserted lines inside two of the 0.21.0
