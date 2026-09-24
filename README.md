@@ -77,7 +77,7 @@ In a pre-registered test on 133 probes, the agent handled the repeated mistake c
 
 ## Install
 
-Tested on Hermes 0.19 through 0.21.4.
+Tested on Hermes 0.19 through 0.21.4; the route patch also applies to 0.21.5 and its tests pass there.
 
 **1. Install the plugin.** Hermes may ask you to confirm its security scan.
 
