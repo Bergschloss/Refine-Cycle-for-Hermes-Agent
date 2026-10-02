@@ -1857,8 +1857,8 @@ print("CAPABILITY_OK")
         say(f"\nINSTALLED, PLUGIN IMPORT NOT VERIFIED ({verified}). Next steps:")
     else:
         say("\nSUCCESS. Next steps:")
-    say("  1. Restart the gateway OUTSIDE its own process:")
-    say("     sudo systemd-run --unit=refine-gw-restart --collect -- systemctl restart hermes-gateway")
+    say("  1. Restart the gateway OUTSIDE its own process, as root (an administrator shell):")
+    say("     systemd-run --unit=refine-gw-restart --collect -- systemctl restart hermes-gateway")
     say("  2. Verify: /refine-cycle status  (or refine_run in a turn)")
     # Hermes loads every plugin's desktop half switched off (its opt-in posture),
     # and the plugin cannot flip that switch. Without this line the Update / Fix

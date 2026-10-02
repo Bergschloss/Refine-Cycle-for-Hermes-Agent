@@ -1073,7 +1073,7 @@ def format_audit(rows: List[Dict[str, Any]]) -> str:
             name = str(row.get("name", ""))
             display_name = name if kind == "skill" else f"{kind}:{name}"
             lines.append(
-                f"  {display_name} — /refine rollback {row['journal_id']}"
+                f"  {display_name} — {_config.command_display_name()} rollback {row['journal_id']}"
             )
         lines.extend(["", "Nothing was deleted. Run the command yourself if you agree."])
     lines.extend([

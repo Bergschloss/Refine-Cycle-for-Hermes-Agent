@@ -2924,10 +2924,12 @@ def refine_status() -> Dict[str, Any]:
             # '/refine model auto'. Claiming otherwise would describe a state
             # this report did not verify.
             "message": (
-                "A '/refine model' override is in force; the effective target is "
+                f"A '{config.command_display_name()} model' override is in force; "
+                "the effective target is "
                 f"{target['model'] or '(host default)'}"
                 + (f" on provider {target['provider']}" if target["provider"] else "")
-                + ". '/refine model auto' removes the override; any value also set "
+                + f". '{config.command_display_name()} model auto' removes the "
+                  "override; any value also set "
                   "in plugins.entries.refine.llm stays in effect after that"
             ),
         })
@@ -4775,6 +4777,44 @@ def _same_model_id(configured: str, reported: str) -> bool:
     return bool(left) and left in (right, _MODEL_SNAPSHOT_SUFFIX.sub("", right))
 
 
+def _session_and_main_models(extra: Any = ()) -> List[str]:
+    """Ids of the models a host fallback lands on: the session's and the main one.
+
+    ``call_llm`` moves a failing explicit-provider call onto the main agent
+    model (agent/auxiliary_client.py ``_try_main_agent_model_fallback``). The
+    session's own route is passed in by the caller when it has one; the main
+    model is read the way the host reads it: the live main model, then
+    ``model.default`` in config.yaml.
+    """
+    ids = [str(item or "").strip() for item in (extra or ()) if str(item or "").strip()]
+    try:
+        live = config.live_main_target().get("model", "")
+    except Exception:
+        live = ""
+    if live:
+        ids.append(str(live))
+    raw = config._load_raw_config() or {}
+    section = raw.get("model") if isinstance(raw, dict) else None
+    default = section.get("default") if isinstance(section, dict) else section
+    if isinstance(default, str) and default.strip():
+        ids.append(default.strip())
+    return ids
+
+
+def _answered_by_fallback(configured: str, reported: str, fallback_ids: List[str]) -> bool:
+    """Whether an answer came from the session or main model instead of the pin.
+
+    A local single-model server (llama.cpp, a Strata endpoint) answers under its
+    own name whatever the request called it, so an answer that differs from the
+    pin is not by itself a substitution. It is one when the model that answered
+    is the one the host falls back to and not the pin. An unreported model
+    cannot be judged either way and is accepted, with the pin recorded.
+    """
+    if not reported or _same_model_id(configured, reported):
+        return False
+    return any(_same_model_id(candidate, reported) for candidate in fallback_ids)
+
+
 def _bound_route_identity(llm: Any) -> Dict[str, str]:
     """The provider/model of the invocation this call is locked to.
 
@@ -5598,6 +5638,7 @@ def _refine_once(
     session_ending: bool = False,
     active_chat=None,
     configured_model: bool = False,
+    session_model: str = "",
 ) -> Dict[str, Any]:
     trigger = "auto" if auto else "manual"
     started = time.time()
@@ -6548,15 +6589,17 @@ def _refine_once(
         _pin_provider = str(_run_target.get("provider", "") or "")
         _got_model = str(_run_llm_meta.get("reported_model", "") or "")
         _got_provider = str(_run_llm_meta.get("reported_provider", "") or "")
-        if not _same_model_id(_pin_model, _got_model) or (
-            _pin_provider and _got_provider.casefold() != _pin_provider.casefold()
+        if _answered_by_fallback(
+            _pin_model, _got_model, _session_and_main_models([session_model])
+        ) or (
+            _pin_provider and _got_provider
+            and _got_provider.casefold() != _pin_provider.casefold()
         ):
             _pinned_name = "/".join(p for p in (_pin_provider, _pin_model) if p)
             _got_name = "/".join(p for p in (_got_provider, _got_model) if p) or "an unreported model"
             _sub_message = (
-                f"The answer came from {_got_name}, not the configured {_pinned_name}; "
-                "it was not applied. If the provider reports this model under "
-                "another id, set llm.model to that id."
+                f"The answer came from {_got_name}, the session's or main model, not "
+                f"the configured {_pinned_name}; it was not applied."
             )
             _run_llm_meta["result_code"] = "configured_model_substituted"
             _run_llm_meta["would_apply"] = False
@@ -8012,7 +8055,9 @@ def _recoveries_for(applied: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "reversible": bool(item.get("reversible")),
         }
         if item.get("reversible"):
-            recovery["rollback_command"] = f"/refine rollback {journal_id}"
+            recovery["rollback_command"] = (
+                f"{config.command_display_name()} rollback {journal_id}"
+            )
         recoveries.append(recovery)
     return recoveries
 
@@ -8028,6 +8073,7 @@ def refine_run(
     session_ending: bool = False,
     active_chat=None,
     configured_model: bool = False,
+    session_model: str = "",
 ) -> Dict[str, Any]:
     """Serialize a run, reconcile approvals, and preserve every recovery id.
 
@@ -8061,7 +8107,7 @@ def refine_run(
             llm, reason=reason, session_id=session_id,
             auto=auto, dry_run=True, explicit_session=explicit_session,
             session_ending=session_ending, active_chat=active_chat,
-            configured_model=configured_model,
+            configured_model=configured_model, session_model=session_model,
         )
 
     runs: List[Dict[str, Any]] = []
@@ -8078,6 +8124,7 @@ def refine_run(
             llm, reason=run_reason, session_id=session_id, auto=auto,
             explicit_session=explicit_session, session_ending=session_ending,
             active_chat=active_chat, configured_model=configured_model,
+            session_model=session_model,
         )
         runs.append(result)
         if not result.get("success") or not int(result.get("edits_applied", 0) or 0):

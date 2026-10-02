@@ -93,16 +93,20 @@ off if the session model was chosen so the evidence stays local.
   `last auto run on it`. It is never retried on the session model, and nothing
   about the failures is marked handled, so the next pass sees them again.
 - Hermes may move a failing explicit-provider call onto the main agent model.
-  The response then names another model, and the pass is refused as
-  `configured_model_substituted` without applying anything. The comparison
-  ignores what providers add to an id: casing, a vendor prefix
-  (`deepseek/deepseek-chat` answered as `deepseek-chat`), an OpenRouter routing
-  variant (`:free`, `:nitro`, `:floor`, `:beta`, `:extended`, `:online`) and a
-  snapshot date on the answer (`gpt-4o` answered as `gpt-4o-2024-08-06`; a
-  dated `llm.model` must come back with that same date). Any other
-  difference (`gpt-4o-mini`, `qwen3:14b` for `qwen3:8b`) counts as another
-  model; if your provider still reports yours differently, set `llm.model` to
-  the id it reports.
+  The response then names that model, and the pass is refused as
+  `configured_model_substituted` without applying anything. Only that case is
+  a substitution: an answer naming the session's model (the route the turn was
+  on) or the main model (`model.default`, or the live main model), when that is
+  not the configured one. Any other answering name is accepted and recorded as
+  the model that wrote the lesson, because a local single-model server
+  (llama.cpp and the like) answers under the model it loaded whatever the
+  request called it. Two ids count as the same model when they differ only in
+  casing, a vendor prefix (`deepseek/deepseek-chat` answered as
+  `deepseek-chat`), an OpenRouter routing variant (`:free`, `:nitro`,
+  `:floor`, `:beta`, `:extended`, `:online`) or a snapshot date on the answer
+  (`gpt-4o` answered as `gpt-4o-2024-08-06`; a dated `llm.model` must come
+  back with that same date); `gpt-4o-mini` and `qwen3:14b` for `qwen3:8b` are
+  other models.
 - `/refine status` shows `auto runs model` and the last automatic result on it;
   `/refine audit` lists each lesson with the model that wrote it.
 

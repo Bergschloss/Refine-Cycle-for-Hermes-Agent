@@ -100,8 +100,16 @@ Hermes lets a plugin name a model only when `plugins.entries.refine.llm` has
 model on another provider). Refine cannot set those itself; a pick without
 them makes no call and prints the lines to add. An alias with its own
 `base_url` is listed but cannot be picked: a plugin call names a provider and
-a model, not an endpoint. `model <name>` or `model <provider>/<name>` still
-work and go through the same test call. The pick is stored in
+a model, not an endpoint. `model <name>` or `model <provider>/<name>` go
+through the same test call; an id your config does not name is kept only when
+the answer comes back under that same id, and a bare number is always a
+position in the list, never a model id. Where Hermes has its own `/refine`, all
+of this is `/refine-cycle model`, and the plugin's replies name the command it
+registered. The answering model may report another name (a local llama.cpp
+server answers under the model it loaded, whatever it was asked for); that is
+accepted and recorded as the model that wrote the lesson. Only an answer from
+the session's or the main model is treated as Hermes falling back, and then
+nothing is switched or applied. The pick is stored in
 `model_override.json` inside `journal_dir` — refine does not put its own
 settings in the Hermes config. It writes there exactly once, for one key that
 is not its own: see below.

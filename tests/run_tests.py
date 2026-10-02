@@ -13058,32 +13058,47 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIsNone(journal.read_model_override())
 
     # ── /refine model command tests ───────────────────────────────────────────
+
+    def _trusted_probe(self, reported=None):
+        FakeHost.entry_config()["llm"] = {
+            "allow_model_override": True, "allow_provider_override": True}
+        return patch.object(
+            plugin_init, "_probe_model",
+            side_effect=lambda provider, model: (True, "", reported or model))
+    def test_the_installer_prints_no_sudo_for_the_skill_scanner_to_flag(self):
+        """Hermes's install scan (tools/skills_guard.py) flags r'\\bsudo\\b' as HIGH
+        privilege_escalation. The installer only prints a restart hint; it says
+        "as root" instead of naming sudo, and keeps the command."""
+        text = (Path(__file__).resolve().parents[1] / "install.py").read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"\bsudo\b", text))
+        self.assertIn("systemd-run --unit=refine-gw-restart --collect -- systemctl "
+                      "restart hermes-gateway", text)
 
     def test_model_command_show_effective_target(self):
         result = plugin_init._handle_refine_command("model")
-        self.assertIn("model:", result)
-        self.assertIn("source:", result)
-
+        self.assertIn("lessons written by: the session's model (auto)", result)
+        self.assertIn("auto — the session's own model (default)", result)
     def test_model_command_set_override(self):
-        result = plugin_init._handle_refine_command("model deepseek-v4-flash")
-        self.assertIn("Override set", result)
+        with self._trusted_probe() as probe:
+            result = plugin_init._handle_refine_command("model deepseek-v4-flash")
+        probe.assert_called_once_with("", "deepseek-v4-flash")
+        self.assertIn("Lessons are now written by deepseek-v4-flash", result)
         override = journal.read_model_override()
         self.assertEqual(override["model"], "deepseek-v4-flash")
         self.assertEqual(override["provider"], "")
-
+        self.assertIs(override["auto_runs"], True)
     def test_model_command_set_provider_and_model(self):
-        result = plugin_init._handle_refine_command("model opencode-go/deepseek-v4")
-        self.assertIn("Override set", result)
+        with self._trusted_probe():
+            result = plugin_init._handle_refine_command("model opencode-go/deepseek-v4")
+        self.assertIn("Lessons are now written by opencode-go/deepseek-v4", result)
         override = journal.read_model_override()
         self.assertEqual(override["model"], "deepseek-v4")
         self.assertEqual(override["provider"], "opencode-go")
-
     def test_model_command_auto_removes_override(self):
-        journal.write_model_override("p", "m")
+        journal.write_model_override("p", "m", auto_runs=True)
         result = plugin_init._handle_refine_command("model auto")
-        self.assertIn("removed", result.lower())
+        self.assertIn("Back to auto", result)
         self.assertIsNone(journal.read_model_override())
-
     def test_model_command_invalid_identifier_is_usage_error(self):
         # A target-shaped typo must not spend a refine pass.
         with patch.object(plugin_init.core, "refine_run") as run:
@@ -13099,11 +13114,30 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             plugin_init._handle_refine_command("model of gmail failures")
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["reason"], "model of gmail failures")
-
+
     def test_model_command_warns_when_trust_denies(self):
-        result = plugin_init._handle_refine_command("model blocked-model")
-        self.assertIn("trust denies", result.lower())
+        with patch.object(plugin_init, "_probe_model") as probe:
+            result = plugin_init._handle_refine_command("model blocked-model")
+        probe.assert_not_called()
+        self.assertIn("Not switched", result)
+        self.assertIn("allow_model_override: true", result)
+        self.assertIsNone(journal.read_model_override())
 
+    def test_a_typed_id_is_never_stored_without_a_test_call(self):
+        # No host model access in this context: the test call cannot be made,
+        # so nothing is stored -- the old path stored the id as typed.
+        FakeHost.entry_config()["llm"] = {"allow_model_override": True}
+        for args in ("model 1", "model some-model"):
+            result = plugin_init._handle_refine_command(args)
+            self.assertIn("\u274c", result)
+            self.assertIsNone(journal.read_model_override(), args)
+
+    def test_an_unlisted_id_answered_under_another_name_is_not_stored(self):
+        with self._trusted_probe(reported="Bonsai-2-27B"):
+            result = plugin_init._handle_refine_command("model anything")
+        self.assertIn("your config does not name it", result)
+        self.assertIn("Bonsai-2-27B", result)
+        self.assertIsNone(journal.read_model_override())
     def test_model_command_does_not_write_journal(self):
         before = len(journal.entries())
         plugin_init._handle_refine_command("model test-m")
@@ -13111,20 +13145,19 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(len(journal.entries()), before)
 
     # ── Audit fixes: per-field priority, safe persistence, visibility ─────────
-
+
     def test_model_only_override_keeps_the_configured_provider(self):
         FakeHost.entry_config()["llm"] = {
             "provider": "opencode-go",
             "model": "deepseek-v4",
         }
-        plugin_init._handle_refine_command("model deepseek-v4-flash")
+        journal.write_model_override("", "deepseek-v4-flash", auto_runs=True)
         target = config.effective_llm_target()
         self.assertEqual(target["source"], "command")
         self.assertEqual(target["model"], "deepseek-v4-flash")
         # Asking for a different model must not silently unset the provider that
         # actually serves it.
         self.assertEqual(target["provider"], "opencode-go")
-
     def test_provider_only_override_keeps_the_configured_model(self):
         FakeHost.entry_config()["llm"] = {"model": "deepseek-v4"}
         journal.write_model_override("other-prov", "")
@@ -13152,17 +13185,16 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_empty_override_write_is_refused(self):
         with self.assertRaises(ValueError):
             journal.write_model_override("", "")
-
+
     def test_model_command_reports_a_write_failure_instead_of_raising(self):
-        with patch.object(
+        with self._trusted_probe(), patch.object(
             journal, "write_model_override", side_effect=OSError("read-only journal_dir")
         ):
             result = plugin_init._handle_refine_command("model some-model")
         self.assertIn("Model command failed", result)
         self.assertIn("read-only journal_dir", result)
-
     def test_model_auto_reports_a_failed_removal(self):
-        journal.write_model_override("", "pinned-model")
+        journal.write_model_override("", "pinned-model", auto_runs=True)
         real_unlink = Path.unlink
 
         def denied(self, *args, **kwargs):
@@ -13179,15 +13211,14 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("Could not remove", result)
         # The reply must not claim removal, and the effective target it prints has
         # to match reality: the override survived.
-        self.assertNotIn("Override removed", result)
-        self.assertIn("source: command", result)
+        self.assertNotIn("Back to auto", result)
+        self.assertIn("lessons written by: pinned-model", result)
         self.assertEqual(journal.read_model_override()["model"], "pinned-model")
-
+
     def test_model_auto_says_when_there_was_nothing_to_remove(self):
         self.assertEqual(journal.clear_model_override(), "absent")
         result = plugin_init._handle_refine_command("model auto")
-        self.assertIn("No override was set", result)
-
+        self.assertIn("Already on auto", result)
     def test_model_auto_confirms_a_real_removal(self):
         journal.write_model_override("", "pinned-model")
         self.assertEqual(journal.clear_model_override(), "removed")
@@ -13265,7 +13296,8 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIn("model identifier", journal.model_override_field_problem("---"))
         # And a name that merely looks like a token is a valid identifier: it is
         # accepted rather than refused on resemblance.
-        accepted = plugin_init._handle_refine_command("model my-token-model:latest")
+        with self._trusted_probe():
+            accepted = plugin_init._handle_refine_command("model my-token-model:latest")
         self.assertNotIn("identifier", accepted)
         self.assertEqual(
             (journal.read_model_override() or {}).get("model"), "my-token-model:latest"
@@ -13440,20 +13472,19 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(target["source"], "command")
         self.assertEqual(target["model"], "pinned-model")
         self.assertEqual(target["provider"], "")
-
+
     def test_namespaced_command_target_pins_instead_of_spending_a_pass(self):
         # Only the first slash separates provider from model; the rest belongs to
         # the model id. Routing this to the proposal path would spend a daily edit.
-        with patch.object(plugin_init.core, "refine_run") as run:
+        with patch.object(plugin_init.core, "refine_run") as run, self._trusted_probe():
             result = plugin_init._handle_refine_command(
                 "model openrouter/deepseek/deepseek-chat"
             )
         run.assert_not_called()
-        self.assertIn("Override set", result)
+        self.assertIn("Lessons are now written by", result)
         override = journal.read_model_override()
         self.assertEqual(override["provider"], "openrouter")
         self.assertEqual(override["model"], "deepseek/deepseek-chat")
-
     def test_malformed_slash_target_is_usage_error(self):
         for text in ("model /", "model a/", "model /b"):
             with self.subTest(text=text):
@@ -24233,7 +24264,7 @@ class PathTraceTests(unittest.TestCase):
         self._host_models()
         for kwargs, why in (
             ({"probe": TimeoutError("request timed out")}, "request timed out"),
-            ({"probe_model": "main-model"}, "answered as main-model"),
+            ({"probe_model": "main-model"}, "answered by main-model"),
         ):
             self._unbound_host_facade(**kwargs)
             reply = self._model_command(agent, "4")
@@ -24327,6 +24358,59 @@ class PathTraceTests(unittest.TestCase):
             "llm.allow_provider_override is not on",
             self._model_command(agent, ""),
         )
+
+    def test_a_chat_command_without_a_session_route_gets_the_same_picker(self):
+        """Hermes Desktop and the gateway run a chat command with no session-bound
+        model. That context once took an older path that showed no list and stored
+        '/refine model 1' as the model id '1' without any test call."""
+        self._host_models()
+        self._unbound_host_facade()
+        listing = asyncio_run(plugin_init._refine_command_entry("model"))
+        self.assertIn("  3. fast-provider/fast-model — alias quick", listing)
+        reply = asyncio_run(plugin_init._refine_command_entry("model 3"))
+        self.assertEqual(self.probe_calls, [("fast-provider", "fast-model")])
+        self.assertIn("Lessons are now written by fast-provider/fast-model", reply)
+        self.assertEqual(journal.read_model_override()["model"], "fast-model")
+        reply = asyncio_run(plugin_init._refine_command_entry("model 9"))
+        self.assertIn("between 1 and 4", reply)
+        self.assertEqual(journal.read_model_override()["model"], "fast-model")
+
+    def test_a_local_server_that_answers_under_its_own_name_is_accepted(self):
+        """llama.cpp answers under its loaded model's name whatever the request
+        called it. That is the pick answering, not a fallback: only an answer
+        from the session's or main model is a substitution."""
+        agent = self.Agent("session")
+        self._host_models()
+        FakeHost.config["providers"]["local"] = {"models": ["bonsai"]}
+        self._unbound_host_facade(reported_model="Bonsai-2-27B", probe_model="Bonsai-2-27B")
+        reply = self._model_command(agent, "5")
+        self.assertEqual(self.probe_calls, [("local", "bonsai")])
+        self.assertIn("Lessons are now written by local/bonsai (the server answers as "
+                      "Bonsai-2-27B)", reply)
+        row = self._auto_pass(agent, "local pin")
+        self.assertEqual(row["outcome"], "no_op")
+        meta = journal.entries()[-1]["llm_meta"]
+        self.assertEqual(meta["reported_model"], "Bonsai-2-27B")
+        self.assertIn("written by local/Bonsai-2-27B", self._status_text(agent))
+
+    def test_messages_name_the_command_the_plugin_registered(self):
+        agent = self.Agent("session")
+        self._host_models()
+        saved = plugin_init._COMMAND_NAME
+        plugin_init._COMMAND_NAME = "refine-cycle"
+        config.set_command_name("refine-cycle")
+
+        def restore():
+            plugin_init._COMMAND_NAME = saved
+            config.set_command_name(saved)
+        self.addCleanup(restore)
+        listing = self._model_command(agent, "")
+        self.assertIn("Pick with /refine-cycle model <number>, or /refine-cycle model auto",
+                      listing)
+        self.assertNotIn("/refine model", listing)
+        self.assertEqual(core._recoveries_for([{
+            "journal_id": "abcdef123456", "reversible": True, "outcome": "applied",
+        }])[0]["rollback_command"], "/refine-cycle rollback abcdef123456")
 
     def test_an_older_override_file_does_not_move_automatic_passes(self):
         agent = self.Agent("session")

@@ -13,6 +13,20 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 _RUNTIME_JOURNAL_DIR: Optional[Path] = None
 _RUNTIME_JOURNAL_COMMIT_MARKER: Optional[Path] = None
+# The slash command the plugin actually registered: "refine", or "refine-cycle"
+# on a Hermes that ships its own /refine. Set once at registration; every
+# message that names the command reads it here, so none can name the wrong one.
+_COMMAND_NAME = "refine"
+
+
+def set_command_name(name: str) -> None:
+    global _COMMAND_NAME
+    _COMMAND_NAME = name
+
+
+def command_display_name() -> str:
+    """The registered slash command, e.g. '/refine' or '/refine-cycle'."""
+    return "/" + _COMMAND_NAME
 
 
 def hermes_home() -> Path:
