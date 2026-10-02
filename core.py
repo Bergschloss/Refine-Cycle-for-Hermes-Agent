@@ -4812,6 +4812,10 @@ def _answered_by_fallback(configured: str, reported: str, fallback_ids: List[str
     """
     if not reported or _same_model_id(configured, reported):
         return False
+    if not fallback_ids:
+        # Nothing known to fall back to means nothing to tell a fallback from:
+        # an answer under another name cannot be confirmed as the pin.
+        return True
     return any(_same_model_id(candidate, reported) for candidate in fallback_ids)
 
 
@@ -6598,8 +6602,9 @@ def _refine_once(
             _pinned_name = "/".join(p for p in (_pin_provider, _pin_model) if p)
             _got_name = "/".join(p for p in (_got_provider, _got_model) if p) or "an unreported model"
             _sub_message = (
-                f"The answer came from {_got_name}, the session's or main model, not "
-                f"the configured {_pinned_name}; it was not applied."
+                f"The answer came from {_got_name}, not the configured "
+                f"{_pinned_name}, and it is the session's or main model (or no such "
+                "model is known to tell it from); it was not applied."
             )
             _run_llm_meta["result_code"] = "configured_model_substituted"
             _run_llm_meta["would_apply"] = False

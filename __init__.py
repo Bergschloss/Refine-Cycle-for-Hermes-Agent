@@ -1171,9 +1171,14 @@ def _probe_model(provider: str, model: str) -> Tuple[bool, str, str]:
     if kind == "bound":
         return False, "the host only offers the session's own route here", ""
     reported = str(getattr(result, "model", "") or "")
-    if core._answered_by_fallback(
-        model, reported, core._session_and_main_models([session_model])
-    ):
+    fallback_ids = core._session_and_main_models([session_model])
+    if core._answered_by_fallback(model, reported, fallback_ids):
+        if not fallback_ids:
+            return False, (
+                f"the test call was answered by {reported}, and Hermes names no "
+                "session or main model, so refine cannot tell that answer from a "
+                "fallback"
+            ), reported
         return False, (
             f"the test call was answered by {reported}, the session's or main "
             "model, so the host fell back"

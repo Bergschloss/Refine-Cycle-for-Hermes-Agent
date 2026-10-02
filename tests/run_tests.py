@@ -24393,6 +24393,22 @@ class PathTraceTests(unittest.TestCase):
         self.assertEqual(meta["reported_model"], "Bonsai-2-27B")
         self.assertIn("written by local/Bonsai-2-27B", self._status_text(agent))
 
+    def test_with_no_session_or_main_model_known_another_name_is_not_confirmed(self):
+        """A desktop config may name models only under providers. With no session
+        route and no main model to compare with, an answer under another name
+        could be a fallback, so the pick is not confirmed; one under the pick's
+        own name is."""
+        FakeHost.config["providers"] = {"local": {"models": ["bonsai"]}}
+        FakeHost.entry_config()["llm"] = {
+            "allow_model_override": True, "allow_provider_override": True}
+        self._unbound_host_facade(probe_model="Bonsai-2-27B")
+        reply = asyncio_run(plugin_init._refine_command_entry("model 1"))
+        self.assertIn("names no session or main model", reply)
+        self.assertFalse(journal.model_override_read_path().exists())
+        self._unbound_host_facade()
+        reply = asyncio_run(plugin_init._refine_command_entry("model 1"))
+        self.assertIn("Lessons are now written by local/bonsai", reply)
+
     def test_messages_name_the_command_the_plugin_registered(self):
         agent = self.Agent("session")
         self._host_models()
