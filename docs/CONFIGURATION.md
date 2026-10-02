@@ -84,9 +84,14 @@ off if the session model was chosen so the evidence stays local.
   about the failures is marked handled, so the next pass sees them again.
 - Hermes may move a failing explicit-provider call onto the main agent model.
   The response then names another model, and the pass is refused as
-  `configured_model_substituted` without applying anything. The comparison is
-  exact: if your provider reports the model under a different id, set
-  `llm.model` to the id it reports.
+  `configured_model_substituted` without applying anything. The comparison
+  ignores what providers add to an id: casing, a vendor prefix
+  (`deepseek/deepseek-chat` answered as `deepseek-chat`), an OpenRouter routing
+  variant (`:free`, `:nitro`, `:floor`, `:beta`, `:extended`, `:online`) and a
+  snapshot date (`gpt-4o` answered as `gpt-4o-2024-08-06`). Any other
+  difference (`gpt-4o-mini`, `qwen3:14b` for `qwen3:8b`) counts as another
+  model; if your provider still reports yours differently, set `llm.model` to
+  the id it reports.
 - `/refine status` shows `auto runs model` and the last automatic result on it;
   `/refine audit` lists each lesson with the model that wrote it.
 

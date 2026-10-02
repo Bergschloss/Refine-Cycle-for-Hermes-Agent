@@ -4727,6 +4727,33 @@ def _model_substituted(
     return False
 
 
+_OPENROUTER_ROUTING_VARIANTS = frozenset({"free", "nitro", "floor", "beta", "extended", "online"})
+_MODEL_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8}|latest)$")
+
+
+def _same_model_id(configured: str, reported: str) -> bool:
+    """Whether a provider's answer names the model the user configured.
+
+    Providers answer under a more specific id than the one requested: a dated
+    snapshot (``gpt-4o`` -> ``gpt-4o-2024-08-06``), no vendor prefix
+    (``deepseek/deepseek-chat`` -> ``deepseek-chat``), no OpenRouter routing
+    variant (``...:free``), or other casing. Exact equality rejected every run
+    on such a provider. Only those differences are forgiven: a different model
+    name (``gpt-4o-mini``, ``qwen3.5``, the session model the host fell back
+    to) still differs. A ``:tag`` that is not a routing variant is part of the
+    name (Ollama's ``qwen3:8b`` and ``qwen3:14b`` are two models).
+    """
+    def canonical(value: str) -> str:
+        name = str(value or "").strip().casefold().rpartition("/")[2]
+        base, sep, variant = name.rpartition(":")
+        if sep and variant in _OPENROUTER_ROUTING_VARIANTS:
+            name = base
+        return _MODEL_SNAPSHOT_SUFFIX.sub("", name)
+
+    left, right = canonical(configured), canonical(reported)
+    return bool(left) and left == right
+
+
 def _bound_route_identity(llm: Any) -> Dict[str, str]:
     """The provider/model of the invocation this call is locked to.
 
@@ -6465,7 +6492,9 @@ def _refine_once(
         _pin_provider = str(_run_target.get("provider", "") or "")
         _got_model = str(_run_llm_meta.get("reported_model", "") or "")
         _got_provider = str(_run_llm_meta.get("reported_provider", "") or "")
-        if _got_model != _pin_model or (_pin_provider and _got_provider != _pin_provider):
+        if not _same_model_id(_pin_model, _got_model) or (
+            _pin_provider and _got_provider.casefold() != _pin_provider.casefold()
+        ):
             _pinned_name = "/".join(p for p in (_pin_provider, _pin_model) if p)
             _got_name = "/".join(p for p in (_got_provider, _got_model) if p) or "an unreported model"
             _sub_message = (

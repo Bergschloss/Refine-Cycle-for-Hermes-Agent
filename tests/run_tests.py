@@ -24001,6 +24001,57 @@ class PathTraceTests(unittest.TestCase):
         self.assertEqual(row["outcome"], "no_op")
         self.assertEqual(self.pinned_calls[0][:2], ("fast-provider", "fast-model"))
 
+    def test_the_configured_model_matches_the_ids_providers_answer_with(self):
+        same = [
+            ("poolside/laguna-s-2.1:free", "poolside/laguna-s-2.1"),
+            ("poolside/laguna-s-2.1:free", "poolside/laguna-s-2.1:free"),
+            ("gpt-4o", "gpt-4o-2024-08-06"),
+            ("claude-sonnet-4-5", "claude-sonnet-4-5-20250929"),
+            ("deepseek/deepseek-chat", "deepseek-chat"),
+            ("deepseek-chat", "deepseek/deepseek-chat"),
+            ("Qwen3.8-Flash-Next-UD-Q4_K_XL", "qwen3.8-flash-next-ud-q4_k_xl"),
+            ("gpt-4o-2024-08-06", "gpt-4o"),
+        ]
+        different = [
+            ("gpt-4o", "gpt-4o-mini"),
+            ("gpt-4o-mini", "gpt-4o"),
+            ("poolside/laguna-s-2.1:free", "deepseek/deepseek-v4.1-flash"),
+            ("qwen3", "qwen3.5"),
+            ("claude-sonnet-4-5", "claude-sonnet-4-5-thinking"),
+            ("fast-model", ""),
+            ("", "fast-model"),
+            ("qwen3:8b", "qwen3:14b"),
+        ]
+        for pin, got in same:
+            self.assertTrue(core._same_model_id(pin, got), (pin, got))
+        for pin, got in different:
+            self.assertFalse(core._same_model_id(pin, got), (pin, got))
+
+    def test_a_provider_specific_id_for_the_configured_model_is_accepted(self):
+        agent = self.Agent("session")
+        self._pin_auto_model(model="fast-model:free")
+        self._unbound_host_facade(reported_model="fast-model-2026-09-01")
+        row = self._auto_pass(agent, "dated id")
+        self.assertEqual(row["outcome"], "no_op")
+
+    def test_a_worker_that_inherits_the_turn_route_calls_no_model_and_says_why(self):
+        """On a Python where a new thread inherits the turn's contextvars
+        (sys.flags.thread_inherit_context), ctx.llm on the worker is the bound
+        facade, which cannot take llm.model. The pass must refuse, not run on
+        the session model, and status must say why."""
+        agent = self.Agent("session")
+        self._pin_auto_model()
+        bound = self._facade(bound=True)
+        with patch.object(plugin_init, "_registered_llm", return_value=bound):
+            row = self._auto_pass(agent, "inherited")
+        self.assertEqual((row["outcome"], row["structured_calls"], row["launch_parent"]),
+                         ("configured_model_unusable", 0, "-"))
+        status = self._status_text(agent)
+        # From the journal, so it survives the restart that clears auto events.
+        self.assertIn("last auto run on it: configured_model_unusable — Refine did not "
+                      "run: the host handed the automatic worker a facade locked to the "
+                      "session's route", status)
+
     def test_a_host_fallback_off_the_configured_model_is_refused(self):
         """Hermes's call_llm may move a failing explicit-provider call onto the
         main agent model. The response then names that model, and the pass must
