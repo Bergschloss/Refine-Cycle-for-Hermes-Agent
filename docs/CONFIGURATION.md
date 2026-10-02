@@ -54,6 +54,40 @@ llm:
   allow_provider_override: false
 ```
 
+Session-model gate (`plugins.entries.refine.llm.allowed_session_models`, off by default):
+
+```yaml
+llm:
+  allowed_session_models:
+    - openrouter/deepseek/deepseek-chat   # provider/model
+    - gpt-5-mini                          # model id alone, any provider
+```
+
+A pass bound to the session's route runs on the session's own model. When this
+list is set and that model is not on it, the pass stops before it reads any
+evidence: no model call, no proposer subagent, no daily model-run or edit budget
+spent. The skip is journaled as `session_model_not_allowed`, appears in
+`/refine status` (`allowed session models`, `session-model skips today`) and,
+for an automatic pass, under `recent auto events`. Nothing is proposed, so the
+failures it would have looked at stay eligible for the next pass on an allowed
+model. The skip does count as an automatic attempt for `auto_cooldown_minutes`.
+
+- An entry matches when it equals the route's model id or its `provider/model`.
+  Matching is exact. Model ids may contain `/` themselves, which is why both
+  spellings are accepted.
+- It applies to every invocation-bound pass: automatic, `/refine`, `refine_run`
+  and dry runs.
+- It never changes which model refine calls; it only decides whether to call
+  the session model at all. Pinning `llm.model` on bound runs needs a Hermes
+  change and is not supported.
+- Absent or `[]`: the gate is off and nothing changes. A malformed value keeps
+  the gate on: unusable entries are dropped and listed in `/refine status`, and
+  with no usable entry left no bound pass calls a model.
+
+Use it with a slow local session model. The automatic pass already runs on a
+background thread, but a server that generates for one request at a time can
+only serve refine's call and the conversation's next turn one after the other.
+
 ---
 
 ## Known integration gaps

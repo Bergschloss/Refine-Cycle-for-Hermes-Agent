@@ -1331,6 +1331,24 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 else ""
             ),
         ]
+        gate = status.get("session_model_gate")
+        if gate is not None:
+            lines.append(
+                "allowed session models: "
+                + (", ".join(gate["allowed"]) or "(none usable: no bound pass calls a model)")
+            )
+            lines.extend(f"  ⚠ {issue}" for issue in gate["issues"])
+            last_skip = gate.get("last_skip")
+            if last_skip:
+                skipped = "/".join(
+                    part for part in (last_skip["provider"], last_skip["model"]) if part
+                ) or "an unidentified model"
+                when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(last_skip["ts"]))
+                lines.append(
+                    f"session-model skips today: {gate['skips_today']} "
+                    f"(last: {last_skip['trigger'] or 'run'} pass on {skipped} at {when}, "
+                    "no model call; the failures stay eligible)"
+                )
         if status["cooldown_remaining_minutes"] > 0:
             lines.append(
                 f"cooldown remaining: {status['cooldown_remaining_minutes']} min"

@@ -502,6 +502,62 @@ def llm_allow_provider_override() -> bool:
     )
 
 
+def llm_allowed_session_models() -> Tuple[Optional[Tuple[str, ...]], List[str]]:
+    """The session models an invocation-bound pass may call, and config issues.
+
+    Returns ``(None, [])`` when ``llm.allowed_session_models`` is absent or an
+    empty list: the gate is off and every bound pass runs on the session model,
+    as it always has. Otherwise returns the usable entries, possibly none.
+
+    An entry is a model id (``unsloth/Qwen3-8B``) or ``provider/model``
+    (``openrouter/deepseek/deepseek-chat``). Model ids are themselves namespaced,
+    so the two spellings cannot be told apart by shape; the route matches an
+    entry when the entry equals its model or its ``provider/model``. Matching is
+    exact.
+
+    A malformed value never turns the gate off. The user asked to restrict which
+    models see the evidence; silently allowing every model on a typo would do
+    the opposite of what they set. The unusable part is dropped and reported,
+    and with nothing usable left no bound pass calls a model.
+    """
+    try:
+        from . import journal
+    except ImportError:
+        import journal  # type: ignore
+
+    value = _llm_entry().get("allowed_session_models")
+    if value is None or value == []:
+        return None, []
+    if not isinstance(value, list):
+        return (), ["llm.allowed_session_models must be a list of model ids"]
+    allowed: List[str] = []
+    issues: List[str] = []
+    for index, item in enumerate(value):
+        key = f"llm.allowed_session_models[{index}]"
+        text, issue = _coerce_string_config_value(item, key)
+        text = text.strip()
+        if issue or not text:
+            issues.append(issue or f"{key} is empty and was ignored")
+            continue
+        # Reported without the value, which may be a pasted credential.
+        problem = journal.model_override_field_problem(text, allow_namespace=True)
+        if problem:
+            issues.append(f"{key} was ignored because {problem}")
+            continue
+        if text not in allowed:
+            allowed.append(text)
+    return tuple(allowed), issues
+
+
+def session_model_allowed(
+    allowed: Tuple[str, ...], provider: str, model: str
+) -> bool:
+    """Whether a bound route is on the ``llm.allowed_session_models`` list."""
+    if not model:
+        return False
+    return model in allowed or bool(provider and f"{provider}/{model}" in allowed)
+
+
 def llm_target_trust_denials(target: Dict[str, Any]) -> Dict[str, str]:
     """Explain every explicit target field that the host trust policy drops.
 

@@ -9,6 +9,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -2680,6 +2681,36 @@ def refine_status() -> Dict[str, Any]:
         last_model_substituted = False
         logger.warning("Cannot read refine journal for status: %s", str(exc))
 
+    # Present only when llm.allowed_session_models is set, so a host that does
+    # not use it gets exactly the report it got before the setting existed.
+    session_model_gate: Optional[Dict[str, Any]] = None
+    gate_allowed, gate_issues = config.llm_allowed_session_models()
+    if gate_allowed is not None:
+        session_model_gate = {
+            "allowed": list(gate_allowed),
+            "issues": list(gate_issues),
+            "skips_today": 0,
+            "last_skip": None,
+        }
+        if journal_present and journal_readable:
+            today = datetime.now(timezone.utc).date()
+            for entry in journal.entries():
+                if entry.get("outcome") != "session_model_not_allowed":
+                    continue
+                meta = entry.get("llm_meta") if isinstance(entry.get("llm_meta"), dict) else {}
+                try:
+                    when = float(entry.get("ts"))
+                except (TypeError, ValueError):
+                    continue
+                if datetime.fromtimestamp(when, tz=timezone.utc).date() == today:
+                    session_model_gate["skips_today"] += 1
+                session_model_gate["last_skip"] = {
+                    "ts": when,
+                    "trigger": str(entry.get("trigger", "") or ""),
+                    "provider": str(meta.get("session_provider", "") or ""),
+                    "model": str(meta.get("session_model", "") or ""),
+                }
+
     blockers: List[Dict[str, str]] = []
     if not config_readable:
         blockers.append({
@@ -2924,7 +2955,7 @@ def refine_status() -> Dict[str, Any]:
     except Exception:
         route_present = None
 
-    return {
+    status = {
         "config_readable": config_readable,
         "auto_enabled": auto,
         "auto_turn_interval": interval,
@@ -2993,6 +3024,9 @@ def refine_status() -> Dict[str, Any]:
         "warnings": warnings,
         "warning_codes": [w["code"] for w in warnings],
     }
+    if session_model_gate is not None:
+        status["session_model_gate"] = session_model_gate
+    return status
 
 
 def refine_audit() -> Dict[str, Any]:
@@ -5582,6 +5616,54 @@ def _refine_once(
         if entry_id:
             response["journal_id"] = entry_id
         return response
+
+    # The session-model gate (llm.allowed_session_models), off unless set. A
+    # bound pass runs on the session's own model; when that model is not one the
+    # user allowed, the pass stops here: before the budget gates, before any
+    # evidence is read, before any model call. Nothing is proposed, so nothing
+    # about the failures is marked handled, and a later pass on an allowed
+    # route still sees them.
+    _allowed_models, _allowed_issues = config.llm_allowed_session_models()
+    if _allowed_models is not None and _llm._is_invocation_bound(llm):
+        _route = _bound_route_identity(llm)
+        if not config.session_model_allowed(
+            _allowed_models, _route["provider"], _route["model"]
+        ):
+            _named = (
+                "/".join(part for part in (_route["provider"], _route["model"]) if part)
+                or "an unidentified model"
+            )
+            skip_message = (
+                f"The session model {_named} is not in llm.allowed_session_models; "
+                "refine did not call it. The failures stay eligible for a pass "
+                "on an allowed model."
+            )
+            if not _allowed_models:
+                skip_message += " No entry in the list is usable: " + "; ".join(
+                    _allowed_issues or ["the list is empty"]
+                )
+            if auto:
+                note_auto_event("session_model_not_allowed", skip_message)
+            return _terminal_result(
+                outcome="session_model_not_allowed",
+                success=False,
+                message=skip_message,
+                trigger=trigger,
+                safe_reason=safe_reason,
+                session=resolved_session,
+                llm_meta={
+                    "target_source": "invocation_bound",
+                    "primary_attempts": 0,
+                    "session_provider": _route["provider"],
+                    "session_model": _route["model"],
+                },
+                evidence={
+                    "session_id": resolved_session,
+                    "session_id_source": resolved_source,
+                    "session_source": session_db_source,
+                    "source_lookup_status": source_lookup_status,
+                },
+            )
 
     if not dry_run and journal.daily_limit_reached():
         limit_message = (

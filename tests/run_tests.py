@@ -23767,6 +23767,120 @@ class PathTraceTests(unittest.TestCase):
             ("auto", "structured", "subagent_timeout"),
         )
 
+    # --- llm.allowed_session_models (issue #16) ------------------------------
+
+    def _allow_session_models(self, value):
+        FakeHost.entry_config()["llm"] = {"allowed_session_models": value}
+
+    def _status_text(self, agent):
+        with self.slash_command(agent):
+            return asyncio_run(plugin_init._refine_command_entry("status"))
+
+    def _auto_pass(self, agent, label):
+        def run():
+            plugin_init._mark_turn_attempt("session", 0)
+            with self.turn(agent):
+                plugin_init._on_post_llm_call("session", [{"role": "assistant"}])
+        return self._trace(label, run)
+
+    def test_without_the_setting_runs_and_reports_exactly_as_before(self):
+        agent = self.Agent("session")
+        absent_status = self._status_text(agent)
+        absent_dict = core.refine_status()
+        self._allow_session_models([])
+        empty_status = self._status_text(agent)
+        self.assertEqual(empty_status, absent_status)
+        self.assertNotIn("session model", absent_status)
+        self.assertNotIn("session_model_gate", absent_dict)
+        self.assertNotIn("session_model_gate", core.refine_status())
+        for value in (None, []):
+            if value is None:
+                FakeHost.entry_config().pop("llm", None)
+            else:
+                self._allow_session_models(value)
+            row = self._auto_pass(agent, f"gate {value!r}")
+            self.assertEqual(
+                (row["outcome"], row["proposer"], row["launch_parent"]),
+                ("no_op", "subagent", "session"),
+            )
+
+    def test_a_session_model_off_the_list_is_skipped_before_any_model_call(self):
+        agent = self.Agent("session")
+        self._allow_session_models(["other-provider/other-model", "fast-model"])
+        runs_before = journal.count_today_model_runs()
+        with patch.object(core, "collect_evidence",
+                          side_effect=AssertionError("evidence read for a skipped pass")):
+            row = self._auto_pass(agent, "skipped")
+        self.assertEqual(row, {
+            "path": "skipped", "trigger": "auto",
+            "outcome": "session_model_not_allowed", "proposer": None,
+            "fallback": None, "launch_parent": "-", "structured_calls": 0,
+        })
+        self.assertEqual(journal.count_today_model_runs(), runs_before)
+        self.assertEqual(journal.count_today_applied(), 0)
+        entry = journal.entries()[-1]
+        self.assertEqual(
+            (entry["llm_meta"]["session_provider"], entry["llm_meta"]["session_model"],
+             entry["llm_meta"]["primary_attempts"]),
+            ("turn-provider", "turn-model", 0),
+        )
+        self.assertIn("llm.allowed_session_models", entry["reason"])
+        self.assertEqual(core.last_auto_event()["code"], "session_model_not_allowed")
+
+        status = self._status_text(agent)
+        self.assertIn(
+            "allowed session models: other-provider/other-model, fast-model", status)
+        self.assertIn("session-model skips today: 1 (last: auto pass on "
+                      "turn-provider/turn-model", status)
+        self.assertIn("session_model_not_allowed — The session model "
+                      "turn-provider/turn-model is not in", status)
+
+        # The same failures, a later pass on an allowed route: it runs normally.
+        for allowed in (["turn-provider/turn-model"], ["turn-model"]):
+            self._allow_session_models(allowed)
+            row = self._auto_pass(agent, f"allowed {allowed}")
+            self.assertEqual(
+                (row["outcome"], row["proposer"], row["launch_parent"]),
+                ("no_op", "subagent", "session"),
+            )
+
+    def test_the_gate_covers_manual_and_dry_runs_too(self):
+        agent = self.Agent("session")
+        self._allow_session_models(["fast-model"])
+
+        def tool_call():
+            with self.turn(agent):
+                result = plugin_init._handle_refine_run({"dry_run": True})
+            self.assertIn("not in llm.allowed_session_models", result)
+        row = self._trace("tool dry run", tool_call)
+        self.assertEqual(
+            (row["trigger"], row["outcome"], row["launch_parent"], row["structured_calls"]),
+            ("manual", "session_model_not_allowed", "-", 0),
+        )
+
+        def slash():
+            with self.slash_command(agent):
+                reply = asyncio_run(plugin_init._refine_command_entry("the tests keep failing"))
+            self.assertIn("not in llm.allowed_session_models", reply)
+        row = self._trace("slash reason", slash)
+        self.assertEqual((row["outcome"], row["structured_calls"]),
+                         ("session_model_not_allowed", 0))
+
+    def test_a_malformed_list_keeps_the_gate_closed_and_says_why(self):
+        agent = self.Agent("session")
+        for value, issue in (
+            ("turn-model", "llm.allowed_session_models must be a list of model ids"),
+            (["not a model!"], "llm.allowed_session_models[0] was ignored because"),
+        ):
+            self._allow_session_models(value)
+            row = self._auto_pass(agent, repr(value))
+            self.assertEqual((row["outcome"], row["structured_calls"], row["launch_parent"]),
+                             ("session_model_not_allowed", 0, "-"))
+            self.assertIn(issue, journal.entries()[-1]["reason"])
+            status = self._status_text(agent)
+            self.assertIn("allowed session models: (none usable", status)
+            self.assertIn(f"  ⚠ {issue}", status)
+
     def test_a_worker_whose_agent_is_gone_falls_back_instead_of_launching(self):
         """The capture is weak. An agent released before the worker runs leaves
         no parent to bind, and the pass takes the structured call honestly."""
