@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -219,6 +220,40 @@ def plugin_working() -> bool:
     try:
         from hermes_cli import plugins as host_plugins
         return hasattr(host_plugins, "plugin_invocation_scope")
+    except Exception:
+        return False
+
+
+def _code_stamp() -> float:
+    """The newest modification time among this plugin's Python files on disk."""
+    try:
+        return max((path.stat().st_mtime for path in update_check._plugin_dir().glob("*.py")), default=0.0)
+    except Exception:
+        return 0.0
+
+
+# The plugin code this process runs, as it was on disk when it was imported.
+_LOADED_STAMP = _code_stamp()
+
+
+def code_stale() -> bool:
+    """The plugin on disk is newer than the code this process loaded.
+
+    A plugin updated outside this process (another backend, `hermes plugins`, git)
+    only runs after a restart; until then the Hermes desktop app's own backend keeps
+    answering with the old code, whatever the gateway does.
+    """
+    return bool(_LOADED_STAMP) and _code_stamp() > _LOADED_STAMP
+
+
+def _host_patched_on_disk() -> bool:
+    """The Hermes checkout on disk carries the route patch (this process may not have loaded it)."""
+    try:
+        host = update_check._host_checkout()
+        installer = update_check._plugin_dir() / "install.py"
+        if host is None or not installer.is_file():
+            return False
+        return update_check._host_state(subprocess.run, installer, host).get("state") == "patched"
     except Exception:
         return False
 
@@ -683,6 +718,20 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
             head = f"{head} {host_note}"
         return head, head
     if outcome == "already_latest":
+        # Everything on disk is already right, but this process loaded an older copy:
+        # Hermes was updated and re-patched while it ran, or the plugin was updated
+        # outside it. Only a restart loads it, so say "fixed" and restart rather than
+        # "could not fix itself" with nothing changing (live, 2026-10-03: the desktop
+        # backend kept the old code through every Fix).
+        if code_stale() or (not was_working and _host_patched_on_disk()):
+            head = f"{BRAND} fixed."
+            try:
+                with _mutation() as state:
+                    if state is not None:
+                        state["pending"] = {"kind": "fix", "version": update_check.installed_version()}
+            except Exception:
+                logger.warning("refine notices: cannot record the pending confirmation", exc_info=True)
+            return head, head
         if was_working:
             return f"{BRAND} {plain_version(update_check.installed_version())} is up to date.", ""
         if _host_supported() is False:
@@ -737,7 +786,9 @@ def desktop_state(cards: bool = False) -> Dict[str, Any]:
     return {
         "brand": BRAND,
         "version": plain_version(update_check.installed_version()),
-        "working": plugin_working(),
+        # A backend running older plugin code than the disk holds is not working as
+        # installed: the [Fix] it shows restarts it, which is all it needs.
+        "working": plugin_working() and not code_stale(),
         "latest": plain_version(latest) if latest else None,
         "job": job,
         "backend": _BACKEND_ID,

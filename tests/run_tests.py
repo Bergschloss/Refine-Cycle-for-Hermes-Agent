@@ -24572,6 +24572,54 @@ class NoticesTests(unittest.TestCase):
             self.notices.startup_check()
         self.assertEqual([t for t, _ in self.sent], [self.notices.running_text("1.3.12")])
 
+    def _already_latest(self):
+        return patch.object(update_check, "run_update",
+                            return_value={"outcome": "already_latest", "message": "Already on the latest release (1.3.17)."})
+
+    def test_fix_restarts_when_the_disk_is_patched_but_this_process_loaded_the_old_hermes(self):
+        # Live, 2026-10-03: Hermes was updated and re-patched while the desktop backend
+        # ran; every Fix said "could not fix itself" and nothing changed.
+        with self._already_latest(), self._working(False), \
+             patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_host_patched_on_disk", return_value=True):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(restart_head, "♾️ Refine Cycle fixed.")
+        self.assertEqual(reply, restart_head)
+
+    def test_fix_without_the_patch_on_disk_still_says_it_could_not(self):
+        with self._already_latest(), self._working(False), \
+             patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_host_patched_on_disk", return_value=False), \
+             patch.object(self.notices, "_host_supported", return_value=True):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(restart_head, "")
+        self.assertIn("could not fix itself", reply)
+
+    def test_newer_plugin_code_on_disk_needs_a_restart_and_shows_not_working(self):
+        with self._already_latest(), self._working(True), \
+             patch.object(self.notices, "code_stale", return_value=True):
+            reply, restart_head = self.notices.run_update_command(None)
+            state = self.notices.desktop_state()
+        self.assertEqual(restart_head, "♾️ Refine Cycle fixed.")
+        self.assertFalse(state["working"], "the desktop button must offer the restart")
+
+    def test_an_up_to_date_working_plugin_is_left_alone(self):
+        with self._already_latest(), self._working(True), \
+             patch.object(self.notices, "code_stale", return_value=False):
+            reply, restart_head = self.notices.run_update_command(None)
+            state = self.notices.desktop_state()
+        self.assertEqual(restart_head, "")
+        self.assertIn("is up to date", reply)
+        self.assertTrue(state["working"])
+
+    def test_code_stale_compares_the_disk_with_what_was_loaded(self):
+        with patch.object(self.notices, "_LOADED_STAMP", 100.0), \
+             patch.object(self.notices, "_code_stamp", return_value=100.0):
+            self.assertFalse(self.notices.code_stale())
+        with patch.object(self.notices, "_LOADED_STAMP", 100.0), \
+             patch.object(self.notices, "_code_stamp", return_value=200.0):
+            self.assertTrue(self.notices.code_stale())
+
     def test_the_user_is_never_asked_to_restart(self):
         with patch.object(self.notices, "restart_hermes", return_value=False):
             reply = self.notices.finish_with_restart("♾️ Refine Cycle fixed.")
