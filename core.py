@@ -5210,6 +5210,24 @@ def _notify_lesson(
         logger.debug("refine notify: lesson message failed", exc_info=True)
 
 
+def _subagent_parent_available() -> bool:
+    """Whether the calling context has the subagent parent a launch needs.
+
+    The host's own lifecycle service resolves its parent through
+    ``agent.subagent_lifecycle.get_active_subagent_parent`` at launch time, so
+    this asks the same question first. A host without that function cannot be
+    asked, and the launch is left to answer for itself, as before.
+    """
+    try:
+        from agent.subagent_lifecycle import get_active_subagent_parent  # type: ignore
+    except Exception:
+        return True
+    try:
+        return get_active_subagent_parent() is not None
+    except Exception:
+        return True
+
+
 def _subagent_lifecycle() -> Optional[Any]:
     """Return the lifecycle service, or None when the host did not bind one."""
     provider = _subagent_lifecycle_provider
@@ -5386,6 +5404,21 @@ def _propose_with_subagent(
         meta = {
             "proposal_source": "structured",
             "subagent_fallback_reason": "no_lifecycle",
+        }
+        if strict:
+            return _PROPose_STRICT_ERROR, meta
+        return None, meta
+    if not _subagent_parent_available():
+        # Hermes binds a subagent parent only for an agent turn
+        # (agent/turn_facade.py: bind_subagent_parent(self)); a slash command, a
+        # session end outside a turn and a worker whose agent is gone have none,
+        # and launch() then refuses with "No active Hermes parent session is
+        # available." Asked first, the same way launch() asks, so the pass does
+        # not render the context and attempt a launch the host is certain to
+        # refuse -- and the journal says why instead of a generic launch_failed.
+        meta = {
+            "proposal_source": "structured",
+            "subagent_fallback_reason": "no_parent",
         }
         if strict:
             return _PROPose_STRICT_ERROR, meta

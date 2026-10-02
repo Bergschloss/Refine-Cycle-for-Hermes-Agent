@@ -23684,15 +23684,15 @@ class PathTraceTests(unittest.TestCase):
             {"path": "on_session_end deferred -> drained later", "trigger": "auto",
              "outcome": "no_op", "proposer": "subagent", "fallback": None,
              "launch_parent": "session", "structured_calls": 0},
-            # Hermes binds no subagent parent for a slash command, so the proposer
-            # launch is refused and the pass falls back to the structured call on
-            # the command's own route.
+            # Hermes binds no subagent parent for a slash command, so the pass does
+            # not attempt a launch the host would refuse, and takes the
+            # structured call on the command's own route.
             {"path": "/refine dry-run, slash command", "trigger": "manual",
-             "outcome": "dry_run", "proposer": "structured", "fallback": "launch_failed",
-             "launch_parent": None, "structured_calls": 1},
+             "outcome": "dry_run", "proposer": "structured", "fallback": "no_parent",
+             "launch_parent": "-", "structured_calls": 1},
             {"path": "/refine <reason>, slash command", "trigger": "manual",
-             "outcome": "no_op", "proposer": "structured", "fallback": "launch_failed",
-             "launch_parent": None, "structured_calls": 1},
+             "outcome": "no_op", "proposer": "structured", "fallback": "no_parent",
+             "launch_parent": "-", "structured_calls": 1},
             {"path": "post_llm_call with no route bound", "trigger": "auto",
              "outcome": "llm_invocation_unavailable", "proposer": None, "fallback": None,
              "launch_parent": "-", "structured_calls": 0},
@@ -24161,7 +24161,7 @@ class PathTraceTests(unittest.TestCase):
         row = self._trace("deferred, agent released", drain)
         self.assertEqual(
             (row["proposer"], row["fallback"], row["launch_parent"], row["structured_calls"]),
-            ("structured", "launch_failed", None, 1),
+            ("structured", "no_parent", "-", 1),
         )
 
 
