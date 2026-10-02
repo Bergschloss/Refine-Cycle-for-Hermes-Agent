@@ -24409,6 +24409,14 @@ class PathTraceTests(unittest.TestCase):
         reply = asyncio_run(plugin_init._refine_command_entry("model 1"))
         self.assertIn("Lessons are now written by local/bonsai", reply)
 
+    def test_a_listed_model_typed_by_name_is_matched_like_any_other_id(self):
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        reply = self._model_command(agent, "FAST-BIG")
+        self.assertEqual(self.probe_calls, [("fast-provider", "fast-big")])
+        self.assertIn("Lessons are now written by fast-provider/fast-big", reply)
+
     def test_messages_name_the_command_the_plugin_registered(self):
         agent = self.Agent("session")
         self._host_models()

@@ -1259,8 +1259,8 @@ def _handle_model_subcommand(remainder: str) -> str:
         return _pick_lesson_model(choice["provider"], choice["model"], listed=True)
     provider, model = remainder.split("/", 1) if "/" in remainder else ("", remainder)
     for choice in choices:
-        if choice["reachable"] and choice["model"] == model and (
-            not provider or choice["provider"] == provider
+        if choice["reachable"] and core._same_model_id(choice["model"], model) and (
+            not provider or choice["provider"].casefold() == provider.casefold()
         ):
             # A listed model typed by name: the provider the config names it with.
             return _pick_lesson_model(choice["provider"], choice["model"], listed=True)
