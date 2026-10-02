@@ -13058,7 +13058,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertIsNone(journal.read_model_override())
 
     # ── /refine model command tests ───────────────────────────────────────────
-
+
     def _trusted_probe(self, reported=None):
         FakeHost.entry_config()["llm"] = {
             "allow_model_override": True, "allow_provider_override": True}
@@ -13114,7 +13114,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             plugin_init._handle_refine_command("model of gmail failures")
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["reason"], "model of gmail failures")
-
+
     def test_model_command_warns_when_trust_denies(self):
         with patch.object(plugin_init, "_probe_model") as probe:
             result = plugin_init._handle_refine_command("model blocked-model")
@@ -13145,7 +13145,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(len(journal.entries()), before)
 
     # ── Audit fixes: per-field priority, safe persistence, visibility ─────────
-
+
     def test_model_only_override_keeps_the_configured_provider(self):
         FakeHost.entry_config()["llm"] = {
             "provider": "opencode-go",
@@ -13185,7 +13185,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_empty_override_write_is_refused(self):
         with self.assertRaises(ValueError):
             journal.write_model_override("", "")
-
+
     def test_model_command_reports_a_write_failure_instead_of_raising(self):
         with self._trusted_probe(), patch.object(
             journal, "write_model_override", side_effect=OSError("read-only journal_dir")
@@ -13214,7 +13214,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn("Back to auto", result)
         self.assertIn("lessons written by: pinned-model", result)
         self.assertEqual(journal.read_model_override()["model"], "pinned-model")
-
+
     def test_model_auto_says_when_there_was_nothing_to_remove(self):
         self.assertEqual(journal.clear_model_override(), "absent")
         result = plugin_init._handle_refine_command("model auto")
@@ -13472,7 +13472,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(target["source"], "command")
         self.assertEqual(target["model"], "pinned-model")
         self.assertEqual(target["provider"], "")
-
+
     def test_namespaced_command_target_pins_instead_of_spending_a_pass(self):
         # Only the first slash separates provider from model; the rest belongs to
         # the model id. Routing this to the proposal path would spend a daily edit.
