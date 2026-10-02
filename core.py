@@ -4743,7 +4743,11 @@ def _model_substituted(
 
 
 _OPENROUTER_ROUTING_VARIANTS = frozenset({"free", "nitro", "floor", "beta", "extended", "online"})
-_MODEL_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8}|latest)$")
+_MODEL_SNAPSHOT_SUFFIX = re.compile(
+    # A calendar date only, so a name that merely ends in digits keeps them.
+    r"-(?:(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+    r"|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|latest)$"
+)
 
 
 def _same_model_id(configured: str, reported: str) -> bool:

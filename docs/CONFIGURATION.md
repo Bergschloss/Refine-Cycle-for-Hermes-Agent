@@ -73,6 +73,12 @@ off if the session model was chosen so the evidence stays local.
 
 - The pass still runs on the background worker; the session's turn does not
   wait on it.
+- It needs a Python whose new threads start without the creating thread's
+  context (the default of CPython with the GIL, 3.14 included). Where threads
+  inherit it (`sys.flags.thread_inherit_context`, the free-threaded build's
+  default), the worker sees the session's locked route, and every automatic
+  pass stops as `configured_model_unusable` with that reason in `/refine
+  status` instead of running on the session model.
 - The proposer subagent is not used on these passes (it would run on the
   session model); the structured call is.
 - With the setting on but `llm.model` unset, or a trust flag the pin needs

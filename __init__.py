@@ -1396,9 +1396,9 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 ) or "an unidentified model"
                 when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(last_skip["ts"]))
                 lines.append(
-                    f"session-model skips today: {gate['skips_today']} "
-                    f"(last: {last_skip['trigger'] or 'run'} pass on {skipped} at {when}, "
-                    "no model call; the failures stay eligible)"
+                    f"session-model skips today: {gate['skips_today']}; "
+                    f"last skip: {last_skip['trigger'] or 'run'} pass on {skipped} at {when} "
+                    "(no model call; the failures stay eligible)"
                 )
         if status["cooldown_remaining_minutes"] > 0:
             lines.append(

@@ -23852,7 +23852,7 @@ class PathTraceTests(unittest.TestCase):
         status = self._status_text(agent)
         self.assertIn(
             "allowed session models: other-provider/other-model, fast-model", status)
-        self.assertIn("session-model skips today: 1 (last: auto pass on "
+        self.assertIn("session-model skips today: 1; last skip: auto pass on "
                       "turn-provider/turn-model", status)
         self.assertIn("session_model_not_allowed — The session model "
                       "turn-provider/turn-model is not in", status)
@@ -24043,6 +24043,7 @@ class PathTraceTests(unittest.TestCase):
             ("fast-model", ""),
             ("", "fast-model"),
             ("qwen3:8b", "qwen3:14b"),
+            ("foo-model-12345678", "foo-model"),
         ]
         for pin, got in same:
             self.assertTrue(core._same_model_id(pin, got), (pin, got))
