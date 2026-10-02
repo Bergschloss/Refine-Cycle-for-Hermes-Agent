@@ -18,7 +18,7 @@ All keys live under `plugins.entries.refine`:
 | `max_edits_per_proposal` | int | `3` | Maximum inseparable edits one proposal may apply as a single transaction. `1` disables transactions. |
 | `max_edits_per_day` | int | `3` | Maximum applied, pending, prepared, rollback-prepared, or pending-rollback **edits** per UTC day. This is the blast-radius limit and is re-checked before every edit. |
 | `update_check` | bool | `true` | Asks GitHub for the latest release tag at most once a day per process, and shows a newer version in `/refine status` and on the lesson notification. It never downloads anything; `/refine update` does that, and works with this off. |
-| `max_model_runs_per_day` | int | `30` | Maximum refine passes per UTC day that reach a model, manual, automatic and dry runs together. Checked before a pass collects evidence, so a refused pass sends nothing. Automatic passes do not start once it is used up. This is the spend ceiling: every pass runs on the model the session already uses. |
+| `max_model_runs_per_day` | int | `30` | Maximum refine passes per UTC day that reach a model, manual, automatic and dry runs together. Checked before a pass collects evidence, so a refused pass sends nothing. Automatic passes do not start once it is used up. This is the spend ceiling: every pass runs on the model the session already uses, unless `llm.use_model_for_auto_runs` sends automatic passes to `llm.model`. |
 | `only_agent_created` | bool | `true` | Only patch agent-created skills. |
 | `journal_dir` | path | `<HERMES_HOME>/refine` | Journal, lock, ledger, backups, prompt notes, and the `/refine model` override. An empty value uses this default. |
 | `overview_max_entries` | int | `40` | Existing skills and memory snippets listed per kind in a proposal prompt. |
@@ -54,6 +54,42 @@ llm:
   allow_provider_override: false
 ```
 
+Configured model for automatic runs (`plugins.entries.refine.llm.use_model_for_auto_runs`, off by default):
+
+```yaml
+llm:
+  provider: openrouter                  # optional; needs allow_provider_override
+  model: deepseek/deepseek-chat         # the model that writes automatic lessons
+  allow_model_override: true
+  allow_provider_override: true         # only when provider is set
+  use_model_for_auto_runs: true
+```
+
+Off, every pass runs on the session's own model, as before. On, automatic
+passes (turn trigger and session end) send the evidence to `llm.model` /
+`llm.provider` instead. Manual passes (`/refine`, `refine_run`, dry runs) keep
+the session model. This sends your conversation evidence to the configured model; leave it
+off if the session model was chosen so the evidence stays local.
+
+- The pass still runs on the background worker; the session's turn does not
+  wait on it.
+- The proposer subagent is not used on these passes (it would run on the
+  session model); the structured call is.
+- With the setting on but `llm.model` unset, or a trust flag the pin needs
+  turned off, the host would answer on the session model, so the pass calls no
+  model and records `configured_model_unusable` with the reason.
+- A failing call (no key, timeout, provider error) is journaled with its cause
+  (`result_code`, e.g. `llm_timeout`) and shown in `/refine status` as
+  `last auto run on it`. It is never retried on the session model, and nothing
+  about the failures is marked handled, so the next pass sees them again.
+- Hermes may move a failing explicit-provider call onto the main agent model.
+  The response then names another model, and the pass is refused as
+  `configured_model_substituted` without applying anything. The comparison is
+  exact: if your provider reports the model under a different id, set
+  `llm.model` to the id it reports.
+- `/refine status` shows `auto runs model` and the last automatic result on it;
+  `/refine audit` lists each lesson with the model that wrote it.
+
 Session-model gate (`plugins.entries.refine.llm.allowed_session_models`, off by default):
 
 ```yaml
@@ -77,9 +113,10 @@ model. The skip does count as an automatic attempt for `auto_cooldown_minutes`.
   spellings are accepted.
 - It applies to every invocation-bound pass: automatic, `/refine`, `refine_run`
   and dry runs.
-- It never changes which model refine calls; it only decides whether to call
-  the session model at all. Pinning `llm.model` on bound runs needs a Hermes
-  change and is not supported.
+- It never changes which model a bound pass calls; it only decides whether to
+  call the session model at all. To write automatic lessons with another model,
+  use `llm.use_model_for_auto_runs` above; passes on it are not bound, so this
+  list does not apply to them.
 - Absent or `[]`: the gate is off and nothing changes. A malformed value keeps
   the gate on: unusable entries are dropped and listed in `/refine status`, and
   with no usable entry left no bound pass calls a model.

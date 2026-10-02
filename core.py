@@ -2681,6 +2681,31 @@ def refine_status() -> Dict[str, Any]:
         last_model_substituted = False
         logger.warning("Cannot read refine journal for status: %s", str(exc))
 
+    # Present only when llm.use_model_for_auto_runs is on, for the same reason.
+    auto_model: Optional[Dict[str, Any]] = None
+    if config.llm_use_model_for_auto_runs():
+        auto_model = {
+            "provider": target.get("provider", ""),
+            "model": target.get("model", ""),
+            "problem": config.configured_model_problem(),
+            "last_run": None,
+        }
+        if journal_present and journal_readable:
+            for entry in reversed(journal.entries()):
+                meta = entry.get("llm_meta") if isinstance(entry.get("llm_meta"), dict) else {}
+                if entry.get("trigger") != "auto" or meta.get("target_source") not in (
+                    "configured", "command", "config"
+                ):
+                    continue
+                auto_model["last_run"] = {
+                    "outcome": str(entry.get("outcome", "") or ""),
+                    "result_code": str(meta.get("result_code", "") or ""),
+                    "reported_provider": str(meta.get("reported_provider", "") or ""),
+                    "reported_model": str(meta.get("reported_model", "") or ""),
+                    "error": str(entry.get("error", "") or "")[:200],
+                }
+                break
+
     # Present only when llm.allowed_session_models is set, so a host that does
     # not use it gets exactly the report it got before the setting existed.
     session_model_gate: Optional[Dict[str, Any]] = None
@@ -3026,6 +3051,8 @@ def refine_status() -> Dict[str, Any]:
     }
     if session_model_gate is not None:
         status["session_model_gate"] = session_model_gate
+    if auto_model is not None:
+        status["auto_runs_model"] = auto_model
     return status
 
 
@@ -5489,6 +5516,7 @@ def _refine_once(
     explicit_session: bool = False,
     session_ending: bool = False,
     active_chat=None,
+    configured_model: bool = False,
 ) -> Dict[str, Any]:
     trigger = "auto" if auto else "manual"
     started = time.time()
@@ -5569,6 +5597,41 @@ def _refine_once(
             response["message"] += " The skip decision could not be journaled."
         return response
 
+    # llm.use_model_for_auto_runs: the automatic worker hands over the host's
+    # plain ctx.llm, read off the turn, so the call carries llm.model/provider.
+    # Anything that would let the host answer on another model instead is
+    # refused here, before evidence is read or a model is called.
+    if configured_model:
+        _pin_problem = config.configured_model_problem()
+        if not _pin_problem and llm is None:
+            _pin_problem = "the host exposed no model facade to the automatic worker"
+        if not _pin_problem and _llm._is_invocation_bound(llm):
+            _pin_problem = (
+                "the host handed the automatic worker a facade locked to the "
+                "session's route, which cannot take llm.model"
+            )
+        if _pin_problem:
+            _pin_message = (
+                f"Refine did not run: {_pin_problem}. No model was called; the "
+                "failures stay eligible for the next pass."
+            )
+            note_auto_event("configured_model_unusable", _pin_message)
+            return _terminal_result(
+                outcome="configured_model_unusable",
+                success=False,
+                message=_pin_message,
+                trigger=trigger,
+                safe_reason=safe_reason,
+                session=resolved_session,
+                llm_meta={"target_source": "configured", "primary_attempts": 0},
+                evidence={
+                    "session_id": resolved_session,
+                    "session_id_source": resolved_source,
+                    "session_source": session_db_source,
+                    "source_lookup_status": source_lookup_status,
+                },
+            )
+
     # A facade whose host inherits the turn route natively reads that route from
     # the turn itself, not from the facade. Captured in a turn and used off it
     # (the automatic worker thread), it has no route left, and treating it as an
@@ -5576,6 +5639,7 @@ def _refine_once(
     # model nobody chose for this. It is refused exactly like a missing facade.
     if (
         llm is not None
+        and not configured_model
         and not _llm._is_invocation_bound(llm)
         and _llm.turn_inherit_kwarg(llm)
     ):
@@ -6090,8 +6154,14 @@ def _refine_once(
     _primary_attempts = 0
     _primary_llm_meta: Dict[str, Any] = {}
     _primary_attempt_limit = 1 if _invocation_bound else _MAX_PRIMARY_ATTEMPTS
-    _subagent_meta: Dict[str, Any] = {"proposal_source": "structured"}
-    _subagent_tried = False
+    _subagent_meta: Dict[str, Any] = (
+        {"proposal_source": "structured", "subagent_fallback_reason": "configured_model"}
+        if configured_model
+        else {"proposal_source": "structured"}
+    )
+    # The proposer subagent runs on the parent session's model, so a pass bound
+    # to the configured model must not launch one.
+    _subagent_tried = configured_model
     for _primary_attempt in range(_primary_attempt_limit):
         _primary_attempts = _primary_attempt + 1
         proposal = None
@@ -6384,6 +6454,54 @@ def _refine_once(
     #
     # A no_op has nothing to attribute and nothing to apply, so it is left to
     # the ordinary reporting below rather than being relabelled a route failure.
+    # A pass on the configured model must have been answered by it. Hermes's
+    # call_llm may move a failing explicit-provider call onto the main agent
+    # model; the response then names that model. Taking its answer would be the
+    # silent fallback to the session model this setting rules out, so it is
+    # refused, a no_op included: the run would otherwise read as a clean pass
+    # by the configured model.
+    if configured_model and not proposal.get("failure"):
+        _pin_model = str(_run_target.get("model", "") or "")
+        _pin_provider = str(_run_target.get("provider", "") or "")
+        _got_model = str(_run_llm_meta.get("reported_model", "") or "")
+        _got_provider = str(_run_llm_meta.get("reported_provider", "") or "")
+        if _got_model != _pin_model or (_pin_provider and _got_provider != _pin_provider):
+            _pinned_name = "/".join(p for p in (_pin_provider, _pin_model) if p)
+            _got_name = "/".join(p for p in (_got_provider, _got_model) if p) or "an unreported model"
+            _sub_message = (
+                f"The answer came from {_got_name}, not the configured {_pinned_name}; "
+                "it was not applied. If the provider reports this model under "
+                "another id, set llm.model to that id."
+            )
+            _run_llm_meta["result_code"] = "configured_model_substituted"
+            _run_llm_meta["would_apply"] = False
+            note_auto_event("configured_model_substituted", _sub_message)
+            entry_id = _journal_nonmutation(
+                trigger=trigger,
+                reason=_sub_message,
+                session_id=session,
+                proposal=proposal,
+                outcome="configured_model_substituted",
+                error=_sub_message,
+                llm_meta=_run_llm_meta,
+            )
+            response = {
+                "success": False,
+                "outcome": "configured_model_substituted",
+                "failure": "configured_model_substituted",
+                "message": _sub_message,
+                "llm_called": True,
+                "would_apply": False,
+                "edits_applied": 0,
+                "proposal": proposal,
+                "evidence": evidence_summary,
+                "llm_meta": _run_llm_meta,
+                "reversible": False,
+            }
+            if entry_id:
+                response["journal_id"] = entry_id
+            return response
+
     _route_problem = (
         None if proposal.get("action") == "no_op"
         else _route_refusal(
@@ -7824,6 +7942,7 @@ def refine_run(
     explicit_session: bool = False,
     session_ending: bool = False,
     active_chat=None,
+    configured_model: bool = False,
 ) -> Dict[str, Any]:
     """Serialize a run, reconcile approvals, and preserve every recovery id.
 
@@ -7857,6 +7976,7 @@ def refine_run(
             llm, reason=reason, session_id=session_id,
             auto=auto, dry_run=True, explicit_session=explicit_session,
             session_ending=session_ending, active_chat=active_chat,
+            configured_model=configured_model,
         )
 
     runs: List[Dict[str, Any]] = []
@@ -7872,7 +7992,7 @@ def refine_run(
         result = _refine_once(
             llm, reason=run_reason, session_id=session_id, auto=auto,
             explicit_session=explicit_session, session_ending=session_ending,
-            active_chat=active_chat,
+            active_chat=active_chat, configured_model=configured_model,
         )
         runs.append(result)
         if not result.get("success") or not int(result.get("edits_applied", 0) or 0):

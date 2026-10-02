@@ -23881,6 +23881,194 @@ class PathTraceTests(unittest.TestCase):
             self.assertIn("allowed session models: (none usable", status)
             self.assertIn(f"  ⚠ {issue}", status)
 
+    # --- llm.use_model_for_auto_runs (issue #16, item 3) -----------------------
+
+    def _pin_auto_model(self, **extra):
+        llm_cfg = {
+            "provider": "fast-provider", "model": "fast-model",
+            "allow_provider_override": True, "allow_model_override": True,
+            "use_model_for_auto_runs": True,
+        }
+        llm_cfg.update(extra)
+        FakeHost.entry_config()["llm"] = {k: v for k, v in llm_cfg.items() if v is not None}
+
+    def _unbound_host_facade(self, *responses, reported_model="fast-model"):
+        """``ctx.llm`` outside an invocation scope: the plain PluginLlm, which takes
+        provider/model kwargs and reports the model that actually ran."""
+        test = self
+        test.pinned_calls = []
+
+        class Unbound:
+            invocation_bound = False
+
+            def complete_structured(self, **kwargs):
+                test.pinned_calls.append(
+                    (kwargs.get("provider"), kwargs.get("model"),
+                     threading.current_thread().name))
+                response = responses[0] if responses else {
+                    "action": "no_op", "reason": "already covered"}
+                if callable(response):
+                    response = response()
+                if isinstance(response, Exception):
+                    raise response
+                return MockResult(response, model=reported_model,
+                                  provider=kwargs.get("provider"))
+
+        unbound = Unbound()
+        bound_factory = self._facade
+        self._facade = lambda *, bound: bound_factory(bound=True) if bound else unbound
+        self.addCleanup(lambda: setattr(self, "_facade", bound_factory))
+        return unbound
+
+    def test_auto_runs_write_with_the_configured_model_in_the_background(self):
+        agent = self.Agent("session")
+        self._pin_auto_model()
+        entered, release = threading.Event(), threading.Event()
+
+        def slow():
+            entered.set()
+            release.wait(10)
+            return {"action": "no_op", "reason": "already covered"}
+        self._unbound_host_facade(slow)
+
+        def run():
+            plugin_init._mark_turn_attempt("session", 0)
+            with self.turn(agent):
+                started = time.monotonic()
+                plugin_init._on_post_llm_call("session", [{"role": "assistant"}])
+                hook_seconds = time.monotonic() - started
+            self.assertTrue(entered.wait(5), "the configured model was never called")
+            with self.turn(agent):
+                started = time.monotonic()
+                plugin_init._on_pre_llm_call(session_id="session")
+                plugin_init._on_post_llm_call("session", [{"role": "assistant"}] * 2)
+                hook_seconds = max(hook_seconds, time.monotonic() - started)
+            release.set()
+            self.assertLess(hook_seconds, 1.0)
+        row = self._trace("pinned auto", run)
+
+        self.assertEqual(row, {
+            "path": "pinned auto", "trigger": "auto", "outcome": "no_op",
+            "proposer": "structured", "fallback": "configured_model",
+            "launch_parent": "-", "structured_calls": 0,
+        })
+        self.assertEqual(len(self.pinned_calls), 1)
+        provider, model, thread = self.pinned_calls[0]
+        self.assertEqual((provider, model), ("fast-provider", "fast-model"))
+        self.assertEqual(thread, "refine-auto")
+        meta = journal.entries()[-1]["llm_meta"]
+        self.assertEqual(
+            (meta["target_source"], meta["reported_provider"], meta["reported_model"]),
+            ("config", "fast-provider", "fast-model"),
+        )
+        status = self._status_text(agent)
+        self.assertIn("auto runs model: fast-provider/fast-model "
+                      "(llm.use_model_for_auto_runs)", status)
+        self.assertIn("last auto run on it: no_op, written by "
+                      "fast-provider/fast-model", status)
+
+    def test_manual_runs_keep_the_session_model_when_auto_runs_are_pinned(self):
+        agent = self.Agent("session")
+        self._pin_auto_model()
+        self._unbound_host_facade()
+
+        def tool_call():
+            with self.turn(agent):
+                plugin_init._handle_refine_run({"dry_run": True})
+        row = self._trace("tool", tool_call)
+        self.assertEqual((row["trigger"], row["proposer"], row["launch_parent"]),
+                         ("manual", "subagent", "session"))
+        self.assertEqual(self.pinned_calls, [])
+
+    def test_a_failing_configured_model_is_recorded_and_never_replaced(self):
+        agent = self.Agent("session")
+        self._pin_auto_model()
+        self._unbound_host_facade(TimeoutError("request timed out"))
+        row = self._auto_pass(agent, "pinned failure")
+        self.assertEqual((row["outcome"], row["structured_calls"], row["launch_parent"]),
+                         ("llm_error", 0, "-"))
+        self.assertGreaterEqual(len(self.pinned_calls), 1)
+        self.assertTrue(all(call[:2] == ("fast-provider", "fast-model")
+                            for call in self.pinned_calls))
+        entry = journal.entries()[-1]
+        self.assertEqual(entry["llm_meta"]["result_code"], "llm_timeout")
+        status = self._status_text(agent)
+        self.assertIn("last auto run on it: llm_error (llm_timeout)", status)
+
+        # Nothing was proposed, so the failures are still there for the next pass.
+        self._unbound_host_facade()
+        row = self._auto_pass(agent, "pinned again")
+        self.assertEqual(row["outcome"], "no_op")
+        self.assertEqual(self.pinned_calls[0][:2], ("fast-provider", "fast-model"))
+
+    def test_a_host_fallback_off_the_configured_model_is_refused(self):
+        """Hermes's call_llm may move a failing explicit-provider call onto the
+        main agent model. The response then names that model, and the pass must
+        not take the lesson as the configured model's."""
+        agent = self.Agent("session")
+        self._pin_auto_model()
+        self._unbound_host_facade(reported_model="turn-model")
+        row = self._auto_pass(agent, "fallback")
+        self.assertEqual(row["outcome"], "configured_model_substituted")
+        entry = journal.entries()[-1]
+        self.assertFalse(entry["llm_meta"]["would_apply"])
+        self.assertIn("turn-model", entry["reason"])
+        self.assertIn("fast-model", entry["reason"])
+        self.assertEqual(journal.count_today_applied(), 0)
+        status = self._status_text(agent)
+        self.assertIn("last auto run on it: configured_model_substituted", status)
+
+    def test_a_pin_the_host_would_not_send_never_reaches_any_model(self):
+        agent = self.Agent("session")
+        for extra, why in (
+            ({"allow_model_override": False}, "allow_model_override"),
+            ({"model": None}, "llm.model"),
+            ({"allow_provider_override": False}, "allow_provider_override"),
+        ):
+            self._pin_auto_model(**extra)
+            self._unbound_host_facade()
+            row = self._auto_pass(agent, why)
+            self.assertEqual((row["outcome"], row["structured_calls"], row["launch_parent"]),
+                             ("configured_model_unusable", 0, "-"))
+            self.assertEqual(self.pinned_calls, [])
+            self.assertIn(why, journal.entries()[-1]["reason"])
+            self.assertEqual(core.last_auto_event()["code"], "configured_model_unusable")
+
+    def test_a_lesson_from_the_configured_model_names_it_in_the_audit(self):
+        agent = self.Agent("session")
+        self._pin_auto_model()
+        self._unbound_host_facade()
+
+        def propose_on_pin(*_args, **_kwargs):
+            llm._call_meta.value = dict(
+                getattr(llm._call_meta, "value", {}) or {},
+                reported_provider="fast-provider", reported_model="fast-model",
+            )
+            return skill_proposal("pinned-lesson")
+        with patch.object(core._llm, "propose", side_effect=propose_on_pin), \
+                patch.object(core, "_application_evidence_refusal", return_value=None), \
+                patch.object(llm, "_ground_parsed", new=_no_grounding_repair), \
+                patch.object(core._notify, "notify", return_value=True):
+            row = self._auto_pass(agent, "pinned lesson")
+        self.assertEqual(row["outcome"], "applied")
+        audit = core.refine_audit()
+        self.assertIn("model: fast-model", audit["report"])
+
+    def test_auto_runs_stay_on_the_session_model_unless_the_setting_is_on(self):
+        agent = self.Agent("session")
+        FakeHost.entry_config().pop("llm", None)
+        absent_status = self._status_text(agent)
+        for flag in (None, False):
+            self._pin_auto_model(use_model_for_auto_runs=flag)
+            self.assertEqual(self._status_text(agent).count("auto runs model"), 0)
+            self._unbound_host_facade()
+            row = self._auto_pass(agent, repr(flag))
+            self.assertEqual((row["outcome"], row["proposer"], row["launch_parent"]),
+                             ("no_op", "subagent", "session"))
+            self.assertEqual(self.pinned_calls, [])
+        FakeHost.entry_config().pop("llm", None)
+        self.assertNotIn("auto runs model", absent_status)
+
     def test_a_worker_whose_agent_is_gone_falls_back_instead_of_launching(self):
         """The capture is weak. An agent released before the worker runs leaves
         no parent to bind, and the pass takes the structured call honestly."""

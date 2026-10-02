@@ -111,6 +111,22 @@ def _session_llm() -> Optional[PluginLlm]:
     return llm if core._llm._is_invocation_bound(llm) else None
 
 
+def _registered_llm() -> Optional[PluginLlm]:
+    """The host's ``ctx.llm`` as read on the calling thread, bound or not.
+
+    Only the automatic worker calls this, for ``llm.use_model_for_auto_runs``.
+    A bare worker thread carries no invocation scope, so Hermes returns its
+    plain ``PluginLlm`` there; the pass refuses anything else.
+    """
+    if _REGISTERED_CONTEXT is None:
+        return None
+    try:
+        return _REGISTERED_CONTEXT.llm
+    except Exception as exc:
+        logger.warning("Cannot resolve the refine LLM for the configured model: %s", str(exc))
+        return None
+
+
 def _assistant_turn_count(conversation_history: Any) -> int:
     """Count assistant messages in host callback history without assuming its shape.
 
@@ -299,6 +315,14 @@ def _run_auto_refine(
         # A worker thread nobody waits on, before the lock: the one place in a
         # long-running gateway where the daily release check can refresh.
         notices.check_update()
+        # llm.use_model_for_auto_runs: read ctx.llm HERE, on the worker, where no
+        # invocation scope is open, so the host returns its plain facade that
+        # takes llm.model/provider. The turn's bound facade cannot be steered and
+        # its subagent parent would run on the session model, so neither is used.
+        configured_model = config.llm_use_model_for_auto_runs()
+        if configured_model:
+            llm = _registered_llm()
+            subagent_parent = None
         with journal.try_mutation_lock() as acquired:
             try:
                 if not acquired:
@@ -307,6 +331,8 @@ def _run_auto_refine(
                     core.note_auto_event("mutation_lock_busy", message)
                 elif _cooldown_elapsed():
                     with _subagent_parent_bound(subagent_parent):
+                        # Passed only when on, so the default call is unchanged.
+                        pinned = {"configured_model": True} if configured_model else {}
                         core.refine_run(
                             llm=llm,
                             session_id=session_id,
@@ -315,6 +341,7 @@ def _run_auto_refine(
                             # session-scoped note written here would not survive the call.
                             session_ending=cleanup_session_notes,
                             active_chat=active_chat,
+                            **pinned,
                         )
             finally:
                 # Cleanup must always run, even if refine_run raised above.
@@ -1331,6 +1358,30 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 else ""
             ),
         ]
+        auto_model = status.get("auto_runs_model")
+        if auto_model is not None:
+            pinned = "/".join(
+                part for part in (auto_model["provider"], auto_model["model"]) if part
+            ) or "(none set)"
+            lines.append(f"auto runs model: {pinned} (llm.use_model_for_auto_runs)")
+            if auto_model["problem"]:
+                lines.append(f"  ⚠ {auto_model['problem']}; automatic passes call no model")
+            last_run = auto_model.get("last_run")
+            if last_run:
+                outcome = last_run["outcome"] or "unknown"
+                code = last_run["result_code"]
+                if code and code != outcome and outcome != "no_op":
+                    outcome += f" ({code})"
+                writer = "/".join(
+                    part for part in (
+                        last_run["reported_provider"], last_run["reported_model"]
+                    ) if part
+                )
+                lines.append(
+                    f"last auto run on it: {outcome}"
+                    + (f", written by {writer}" if writer else "")
+                    + (f" — {last_run['error']}" if last_run["error"] else "")
+                )
         gate = status.get("session_model_gate")
         if gate is not None:
             lines.append(

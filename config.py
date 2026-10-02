@@ -558,6 +558,41 @@ def session_model_allowed(
     return model in allowed or bool(provider and f"{provider}/{model}" in allowed)
 
 
+def llm_use_model_for_auto_runs() -> bool:
+    """Whether automatic passes call the configured ``llm.model`` instead of the
+    session's own model. Off by default: every pass runs on the session model."""
+    return _parse_bool(
+        _llm_entry().get("use_model_for_auto_runs"), False, "llm.use_model_for_auto_runs"
+    )
+
+
+def configured_model_problem() -> str:
+    """Why the configured model cannot be what an automatic pass calls, or "".
+
+    The host drops a provider or model the trust policy does not allow and then
+    answers on the main model, which is the session model. Sending a pin the
+    host will drop would therefore be the silent fallback this setting exists
+    to rule out, so each such case is a refusal before any call.
+    """
+    target = effective_llm_target()
+    if target.get("source") not in ("command", "config") or not target.get("model"):
+        return (
+            "llm.use_model_for_auto_runs is on but no llm.model is set"
+            + (" (" + "; ".join(target["issues"]) + ")" if target.get("issues") else "")
+        )
+    if not llm_allow_model_override():
+        return (
+            "llm.use_model_for_auto_runs is on but llm.allow_model_override is not, "
+            "so the host would drop the model and answer on the session model"
+        )
+    if target.get("provider") and not llm_allow_provider_override():
+        return (
+            "llm.provider is set but llm.allow_provider_override is not, so the "
+            "host would drop the provider and answer on the session's provider"
+        )
+    return ""
+
+
 def llm_target_trust_denials(target: Dict[str, Any]) -> Dict[str, str]:
     """Explain every explicit target field that the host trust policy drops.
 
