@@ -2431,6 +2431,21 @@ def _memory_capacity_line(used: Optional[int], limit: Optional[int], entry_count
     line = f"memory store: {used}/{limit} chars used; a new memory entry can hold at most {max(room, 0)} chars"
     if room <= 0:
         line += "; the store is full, so a memory edit will be refused -- use a skill or a prompt note, or no_op"
+    elif room < _llm.MEMORY_ENTRY_TARGET_CHARS:
+        # Less room than the entry the proposer is asked to write: in practice a
+        # memory lesson will not fit, and it was being proposed, paid for and
+        # refused at apply. Said before the call, with the same remedy.
+        line += (
+            f"; that is less than a memory lesson takes (about {_llm.MEMORY_ENTRY_TARGET_CHARS} "
+            "chars), so treat the store as full -- use a skill or a prompt note, or no_op"
+        )
+    elif room < _llm.MEMORY_ENTRY_HARD_LIMIT_CHARS:
+        # Room for a short lesson, but below the usual ceiling: here the store's
+        # room, not the ceiling, is the limit a memory entry must meet.
+        line += (
+            f"; a memory entry longer than {room} chars will be refused, so keep it "
+            "under that or use a skill or a prompt note"
+        )
     return line
 
 

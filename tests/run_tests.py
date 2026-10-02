@@ -15812,6 +15812,28 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertNotIn("full", roomy)
         self.assertIn("the store is full", core._memory_capacity_line(7998, 8000, 3))
 
+    def test_a_store_with_less_room_than_a_lesson_is_reported_full_before_the_call(self):
+        """Issue #16 setup report: 10 passes with MEMORY.md at 7866-7959 of 8000
+        paid for a proposal and were then refused at apply. A store with less
+        room than the entry the proposer is asked to write is already full for
+        that purpose, and the proposer is told so before the call."""
+        delimiter = len(core._memory_entry_delimiter())
+        target = llm.MEMORY_ENTRY_TARGET_CHARS
+        tight = core._memory_capacity_line(8000 - delimiter - (target - 1), 8000, 3)
+        self.assertIn(f"at most {target - 1} chars", tight)
+        self.assertIn("treat the store as full", tight)
+        self.assertIn("use a skill or a prompt note, or no_op", tight)
+        enough = core._memory_capacity_line(8000 - delimiter - target, 8000, 3)
+        self.assertNotIn("full", enough)
+        self.assertIn(f"longer than {target} chars will be refused", enough)
+        hard = llm.MEMORY_ENTRY_HARD_LIMIT_CHARS
+        roomy = core._memory_capacity_line(8000 - delimiter - hard, 8000, 3)
+        self.assertNotIn("refused", roomy)
+        # The reporter's numbers: 38 chars left is full; 131 is a hard cap.
+        self.assertIn("treat the store as full", core._memory_capacity_line(7959, 8000, 40))
+        self.assertIn(f"longer than {8000 - 7866 - delimiter} chars will be refused",
+                      core._memory_capacity_line(7866, 8000, 40))
+
     # ── Dry-run (Part E) ──────────────────────────────────────────────────────
 
     def test_dry_run_reports_that_an_apply_would_be_rejected(self):
