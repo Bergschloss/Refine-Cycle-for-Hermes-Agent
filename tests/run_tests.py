@@ -23678,6 +23678,95 @@ class PathTraceTests(unittest.TestCase):
         self.maxDiff = None
         self.assertEqual(trace, expected)
 
+    def test_a_slow_session_model_never_holds_the_users_turn(self):
+        """Issue #16: on a slow local session model the proposer subagent hits its
+        180 s wait and the structured fallback then runs for minutes. The report
+        says the user's turn is blocked meanwhile. This drives the real hooks of
+        one turn, and of the turns after it, while the automatic pass is stuck
+        first in the subagent wait and then in the structured call, and times
+        every hook the host runs on the turn's own thread."""
+        agent = self.Agent("session")
+        in_wait, end_wait = threading.Event(), threading.Event()
+        in_structured, end_structured = threading.Event(), threading.Event()
+        test = self
+
+        class SlowLifecycle(PathTraceTests._Lifecycle):
+            def wait(self, handle, timeout_seconds=None):
+                # The host's wait, running out its whole budget on a slow child.
+                in_wait.set()
+                end_wait.wait(10)
+                return types.SimpleNamespace(completed=False)
+
+        base = self._facade(bound=True)
+
+        class SlowFacade(type(base)):
+            def complete_structured(self, **kwargs):
+                in_structured.set()
+                end_structured.wait(10)
+                return super().complete_structured(**kwargs)
+
+        slow = SlowFacade(MockResult(
+            {"action": "no_op", "reason": "already covered"},
+            model="turn-model", provider="turn-provider",
+        ))
+        slow.invocation_bound = True
+        slow._bound_route = base._bound_route
+        core._set_subagent_lifecycle_provider(lambda: SlowLifecycle(test))
+
+        @contextmanager
+        def slow_turn():
+            route = self.route.set(slow)
+            try:
+                with self.lifecycle_module.bind_subagent_parent(agent):
+                    yield
+            finally:
+                self.route.reset(route)
+
+        def timed(hook):
+            started = time.monotonic()
+            hook()
+            return time.monotonic() - started
+
+        before = {entry.get("id") for entry in journal.entries()}
+        hook_seconds = []
+        try:
+            plugin_init._mark_turn_attempt("session", 0)
+            with slow_turn():
+                hook_seconds.append(timed(lambda: plugin_init._on_post_llm_call(
+                    "session", [{"role": "assistant"}])))
+            self.assertTrue(in_wait.wait(5), "the pass never reached the subagent wait")
+            # The next turn starts while the pass sits in the 180 s wait.
+            with slow_turn():
+                hook_seconds.append(timed(lambda: plugin_init._on_pre_llm_call(
+                    session_id="session")))
+                hook_seconds.append(timed(lambda: plugin_init._on_post_llm_call(
+                    "session", [{"role": "assistant"}] * 2)))
+            end_wait.set()
+            self.assertTrue(in_structured.wait(5), "the pass never fell back to the structured call")
+            # And the turn after that, while the structured fallback runs.
+            with slow_turn():
+                hook_seconds.append(timed(lambda: plugin_init._on_pre_llm_call(
+                    session_id="session")))
+                hook_seconds.append(timed(lambda: plugin_init._on_post_llm_call(
+                    "session", [{"role": "assistant"}] * 3)))
+            self.assertFalse(end_structured.is_set())
+            self.assertTrue(plugin_init._AUTO_THREAD_GUARD.locked(), "the pass ended early")
+        finally:
+            end_wait.set()
+            end_structured.set()
+            self._await_idle_auto_worker()
+
+        self.assertEqual(len(hook_seconds), 5)
+        self.assertLess(max(hook_seconds), 1.0, hook_seconds)
+        rows = [entry for entry in journal.entries() if entry.get("id") not in before]
+        self.assertEqual(len(rows), 1)
+        meta = rows[0].get("llm_meta") or {}
+        self.assertEqual(
+            (rows[0].get("trigger"), meta.get("proposal_source"),
+             meta.get("subagent_fallback_reason")),
+            ("auto", "structured", "subagent_timeout"),
+        )
+
     def test_a_worker_whose_agent_is_gone_falls_back_instead_of_launching(self):
         """The capture is weak. An agent released before the worker runs leaves
         no parent to bind, and the pass takes the structured call honestly."""
