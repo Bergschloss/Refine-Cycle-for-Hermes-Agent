@@ -559,11 +559,101 @@ def session_model_allowed(
 
 
 def llm_use_model_for_auto_runs() -> bool:
-    """Whether automatic passes call the configured ``llm.model`` instead of the
-    session's own model. Off by default: every pass runs on the session model."""
-    return _parse_bool(
+    """Whether automatic passes call the configured model instead of the
+    session's own model. Off by default: every pass runs on the session model.
+
+    On when config sets ``llm.use_model_for_auto_runs`` or when ``/refine model``
+    picked a model (the override store then carries ``auto_runs``).
+    """
+    if _parse_bool(
         _llm_entry().get("use_model_for_auto_runs"), False, "llm.use_model_for_auto_runs"
-    )
+    ):
+        return True
+    return picked_lesson_model() is not None
+
+
+def picked_lesson_model() -> Optional[Dict[str, str]]:
+    """The model ``/refine model`` picked for lessons, or None."""
+    try:
+        from . import journal
+    except ImportError:
+        import journal  # type: ignore
+    override, _state = journal.read_model_override_state()
+    if override and override.get("auto_runs") is True:
+        return override
+    return None
+
+
+def host_model_choices() -> List[Dict[str, Any]]:
+    """Models the user's Hermes already names, for the ``/refine model`` picker.
+
+    Read from the same config.yaml keys, with the same meaning, as the host:
+    ``model.default`` / ``model.provider`` (the default model), ``model_aliases``
+    and ``model.aliases`` (``hermes_cli/model_switch.py`` ``_load_direct_aliases``:
+    a ``model_aliases`` entry is a dict whose provider defaults to ``custom``; a
+    ``model.aliases`` string is ``provider/model`` or a model on the default
+    provider) and each ``providers.<name>`` block's ``default`` and ``models``.
+    Nothing is invented: an entry exists only where the config names a model.
+
+    ``reachable`` is False for an alias with its own ``base_url``: a plugin call
+    takes a provider and a model and nothing else, so refine cannot address that
+    endpoint. One entry per ``provider/model``, first label wins.
+    """
+    raw = _load_raw_config() or {}
+    choices: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def add(provider: Any, model: Any, label: str, reachable: bool = True) -> None:
+        provider = str(provider or "").strip()
+        model = str(model or "").strip()
+        if not model or (provider, model) in seen:
+            return
+        seen.add((provider, model))
+        choices.append({"provider": provider, "model": model, "label": label,
+                        "reachable": reachable})
+
+    section = raw.get("model")
+    default_provider = ""
+    if isinstance(section, dict):
+        default_provider = str(section.get("provider", "") or "").strip()
+        add(default_provider, section.get("default"), "Hermes default model")
+    elif isinstance(section, str):
+        add("", section, "Hermes default model")
+    aliases = raw.get("model_aliases")
+    if isinstance(aliases, dict):
+        for name, entry in aliases.items():
+            if isinstance(entry, dict):
+                own_endpoint = bool(str(entry.get("base_url", "") or "").strip())
+                add(entry.get("provider") or "custom", entry.get("model"),
+                    f"alias {name}" + (" (own endpoint: refine cannot call it)"
+                                       if own_endpoint else ""),
+                    reachable=not own_endpoint)
+    simple = section.get("aliases") if isinstance(section, dict) else None
+    if isinstance(simple, dict):
+        for name, value in simple.items():
+            if isinstance(value, dict):
+                own_endpoint = bool(str(value.get("base_url", "") or "").strip())
+                add(value.get("provider") or default_provider, value.get("model"),
+                    f"alias {name}" + (" (own endpoint: refine cannot call it)"
+                                       if own_endpoint else ""),
+                    reachable=not own_endpoint)
+            elif isinstance(value, str) and value.strip():
+                text = value.strip()
+                provider, model = text.split("/", 1) if "/" in text else (default_provider, text)
+                add(provider, model, f"alias {name}")
+    providers = raw.get("providers")
+    if isinstance(providers, dict):
+        for name, block in providers.items():
+            if not isinstance(block, dict):
+                continue
+            add(name, block.get("default"), f"provider {name}")
+            models = block.get("models")
+            names = models.keys() if isinstance(models, dict) else (
+                models if isinstance(models, list) else ())
+            for model in names:
+                if isinstance(model, str):
+                    add(name, model, f"provider {name}")
+    return choices
 
 
 def configured_model_problem() -> str:
@@ -582,12 +672,13 @@ def configured_model_problem() -> str:
         )
     if not llm_allow_model_override():
         return (
-            "llm.use_model_for_auto_runs is on but llm.allow_model_override is not, "
-            "so the host would drop the model and answer on the session model"
+            "automatic passes are set to use their own model but "
+            "llm.allow_model_override is not on, so the host would drop the model "
+            "and answer on the session model"
         )
     if target.get("provider") and not llm_allow_provider_override():
         return (
-            "llm.provider is set but llm.allow_provider_override is not, so the "
+            "a provider is set but llm.allow_provider_override is not on, so the "
             "host would drop the provider and answer on the session's provider"
         )
     return ""

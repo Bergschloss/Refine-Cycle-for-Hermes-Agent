@@ -361,7 +361,12 @@ def read_model_override_state() -> "tuple[Optional[Dict[str, str]], str]":
     ):
         logger.warning("Ignoring an unusable model override on disk")
         return None, "rejected"
-    return {"model": model, "provider": provider}, "ok"
+    override = {"model": model, "provider": provider}
+    # Written only by the /refine model picker: the pick is for automatic passes.
+    # A file without it (an older plain override) keeps its old meaning.
+    if data.get("auto_runs") is True:
+        override["auto_runs"] = True
+    return override, "ok"
 
 
 def read_model_override() -> Optional[Dict[str, str]]:
@@ -369,7 +374,7 @@ def read_model_override() -> Optional[Dict[str, str]]:
     return read_model_override_state()[0]
 
 
-def write_model_override(provider: str, model: str) -> None:
+def write_model_override(provider: str, model: str, *, auto_runs: bool = False) -> None:
     """Persist the model override atomically, refusing anything unsafe.
 
     Mirrors ``_write_prompt_notes``: the store refuses unsafe content instead of
@@ -391,10 +396,10 @@ def write_model_override(provider: str, model: str) -> None:
             raise ValueError(f"Refusing to store that {name} because {problem}")
     if not provider and not model:
         raise ValueError("Refusing to store an empty model override")
-    payload = json.dumps(
-        {"provider": provider, "model": model, "set_ts": time.time()},
-        ensure_ascii=False,
-    )
+    record: Dict[str, Any] = {"provider": provider, "model": model, "set_ts": time.time()}
+    if auto_runs:
+        record["auto_runs"] = True
+    payload = json.dumps(record, ensure_ascii=False)
     with mutation_lock():
         _atomic_write_text(ensure_dirs() / _MODEL_OVERRIDE_FILE_NAME, payload)
 

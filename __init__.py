@@ -5,12 +5,13 @@ import json
 import logging
 import re
 import asyncio
+import contextvars
 import inspect
 import threading
 import time
 import weakref
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.plugin_llm import PluginLlm
 
@@ -1070,15 +1071,144 @@ def _is_model_target(remainder: str) -> bool:
     return bool(tail) and journal.valid_model_id(tail)
 
 
+_PROBE_PROMPT = "Reply with the single word OK."
+_PROBE_TIMEOUT_SECONDS = 60
+
+
+def _lesson_model_line() -> str:
+    """Which model writes lessons, as /refine model and /refine status say it."""
+    picked = config.picked_lesson_model()
+    if picked is None and not config.llm_use_model_for_auto_runs():
+        return "lessons written by: the session's model (auto)"
+    target = picked or config.effective_llm_target()
+    name = "/".join(p for p in (target.get("provider", ""), target.get("model", "")) if p)
+    return (
+        f"lessons written by: {name or '(no model set)'} on automatic passes, "
+        "the session's model on manual ones"
+    )
+
+
+def _model_picker_text() -> str:
+    """The current lesson model and the numbered models Hermes already names."""
+    name = _command_display_name()
+    lines = [_lesson_model_line(), "", "Models your Hermes has:"]
+    choices = config.host_model_choices()
+    for number, choice in enumerate(choices, start=1):
+        target = "/".join(p for p in (choice["provider"], choice["model"]) if p)
+        lines.append(f"  {number}. {target} — {choice['label']}")
+    if not choices:
+        lines.append("  (none named in config.yaml)")
+    lines.append("  auto — the session's own model (default)")
+    lines.append(
+        f"Pick with {name} model <number>, or {name} model auto to go back. "
+        "A pick is tested with one short call first."
+    )
+    return "\n".join(lines)
+
+
+def _trust_lines_needed(provider: str) -> List[str]:
+    """config.yaml lines the host needs before refine may name this model."""
+    needed = []
+    if not config.llm_allow_model_override():
+        needed.append("allow_model_override: true")
+    if provider and not config.llm_allow_provider_override():
+        needed.append("allow_provider_override: true")
+    return needed
+
+
+def _probe_model(provider: str, model: str) -> Tuple[bool, str]:
+    """One short call to ``provider/model`` on the host's plain facade.
+
+    Run in an empty context, so ``ctx.llm`` is the unbound facade the automatic
+    worker uses: a slash command runs inside an invocation scope, where the
+    facade is locked to the session's route and refuses any model. The call
+    carries no conversation content. It must be answered by the model asked
+    for; a host fallback to another model is not an answer.
+    """
+    def call():
+        context = _REGISTERED_CONTEXT
+        if context is None:
+            return "unavailable", None
+        llm = context.llm
+        if core._llm._is_invocation_bound(llm):
+            return "bound", None
+        return "ok", llm.complete(
+            messages=[{"role": "user", "content": _PROBE_PROMPT}],
+            provider=provider or None,
+            model=model,
+            max_tokens=16,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            purpose="refine-model-check",
+        )
+
+    try:
+        kind, result = contextvars.Context().run(call)
+    except Exception as exc:
+        detail = " ".join(str(exc).split())[:200] or type(exc).__name__
+        return False, f"the test call failed: {detail}"
+    if kind == "unavailable":
+        return False, "the host exposes no model access to refine here"
+    if kind == "bound":
+        return False, "the host only offers the session's own route here"
+    reported = str(getattr(result, "model", "") or "")
+    if not core._same_model_id(model, reported):
+        return False, f"the test call was answered as {reported or 'an unreported model'}"
+    return True, ""
+
+
+def _pick_lesson_model(provider: str, model: str) -> str:
+    target = "/".join(p for p in (provider, model) if p)
+    needed = _trust_lines_needed(provider)
+    if needed:
+        return (
+            f"❌ Not switched to {target}: Hermes lets refine name a model only when "
+            "config.yaml allows it, and refine cannot change that itself. Add under "
+            "plugins.entries.refine.llm:\n"
+            + "\n".join(f"  {line}" for line in needed)
+            + f"\nthen pick again. Nothing was changed."
+        )
+    ok, why = _probe_model(provider, model)
+    if not ok:
+        return f"❌ Not switched to {target}: {why}. Nothing was changed."
+    journal.write_model_override(provider, model, auto_runs=True)
+    name = _command_display_name()
+    return (
+        f"✅ Lessons are now written by {target} on automatic passes; manual "
+        f"{name} keeps the session's model. {name} model auto goes back."
+    )
+
+
 def _handle_model_subcommand(remainder: str) -> str:
-    """Handle /refine model [auto | <provider/model> | <model>]."""
+    """Handle /refine model [auto | <number> | <provider/model> | <model>]."""
+    if remainder.isdigit():
+        choices = config.host_model_choices()
+        index = int(remainder)
+        if not 1 <= index <= len(choices):
+            return (
+                f"❌ Pick a number between 1 and {len(choices)}."
+                if choices else "❌ Your config.yaml names no models to pick from."
+            ) + "\n\n" + _model_picker_text()
+        choice = choices[index - 1]
+        if not choice["reachable"]:
+            target = "/".join(p for p in (choice["provider"], choice["model"]) if p)
+            return (
+                f"❌ Not switched to {target}: it is an alias with its own endpoint, and "
+                "a plugin call can name only a provider and a model. Nothing was changed."
+            )
+        return _pick_lesson_model(choice["provider"], choice["model"])
     if _session_llm() is not None:
         if not remainder:
-            return "model: active host invocation (bound route; stored overrides are ignored)"
-        return (
-            "❌ Refine uses the active host invocation model; "
-            f"{_command_display_name()} model cannot change a bound route."
-        )
+            return _model_picker_text()
+        if remainder == "auto":
+            outcome = journal.clear_model_override()
+            prefix = {
+                "removed": "✅ Back to auto",
+                "absent": "Already on auto",
+                "failed": "⚠ Could not remove the picked model, so it is still in use",
+            }[outcome]
+            return f"{prefix}: {_lesson_model_line()}."
+        provider, model = remainder.split("/", 1) if "/" in remainder else ("", remainder)
+        return _pick_lesson_model(provider, model)
     trust_model = config.llm_allow_model_override()
     trust_prov = config.llm_allow_provider_override()
 
@@ -1358,12 +1488,18 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 else ""
             ),
         ]
+        lines.append(_lesson_model_line())
         auto_model = status.get("auto_runs_model")
         if auto_model is not None:
             pinned = "/".join(
                 part for part in (auto_model["provider"], auto_model["model"]) if part
             ) or "(none set)"
-            lines.append(f"auto runs model: {pinned} (llm.use_model_for_auto_runs)")
+            source = (
+                f"picked with {_command_display_name()} model"
+                if config.picked_lesson_model() is not None
+                else "llm.use_model_for_auto_runs"
+            )
+            lines.append(f"auto runs model: {pinned} ({source})")
             if auto_model["problem"]:
                 lines.append(f"  ⚠ {auto_model['problem']}; automatic passes call no model")
             last_run = auto_model.get("last_run")

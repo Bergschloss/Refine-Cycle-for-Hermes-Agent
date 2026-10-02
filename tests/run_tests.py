@@ -13893,10 +13893,14 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
     def test_bound_model_command_cannot_persist_an_ignored_override(self):
         bound = types.SimpleNamespace(invocation_bound=True)
         plugin_init._REGISTERED_CONTEXT = types.SimpleNamespace(llm=bound)
+        FakeHost.entry_config()["llm"] = {
+            "allow_model_override": True, "allow_provider_override": True}
 
         result = plugin_init._handle_refine_command("model other-provider/other-model")
 
-        self.assertIn("cannot change", result)
+        # A host that offers only the session's route cannot test, so cannot take, a pick.
+        self.assertIn("Not switched", result)
+        self.assertIn("the session's own route", result)
         self.assertFalse(journal.model_override_read_path().exists())
 
     # ── Session identity (Part A) ─────────────────────────────────────────────
@@ -23916,14 +23920,24 @@ class PathTraceTests(unittest.TestCase):
         llm_cfg.update(extra)
         FakeHost.entry_config()["llm"] = {k: v for k, v in llm_cfg.items() if v is not None}
 
-    def _unbound_host_facade(self, *responses, reported_model="fast-model"):
+    def _unbound_host_facade(self, *responses, reported_model="fast-model",
+                             probe=None, probe_model=None):
         """``ctx.llm`` outside an invocation scope: the plain PluginLlm, which takes
         provider/model kwargs and reports the model that actually ran."""
         test = self
         test.pinned_calls = []
+        test.probe_calls = []
 
         class Unbound:
             invocation_bound = False
+
+            def complete(self, messages, **kwargs):
+                test.probe_calls.append((kwargs.get("provider"), kwargs.get("model")))
+                if isinstance(probe, Exception):
+                    raise probe
+                return types.SimpleNamespace(
+                    text="OK", model=probe_model or kwargs.get("model"),
+                    provider=kwargs.get("provider"))
 
             def complete_structured(self, **kwargs):
                 test.pinned_calls.append(
@@ -24146,6 +24160,112 @@ class PathTraceTests(unittest.TestCase):
             self.assertEqual(self.pinned_calls, [])
         FakeHost.entry_config().pop("llm", None)
         self.assertNotIn("auto runs model", absent_status)
+
+    # --- /refine model picker ---------------------------------------------------
+
+    def _host_models(self, trust=True):
+        FakeHost.config["model"] = {
+            "default": "main-model", "provider": "main-prov",
+            "aliases": {"quick": "fast-provider/fast-model"},
+        }
+        FakeHost.config["model_aliases"] = {
+            "local": {"model": "qwen-local", "provider": "custom",
+                      "base_url": "http://127.0.0.1:8096/v1"},
+        }
+        FakeHost.config["providers"] = {
+            "fast-provider": {"default": "fast-model",
+                              "models": {"fast-model": {}, "fast-big": {}}},
+        }
+        if trust:
+            FakeHost.entry_config()["llm"] = {
+                "allow_model_override": True, "allow_provider_override": True}
+        else:
+            FakeHost.entry_config().pop("llm", None)
+
+    def _model_command(self, agent, args):
+        with self.slash_command(agent):
+            return asyncio_run(plugin_init._refine_command_entry(f"model {args}".strip()))
+
+    def test_model_lists_the_models_hermes_has_and_auto(self):
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        reply = self._model_command(agent, "")
+        self.assertIn("lessons written by: the session's model (auto)", reply)
+        for line in (
+            "  1. main-prov/main-model — Hermes default model",
+            "  2. custom/qwen-local — alias local (own endpoint: refine cannot call it)",
+            "  3. fast-provider/fast-model — alias quick",
+            "  4. fast-provider/fast-big — provider fast-provider",
+            "  auto — the session's own model (default)",
+        ):
+            self.assertIn(line, reply)
+        self.assertIn("/refine model <number>", reply)
+        self.assertEqual(self.probe_calls, [])
+        self.assertFalse(journal.model_override_read_path().exists())
+
+    def test_picking_a_model_tests_it_and_then_writes_lessons_with_it(self):
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        reply = self._model_command(agent, "3")
+        self.assertEqual(self.probe_calls, [("fast-provider", "fast-model")])
+        self.assertIn("Lessons are now written by fast-provider/fast-model", reply)
+        self.assertEqual(
+            journal.read_model_override(),
+            {"provider": "fast-provider", "model": "fast-model", "auto_runs": True},
+        )
+        status = self._status_text(agent)
+        self.assertIn("lessons written by: fast-provider/fast-model on automatic passes", status)
+        row = self._auto_pass(agent, "picked")
+        self.assertEqual((row["outcome"], row["launch_parent"]), ("no_op", "-"))
+        self.assertEqual(self.pinned_calls[0][:2], ("fast-provider", "fast-model"))
+
+        reply = self._model_command(agent, "auto")
+        self.assertIn("the session's model", reply)
+        self.assertFalse(journal.model_override_read_path().exists())
+        self.assertIn("lessons written by: the session's model (auto)", self._status_text(agent))
+        row = self._auto_pass(agent, "back to auto")
+        self.assertEqual((row["proposer"], row["launch_parent"]), ("subagent", "session"))
+
+    def test_a_model_that_does_not_answer_is_not_switched_to(self):
+        agent = self.Agent("session")
+        self._host_models()
+        for kwargs, why in (
+            ({"probe": TimeoutError("request timed out")}, "request timed out"),
+            ({"probe_model": "main-model"}, "answered as main-model"),
+        ):
+            self._unbound_host_facade(**kwargs)
+            reply = self._model_command(agent, "4")
+            self.assertEqual(self.probe_calls, [("fast-provider", "fast-big")])
+            self.assertIn("Not switched", reply)
+            self.assertIn(why, reply)
+            self.assertFalse(journal.model_override_read_path().exists())
+
+    def test_a_pick_hermes_would_refuse_makes_no_call(self):
+        agent = self.Agent("session")
+        self._host_models(trust=False)
+        self._unbound_host_facade()
+        reply = self._model_command(agent, "3")
+        self.assertIn("Not switched", reply)
+        self.assertIn("allow_model_override: true", reply)
+        self.assertIn("allow_provider_override: true", reply)
+        self.assertEqual(self.probe_calls, [])
+        self._host_models()
+        for args, why in (("2", "own endpoint"), ("9", "between 1 and 4")):
+            reply = self._model_command(agent, args)
+            self.assertIn(why, reply)
+            self.assertEqual(self.probe_calls, [])
+        self.assertFalse(journal.model_override_read_path().exists())
+
+    def test_an_older_override_file_does_not_move_automatic_passes(self):
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        journal.write_model_override("fast-provider", "fast-model")
+        row = self._auto_pass(agent, "legacy file")
+        self.assertEqual((row["proposer"], row["launch_parent"]), ("subagent", "session"))
+        self.assertEqual(self.pinned_calls, [])
 
     def test_a_worker_whose_agent_is_gone_falls_back_instead_of_launching(self):
         """The capture is weak. An agent released before the worker runs leaves

@@ -64,8 +64,7 @@ registration warning and command help show which name is active.
 /refine dry-run session <session_id>
 /refine session <session_id>
 /refine model
-/refine model your-cheap-model
-/refine model your-provider/your-cheap-model
+/refine model 3
 /refine model auto
 /refine rollback 1f2a3b4c5d6e
 ```
@@ -83,14 +82,29 @@ session after confirming it through the read-only Hermes sessions table.
 
 That restart is the gateway's own (`request_restart`): it stops taking new turns, waits for turns in progress up to `restart_after_turn_timeout`, then stops what is still running (a long task, a subagent, a turn past the timeout). Sessions are kept in `state.db` and continue after the restart. The desktop button restarts the desktop backend straight away, which cuts off a reply the app is still receiving. So an update is a deliberate interruption, and it only ever starts from the user's own tap or command.
 
-`model` shows or sets the model refine asks for. Bare `model` prints the
-effective target and whether host trust allows it; `model <name>` or
-`model <provider>/<name>` pins one; `model auto` removes the override. `auto`
-returns to the next source in the priority order, which is the configured
-`plugins.entries.refine.llm` value when there is one, and the live Hermes model
-only when there is not. The override is stored in `model_override.json` inside
-`journal_dir` — refine does not put its own settings in the Hermes config. It
-writes there exactly once, for one key that is not its own: see below.
+`model` picks the model that writes lessons, without typing an id. Bare `model`
+shows which model writes them now and a numbered list of the models your
+Hermes config already names: the default model (`model.default` /
+`model.provider`), `model_aliases` and `model.aliases`, and each
+`providers.<name>` block's `default` and `models`. `model <number>` picks one:
+refine makes one short test call to it (no conversation content, not counted
+as a refine pass) and switches only if that model answers; otherwise it says
+why and changes nothing. From then on automatic passes write lessons with it,
+as with `llm.use_model_for_auto_runs` in
+[CONFIGURATION.md](CONFIGURATION.md); manual `/refine` keeps the session's
+model. `model auto` goes back to the session's model, and `/refine status`
+shows the current choice as `lessons written by:`.
+
+Hermes lets a plugin name a model only when `plugins.entries.refine.llm` has
+`allow_model_override: true` (and `allow_provider_override: true` for a
+model on another provider). Refine cannot set those itself; a pick without
+them makes no call and prints the lines to add. An alias with its own
+`base_url` is listed but cannot be picked: a plugin call names a provider and
+a model, not an endpoint. `model <name>` or `model <provider>/<name>` still
+work and go through the same test call. The pick is stored in
+`model_override.json` inside `journal_dir` — refine does not put its own
+settings in the Hermes config. It writes there exactly once, for one key that
+is not its own: see below.
 
 Both stores are validated the same way, and the test is the shape of the
 identifier: a provider must be a single token and a model id may be namespaced.
@@ -101,15 +115,16 @@ dropped and reported in `/refine status` and `/refine model`.
 In the command, **the first slash is always the provider separator** and every
 later one belongs to the model id: `/refine model openrouter/deepseek/deepseek-chat`
 pins provider `openrouter` and model `deepseek/deepseek-chat`. There is therefore
-no command form for a namespaced model with no provider — set
-`plugins.entries.refine.llm.model` for that. And a pinned provider only reaches
+no command form for a namespaced model with no provider — pick it by number, or
+set `plugins.entries.refine.llm.model`. And a pinned provider only reaches
 the host when `allow_provider_override` is true, which `/refine model` reports.
 
 Other text is passed to the proposal model as the manual reason. That includes
 text beginning with a subcommand word, with one deliberate exception: after
 `model`, a single token shaped like an identifier (`deepseek-v4`, `a/b`) is
-treated as a target, so `/refine model drift` pins a model rather than asking for
-a refinement about drift. Use `/refine drift` or `/refine model auto` to undo.
+treated as a target, so `/refine model drift` tries to pick a model named
+`drift` (and, with no such model, changes nothing) rather than asking for a
+refinement about drift. Use `/refine drift` for that.
 
 ### Messages from Refine Cycle
 
