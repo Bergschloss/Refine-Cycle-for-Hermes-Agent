@@ -7,6 +7,7 @@ All values have sensible defaults — config.yaml only provides overrides.
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -596,6 +597,49 @@ def picked_lesson_model() -> Optional[Dict[str, str]]:
     if override and override.get("auto_runs") is True:
         return override
     return None
+
+
+_CATALOG_TTL_SECONDS = 60.0
+_catalog_cache: Dict[str, Any] = {}
+
+
+def host_model_catalog() -> Optional[List[Dict[str, Any]]]:
+    """Providers and their models exactly as Hermes's own model picker lists them.
+
+    ``hermes_cli.inventory.build_models_payload`` on its GUI read path: provider
+    catalogs from the disk cache only and no live probes, so a slow provider never
+    stalls a chat command. Only providers with credentials are listed, each with the
+    model ids the host would accept. None on a Hermes without that inventory (the
+    picker then falls back to ``host_model_choices``). Cached for a minute, so a list
+    and the pick that follows it number the same rows.
+    """
+    now = time.monotonic()
+    if "value" in _catalog_cache and now - _catalog_cache["at"] < _CATALOG_TTL_SECONDS:
+        return _catalog_cache["value"]
+    try:
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+        payload = build_models_payload(
+            load_picker_context(), for_picker=True, non_blocking_catalogs=True,
+            probe_custom_providers=False,
+        )
+    except Exception:
+        logger.debug("refine: the host model inventory is not available", exc_info=True)
+        return None
+    providers: List[Dict[str, Any]] = []
+    for row in (payload or {}).get("providers") or []:
+        if not isinstance(row, dict):
+            continue
+        slug = str(row.get("slug") or "").strip()
+        models: List[str] = []
+        for item in row.get("models") or []:
+            model = str(item or "").strip()
+            if model and model not in models:
+                models.append(model)
+        if slug and models:
+            providers.append({"provider": slug, "name": str(row.get("name") or slug).strip(), "models": models})
+    value = providers or None
+    _catalog_cache.update(value=value, at=now)
+    return value
 
 
 def host_model_choices() -> List[Dict[str, Any]]:

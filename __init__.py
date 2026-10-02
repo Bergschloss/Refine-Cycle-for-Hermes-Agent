@@ -1100,10 +1100,28 @@ def _lesson_model_line() -> str:
 
 
 def _model_picker_text() -> str:
-    """The current lesson model and the numbered models Hermes already names."""
+    """The current lesson model and what to pick from.
+
+    With the host's model inventory: its providers, numbered, as Hermes's own
+    model picker lists them (a few hundred models do not fit one chat message).
+    Without it (an older Hermes): the models config.yaml names, numbered.
+    """
     name = _command_display_name()
     lines = [_lesson_model_line()]
     lines.extend(f"⚠ {issue}" for issue in config.effective_llm_target().get("issues", ()))
+    catalog = config.host_model_catalog()
+    if catalog:
+        lines.extend(["", "Providers your Hermes has (the same list as its model picker):"])
+        for number, row in enumerate(catalog, start=1):
+            count = len(row["models"])
+            lines.append(f"  {number}. {row['name']} — {count} model{'s' if count != 1 else ''}")
+        lines.append("  auto — the session's own model (default)")
+        lines.append(
+            f"Pick a provider with {name} model <number>, then a model with "
+            f"{name} model <number>.<number>. In a messaging chat a bare number works too, "
+            "for two minutes after a list. A pick is tested with one short call first."
+        )
+        return "\n".join(lines)
     lines.extend(["", "Models your Hermes has:"])
     choices = config.host_model_choices()
     for number, choice in enumerate(choices, start=1):
@@ -1117,6 +1135,83 @@ def _model_picker_text() -> str:
         "A pick is tested with one short call first."
     )
     return "\n".join(lines)
+
+
+def _provider_models_text(row_number: int, row: Dict[str, Any]) -> str:
+    """One provider's models, numbered ``<provider>.<model>`` for the pick."""
+    name = _command_display_name()
+    lines = [f"{row['name']} — pick a model with {name} model {row_number}.<number>:"]
+    lines.extend(
+        f"  {row_number}.{number} {model}" for number, model in enumerate(row["models"], start=1)
+    )
+    lines.append(f"{name} model shows the providers again; {name} model auto goes back to auto.")
+    return "\n".join(lines)
+
+
+# A bare number after a picker list, in a messaging chat, is that pick. Hermes runs
+# ``pre_gateway_dispatch`` on every incoming gateway message before dispatch, and a
+# rewrite there turns "3" into "/refine-cycle model 3", which the host then handles
+# as the command it is. Remembered per chat and sender, for two minutes after the
+# list was asked for; any other message, or a pick, ends it. The desktop app does
+# not run this hook, so there the command is typed in full.
+_PICKER_WINDOW_SECONDS = 120.0
+_picker_views: Dict[str, Tuple[str, float]] = {}
+_picker_views_lock = threading.Lock()
+def _model_command_match(text: str) -> Optional["re.Match[str]"]:
+    """``/<this plugin's command> model [arg]``, as typed or as a messaging app sends it
+    (Telegram has no hyphen in commands and may append ``@botname``). Only the name the
+    plugin registered: on a Hermes with its own ``/refine``, that one is not ours."""
+    names = {_COMMAND_NAME, _COMMAND_NAME.replace("-", "_")}
+    pattern = r"^/(?:%s)(?:@\S+)?\s+model(?:\s+(\S+))?\s*$" % "|".join(re.escape(n) for n in names)
+    return re.match(pattern, text, re.IGNORECASE)
+
+
+def _picker_chat_key(event: Any) -> str:
+    source = getattr(event, "source", None)
+    platform = getattr(source, "platform", None)
+    platform = str(getattr(platform, "value", platform) or "")
+    chat = str(getattr(source, "chat_id", "") or "")
+    user = str(getattr(source, "user_id", "") or "")
+    return f"{platform}:{chat}:{user}" if chat else ""
+
+
+def _on_pre_gateway_dispatch(event: Any = None, **kwargs: Any) -> Optional[Dict[str, str]]:
+    """Read a bare number after a picker list as the pick; leave everything else alone."""
+    try:
+        text = str(getattr(event, "text", "") or "").strip()
+        key = _picker_chat_key(event)
+        if not text or not key:
+            return None
+        now = time.monotonic()
+        command = _model_command_match(text)
+        with _picker_views_lock:
+            if command:
+                argument = command.group(1) or ""
+                if not argument:
+                    _picker_views[key] = ("", now)
+                elif argument.isdigit() and config.host_model_catalog():
+                    _picker_views[key] = (argument, now)  # a provider's models are shown
+                else:
+                    _picker_views.pop(key, None)
+                return None
+            view = _picker_views.get(key)
+            if view is None:
+                return None
+            stage, shown_at = view
+            if now - shown_at > _PICKER_WINDOW_SECONDS or not text.isdigit():
+                _picker_views.pop(key, None)
+                return None
+            if not stage and config.host_model_catalog():
+                _picker_views[key] = (text, now)
+                argument = text
+            else:
+                _picker_views.pop(key, None)
+                argument = f"{stage}.{text}" if stage else text
+        return {"action": "rewrite", "text": f"{_command_display_name()} model {argument}"}
+    except Exception:
+        # Fail open: the message reaches the agent unchanged.
+        logger.debug("refine picker number hook failed", exc_info=True)
+        return None
 
 
 def _trust_lines_needed(provider: str) -> List[str]:
@@ -1240,6 +1335,36 @@ def _handle_model_subcommand(remainder: str) -> str:
             "failed": "⚠ Could not remove the picked model, so it is still in use",
         }[outcome]
         return f"{prefix}: {_lesson_model_line()}."
+    catalog = config.host_model_catalog()
+    if catalog:
+        position = re.fullmatch(r"(\d+)(?:\.(\d+))?", remainder)
+        if position:
+            row_number = int(position.group(1))
+            if not 1 <= row_number <= len(catalog):
+                return f"❌ Pick a provider between 1 and {len(catalog)}.\n\n" + _model_picker_text()
+            row = catalog[row_number - 1]
+            if position.group(2) is None:
+                return _provider_models_text(row_number, row)
+            model_number = int(position.group(2))
+            if not 1 <= model_number <= len(row["models"]):
+                return (
+                    f"❌ Pick a model between {row_number}.1 and {row_number}.{len(row['models'])}."
+                    "\n\n" + _provider_models_text(row_number, row)
+                )
+            return _pick_lesson_model(row["provider"], row["models"][model_number - 1], listed=True)
+        typed_provider, typed_model = (
+            remainder.split("/", 1) if "/" in remainder else ("", remainder)
+        )
+        for row in catalog:
+            same_provider = bool(typed_provider) and row["provider"].casefold() == typed_provider.casefold()
+            for model in row["models"]:
+                # "openrouter/anthropic/x" names the provider; "anthropic/x" may be
+                # an OpenRouter id as a whole.
+                if (same_provider and core._same_model_id(model, typed_model)) or (
+                    model.casefold() == remainder.casefold()
+                ):
+                    # A listed model typed by name: the provider Hermes lists it under.
+                    return _pick_lesson_model(row["provider"], model, listed=True)
     choices = config.host_model_choices()
     if remainder.isdigit():
         index = int(remainder)
@@ -2090,6 +2215,12 @@ def register(ctx) -> None:
     ctx.register_hook("transform_llm_output", _on_transform_llm_output)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
+    try:
+        # Hermes versions without this hook refuse the name; the picker then needs
+        # the command typed in full, as in the desktop app.
+        ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
+    except Exception:
+        logger.debug("refine: pre_gateway_dispatch is not available on this Hermes", exc_info=True)
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     _warn_if_core_patch_missing()

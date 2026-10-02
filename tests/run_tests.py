@@ -8335,6 +8335,7 @@ class RefineTests(unittest.TestCase):
                 "transform_llm_output",
                 "on_session_end",
                 "on_session_reset",
+                "pre_gateway_dispatch",
                 "subagent_start",
                 "subagent_stop",
             },
@@ -24216,6 +24217,84 @@ class PathTraceTests(unittest.TestCase):
     def _model_command(self, agent, args):
         with self.slash_command(agent):
             return asyncio_run(plugin_init._refine_command_entry(f"model {args}".strip()))
+
+    _CATALOG = [
+        {"provider": "openrouter", "name": "OpenRouter",
+         "models": ["anthropic/claude-x", "deepseek/deepseek-chat"]},
+        {"provider": "fast-provider", "name": "Fast", "models": ["fast-model", "fast-big"]},
+    ]
+
+    def test_with_the_host_inventory_the_picker_goes_provider_then_model(self):
+        # Hermes's own model picker lists every provider with credentials (live,
+        # 2026-10-03: about 230 models); the config-only list showed 7.
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        with patch.object(config, "host_model_catalog", return_value=self._CATALOG):
+            reply = self._model_command(agent, "")
+            for line in ("  1. OpenRouter — 2 models", "  2. Fast — 2 models",
+                         "  auto — the session's own model (default)", "model <number>.<number>"):
+                self.assertIn(line, reply)
+            reply = self._model_command(agent, "2")
+            self.assertIn("  2.1 fast-model", reply)
+            self.assertIn("  2.2 fast-big", reply)
+            for args, why in (("3", "between 1 and 2"), ("2.9", "between 2.1 and 2.2")):
+                self.assertIn(why, self._model_command(agent, args))
+            self.assertEqual(self.probe_calls, [])
+            reply = self._model_command(agent, "2.2")
+            self.assertEqual(self.probe_calls, [("fast-provider", "fast-big")])
+            self.assertIn("Lessons are now written by fast-provider/fast-big", reply)
+            self.probe_calls.clear()
+            reply = self._model_command(agent, "deepseek/deepseek-chat")
+            self.assertEqual(self.probe_calls, [("openrouter", "deepseek/deepseek-chat")])
+            self.assertIn("Lessons are now written by openrouter/deepseek/deepseek-chat", reply)
+
+    def _gateway_message(self, text, chat="1", user="u"):
+        return types.SimpleNamespace(text=text, source=types.SimpleNamespace(platform="telegram", chat_id=chat, user_id=user))
+
+    def test_a_bare_number_after_a_list_becomes_the_pick_in_that_chat_only(self):
+        plugin_init._picker_views.clear()
+        self.addCleanup(plugin_init._picker_views.clear)
+        hook = plugin_init._on_pre_gateway_dispatch
+        name = plugin_init._command_display_name()
+        with patch.object(config, "host_model_catalog", return_value=self._CATALOG):
+            self.assertIsNone(hook(event=self._gateway_message(f"{name} model")))
+            self.assertIsNone(hook(event=self._gateway_message("2", chat="other")), "another chat is untouched")
+            self.assertEqual(hook(event=self._gateway_message("2")), {"action": "rewrite", "text": f"{name} model 2"})
+            self.assertEqual(hook(event=self._gateway_message("1")), {"action": "rewrite", "text": f"{name} model 2.1"})
+            self.assertIsNone(hook(event=self._gateway_message("1")), "a pick ends the window")
+
+            self.assertIsNone(hook(event=self._gateway_message(f"{name} model")))
+            self.assertIsNone(hook(event=self._gateway_message("thanks")))
+            self.assertIsNone(hook(event=self._gateway_message("2")), "any other message ends it")
+
+            self.assertIsNone(hook(event=self._gateway_message(f"{name} model")))
+            key = plugin_init._picker_chat_key(self._gateway_message("x"))
+            stage, _ = plugin_init._picker_views[key]
+            plugin_init._picker_views[key] = (stage, time.monotonic() - plugin_init._PICKER_WINDOW_SECONDS - 1)
+            self.assertIsNone(hook(event=self._gateway_message("2")), "two minutes later a number is just a number")
+
+    def test_without_the_host_inventory_a_bare_number_is_the_flat_pick(self):
+        plugin_init._picker_views.clear()
+        self.addCleanup(plugin_init._picker_views.clear)
+        hook = plugin_init._on_pre_gateway_dispatch
+        name = plugin_init._command_display_name()
+        with patch.object(config, "host_model_catalog", return_value=None):
+            hook(event=self._gateway_message(f"{name} model"))
+            self.assertEqual(hook(event=self._gateway_message("3")), {"action": "rewrite", "text": f"{name} model 3"})
+            self.assertIsNone(hook(event=self._gateway_message("4")))
+
+    def test_the_number_hook_follows_only_the_command_this_plugin_registered(self):
+        plugin_init._picker_views.clear()
+        self.addCleanup(plugin_init._picker_views.clear)
+        hook = plugin_init._on_pre_gateway_dispatch
+        with patch.object(plugin_init, "_COMMAND_NAME", "refine-cycle"), \
+             patch.object(config, "host_model_catalog", return_value=self._CATALOG):
+            hook(event=self._gateway_message("/refine model"))  # Hermes's own /refine
+            self.assertIsNone(hook(event=self._gateway_message("2")))
+            hook(event=self._gateway_message("/refine_cycle@my_bot model"))  # as Telegram sends it
+            self.assertEqual(hook(event=self._gateway_message("2")),
+                             {"action": "rewrite", "text": "/refine-cycle model 2"})
 
     def test_model_lists_the_models_hermes_has_and_auto(self):
         agent = self.Agent("session")

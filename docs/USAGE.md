@@ -83,11 +83,17 @@ session after confirming it through the read-only Hermes sessions table.
 That restart is the gateway's own (`request_restart`): it stops taking new turns, waits for turns in progress up to `restart_after_turn_timeout`, then stops what is still running (a long task, a subagent, a turn past the timeout). Sessions are kept in `state.db` and continue after the restart. The desktop button restarts the desktop backend straight away, which cuts off a reply the app is still receiving. So an update is a deliberate interruption, and it only ever starts from the user's own tap or command.
 
 `model` picks the model that writes lessons, without typing an id. Bare `model`
-shows which model writes them now and a numbered list of the models your
-Hermes config already names: the default model (`model.default` /
-`model.provider`), `model_aliases` and `model.aliases`, and each
-`providers.<name>` block's `default` and `models`. `model <number>` picks one:
-refine makes one short test call to it (no conversation content, not counted
+shows which model writes them now and the providers your Hermes has, numbered,
+from the same list as Hermes's own model picker (every provider with
+credentials). `model <number>` shows that provider's models numbered
+`<number>.<number>`, and `model 3.12` picks one. In a messaging chat (Telegram
+and the like) a bare number works too for two minutes after a list: `3`, then
+`12`; any other message ends that. The desktop app does not pass messages
+through the hook this needs, so there the command is typed in full. On a Hermes
+without that model list, `model` falls back to the models your config names
+(`model.default` / `model.provider`, `model_aliases` and `model.aliases`, and
+each `providers.<name>` block's `default` and `models`), picked with
+`model <number>`. Either way refine makes one short test call to the pick (no conversation content, not counted
 as a refine pass) and switches only if that model answers; otherwise it says
 why and changes nothing. From then on automatic passes write lessons with it,
 as with `llm.use_model_for_auto_runs` in
