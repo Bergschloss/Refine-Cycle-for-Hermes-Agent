@@ -4767,10 +4767,12 @@ def _same_model_id(configured: str, reported: str) -> bool:
         base, sep, variant = name.rpartition(":")
         if sep and variant in _OPENROUTER_ROUTING_VARIANTS:
             name = base
-        return _MODEL_SNAPSHOT_SUFFIX.sub("", name)
+        return name
 
     left, right = canonical(configured), canonical(reported)
-    return bool(left) and left == right
+    # The date is forgiven on the answer only: an undated pin accepts any
+    # snapshot of it, but a dated pin is that snapshot and no other.
+    return bool(left) and left in (right, _MODEL_SNAPSHOT_SUFFIX.sub("", right))
 
 
 def _bound_route_identity(llm: Any) -> Dict[str, str]:

@@ -94,7 +94,8 @@ off if the session model was chosen so the evidence stays local.
   ignores what providers add to an id: casing, a vendor prefix
   (`deepseek/deepseek-chat` answered as `deepseek-chat`), an OpenRouter routing
   variant (`:free`, `:nitro`, `:floor`, `:beta`, `:extended`, `:online`) and a
-  snapshot date (`gpt-4o` answered as `gpt-4o-2024-08-06`). Any other
+  snapshot date on the answer (`gpt-4o` answered as `gpt-4o-2024-08-06`; a
+  dated `llm.model` must come back with that same date). Any other
   difference (`gpt-4o-mini`, `qwen3:14b` for `qwen3:8b`) counts as another
   model; if your provider still reports yours differently, set `llm.model` to
   the id it reports.

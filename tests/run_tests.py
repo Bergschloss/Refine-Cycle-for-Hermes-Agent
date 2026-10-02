@@ -23848,6 +23848,8 @@ class PathTraceTests(unittest.TestCase):
         )
         self.assertIn("llm.allowed_session_models", entry["reason"])
         self.assertEqual(core.last_auto_event()["code"], "session_model_not_allowed")
+        # The skip is an attempt for auto_cooldown_minutes, as documented.
+        self.assertEqual(journal.last_attempt_ts(), entry["ts"])
 
         status = self._status_text(agent)
         self.assertIn(
@@ -24032,9 +24034,11 @@ class PathTraceTests(unittest.TestCase):
             ("deepseek/deepseek-chat", "deepseek-chat"),
             ("deepseek-chat", "deepseek/deepseek-chat"),
             ("Qwen3.8-Flash-Next-UD-Q4_K_XL", "qwen3.8-flash-next-ud-q4_k_xl"),
-            ("gpt-4o-2024-08-06", "gpt-4o"),
+            ("gpt-4o-2024-08-06", "gpt-4o-2024-08-06"),
         ]
         different = [
+            ("gpt-4o-2024-08-06", "gpt-4o"),
+            ("gpt-4o-2024-05-13", "gpt-4o-2024-08-06"),
             ("gpt-4o", "gpt-4o-mini"),
             ("gpt-4o-mini", "gpt-4o"),
             ("poolside/laguna-s-2.1:free", "deepseek/deepseek-v4.1-flash"),
