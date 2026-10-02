@@ -606,7 +606,17 @@ def host_model_choices() -> List[Dict[str, Any]]:
     def add(provider: Any, model: Any, label: str, reachable: bool = True) -> None:
         provider = str(provider or "").strip()
         model = str(model or "").strip()
-        if not model or (provider, model) in seen:
+        if not model:
+            return
+        if (provider, model) in seen:
+            # First label wins, except that a callable entry replaces an
+            # own-endpoint alias of the same provider/model: the model is
+            # pickable, so the list must not show it as unpickable.
+            for choice in choices:
+                if (choice["provider"], choice["model"]) == (provider, model):
+                    if reachable and not choice["reachable"]:
+                        choice.update(label=label, reachable=True)
+                    break
             return
         seen.add((provider, model))
         choices.append({"provider": provider, "model": model, "label": label,
@@ -632,8 +642,10 @@ def host_model_choices() -> List[Dict[str, Any]]:
     if isinstance(simple, dict):
         for name, value in simple.items():
             if isinstance(value, dict):
+                # _load_direct_aliases reads a dict entry here too, with the
+                # provider defaulting to the current one, then to "custom".
                 own_endpoint = bool(str(value.get("base_url", "") or "").strip())
-                add(value.get("provider") or default_provider, value.get("model"),
+                add(value.get("provider") or default_provider or "custom", value.get("model"),
                     f"alias {name}" + (" (own endpoint: refine cannot call it)"
                                        if own_endpoint else ""),
                     reachable=not own_endpoint)

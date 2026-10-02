@@ -24261,21 +24261,39 @@ class PathTraceTests(unittest.TestCase):
     def test_the_picker_reads_list_models_and_bare_aliases_as_hermes_does(self):
         FakeHost.config["model"] = {
             "default": "main-model", "provider": "main-prov",
-            "aliases": {"short": "bare-model", "routed": "other-prov/routed-model"},
+            "aliases": {
+                "short": "bare-model", "routed": "other-prov/routed-model",
+                # Dict entries, as hermes_cli/model_switch.py _load_direct_aliases reads them.
+                "boxed": {"model": "boxed-model"},
+                "boxed-own": {"model": "far-model", "provider": "far",
+                              "base_url": "http://far.example/v1"},
+            },
         }
         FakeHost.config["providers"] = {
             "listed": {"models": ["list-a", "list-b", 7]},
             "broken": "not a block",
+            "far": {"models": ["far-model"]},
         }
         self.assertEqual(
-            [(c["provider"], c["model"], c["label"]) for c in config.host_model_choices()],
+            [(c["provider"], c["model"], c["label"], c["reachable"])
+             for c in config.host_model_choices()],
             [
-                ("main-prov", "main-model", "Hermes default model"),
-                ("main-prov", "bare-model", "alias short"),
-                ("other-prov", "routed-model", "alias routed"),
-                ("listed", "list-a", "provider listed"),
-                ("listed", "list-b", "provider listed"),
+                ("main-prov", "main-model", "Hermes default model", True),
+                ("main-prov", "bare-model", "alias short", True),
+                ("other-prov", "routed-model", "alias routed", True),
+                ("main-prov", "boxed-model", "alias boxed", True),
+                # Listed first as an own-endpoint alias, then named by its
+                # provider block: pickable, under the provider's label.
+                ("far", "far-model", "provider far", True),
+                ("listed", "list-a", "provider listed", True),
+                ("listed", "list-b", "provider listed", True),
             ],
+        )
+        FakeHost.config["model"] = {"aliases": {"boxed": {"model": "boxed-model"}}}
+        FakeHost.config["providers"] = {}
+        self.assertEqual(
+            [(c["provider"], c["model"]) for c in config.host_model_choices()],
+            [("custom", "boxed-model")],
         )
 
     def test_a_picked_model_never_reaches_a_manual_pass(self):
@@ -24297,6 +24315,18 @@ class PathTraceTests(unittest.TestCase):
         journal.write_model_override("fast-provider", "legacy-model")
         self.assertEqual(config.effective_llm_target(include_picked=False)["model"],
                          "legacy-model")
+
+    def test_a_pick_that_lost_its_trust_flag_says_so(self):
+        agent = self.Agent("session")
+        self._host_models()
+        journal.write_model_override("fast-provider", "fast-model", auto_runs=True)
+        FakeHost.entry_config()["llm"]["allow_provider_override"] = False
+        self.assertIn(
+            "lessons written by: fast-provider/fast-model on automatic passes, the "
+            "session's model on manual ones; not in force: a provider is set but "
+            "llm.allow_provider_override is not on",
+            self._model_command(agent, ""),
+        )
 
     def test_an_older_override_file_does_not_move_automatic_passes(self):
         agent = self.Agent("session")

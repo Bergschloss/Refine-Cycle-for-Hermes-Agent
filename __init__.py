@@ -1082,10 +1082,14 @@ def _lesson_model_line() -> str:
         return "lessons written by: the session's model (auto)"
     target = picked or config.effective_llm_target()
     name = "/".join(p for p in (target.get("provider", ""), target.get("model", "")) if p)
-    return (
+    line = (
         f"lessons written by: {name or '(no model set)'} on automatic passes, "
         "the session's model on manual ones"
     )
+    problem = config.configured_model_problem()
+    if problem:
+        line += f"; not in force: {problem}, so automatic passes call no model now"
+    return line
 
 
 def _model_picker_text() -> str:
