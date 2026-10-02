@@ -350,7 +350,9 @@ def _pinned_target() -> Dict[str, str]:
     as a generic LLM failure and journaled as an ordinary no_op with success=true.
     """
     try:
-        effective = config.effective_llm_target()
+        # Callers that pass no target are not the automatic configured-model
+        # pass, which always passes its own; a /refine model pick is not theirs.
+        effective = config.effective_llm_target(include_picked=False)
     except Exception as exc:
         logger.warning(
             "Cannot resolve the refine model target: %s", str(exc)

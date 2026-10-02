@@ -5871,7 +5871,9 @@ def _refine_once(
     # as a substitution.
     _intended_target: Dict[str, str] = {"provider": "", "model": ""}
     try:
-        _effective = config.effective_llm_target()
+        # A /refine model pick belongs to automatic passes on the configured
+        # model, never to a manual one.
+        _effective = config.effective_llm_target(include_picked=configured_model)
         _run_target: Dict[str, str] = {}
         if _invocation_bound:
             _run_target_source = "invocation_bound"

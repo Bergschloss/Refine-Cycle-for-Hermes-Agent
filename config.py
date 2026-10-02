@@ -737,7 +737,7 @@ def live_main_target() -> Dict[str, str]:
         return {}
 
 
-def effective_llm_target() -> Dict[str, Any]:
+def effective_llm_target(include_picked: bool = True) -> Dict[str, Any]:
     """Resolve one effective model/provider target for refine.
 
     Priority:
@@ -801,6 +801,10 @@ def effective_llm_target() -> Dict[str, Any]:
         issues.append("model_override.json is present but unusable, so it was ignored")
     elif state == "unreadable":
         issues.append("model_override.json could not be read, so it was not applied")
+    if override and override.get("auto_runs") is True and not include_picked:
+        # A /refine model pick is for automatic passes only. A manual pass asks
+        # with include_picked=False and resolves as if no pick were stored.
+        override = None
     if override:
         return {
             "provider": override.get("provider", "") or cfg_provider,

@@ -24258,6 +24258,46 @@ class PathTraceTests(unittest.TestCase):
             self.assertEqual(self.probe_calls, [])
         self.assertFalse(journal.model_override_read_path().exists())
 
+    def test_the_picker_reads_list_models_and_bare_aliases_as_hermes_does(self):
+        FakeHost.config["model"] = {
+            "default": "main-model", "provider": "main-prov",
+            "aliases": {"short": "bare-model", "routed": "other-prov/routed-model"},
+        }
+        FakeHost.config["providers"] = {
+            "listed": {"models": ["list-a", "list-b", 7]},
+            "broken": "not a block",
+        }
+        self.assertEqual(
+            [(c["provider"], c["model"], c["label"]) for c in config.host_model_choices()],
+            [
+                ("main-prov", "main-model", "Hermes default model"),
+                ("main-prov", "bare-model", "alias short"),
+                ("other-prov", "routed-model", "alias routed"),
+                ("listed", "list-a", "provider listed"),
+                ("listed", "list-b", "provider listed"),
+            ],
+        )
+
+    def test_a_picked_model_never_reaches_a_manual_pass(self):
+        """The pick is for automatic passes. A manual pass is bound to the
+        session's route today, which alone keeps the pick out of it; the target
+        resolution must keep it out too, so a manual pass on an unbound facade
+        cannot be sent the picked model."""
+        self._host_models()
+        FakeHost.entry_config()["llm"].update({"model": "cfg-model"})
+        journal.write_model_override("fast-provider", "fast-model", auto_runs=True)
+        manual = config.effective_llm_target(include_picked=False)
+        self.assertEqual((manual["model"], manual["source"]), ("cfg-model", "config"))
+        self.assertEqual(config.effective_llm_target()["model"], "fast-model")
+        unbound = MockLlm({"action": "no_op", "reason": "nothing to change"})
+        core.refine_run(unbound, session_id="session")
+        self.assertTrue(unbound.calls)
+        self.assertTrue(all(call.get("model") != "fast-model" for call in unbound.calls))
+        # An older plain override keeps its old meaning on that path.
+        journal.write_model_override("fast-provider", "legacy-model")
+        self.assertEqual(config.effective_llm_target(include_picked=False)["model"],
+                         "legacy-model")
+
     def test_an_older_override_file_does_not_move_automatic_passes(self):
         agent = self.Agent("session")
         self._host_models()

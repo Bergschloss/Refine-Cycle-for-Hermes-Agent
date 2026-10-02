@@ -1194,6 +1194,7 @@ def _handle_model_subcommand(remainder: str) -> str:
             return (
                 f"❌ Not switched to {target}: it is an alias with its own endpoint, and "
                 "a plugin call can name only a provider and a model. Nothing was changed."
+                "\n\n" + _model_picker_text()
             )
         return _pick_lesson_model(choice["provider"], choice["model"])
     if _session_llm() is not None:
