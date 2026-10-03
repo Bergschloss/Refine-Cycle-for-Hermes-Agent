@@ -1428,14 +1428,13 @@ def _handle_model_subcommand(remainder: str) -> str:
     if position and config.host_model_inventory_available() and not config.catalog_shown(chat):
         # A number names a row of the list on screen. With none there any more (or
         # never), a list built now may order the rows differently, so it is shown
-        # instead of being picked from blind. When the host lists nothing, the config
-        # list is the one, and its order does not move: the number is picked from it.
-        if config.host_model_catalog(refresh=True, chat=chat):
-            return (
-                f"No list was shown here in the last {int(config.CATALOG_SNAPSHOT_SECONDS // 60)} "
-                "minutes, so the number is not picked. Pick from this one.\n\n"
-                + _model_picker_text(chat=chat, numbers=numbers)
-            )
+        # instead of being picked from blind -- the config list too, when the host
+        # lists nothing now: the number may have come from a host list.
+        return (
+            f"No list was shown here in the last {int(config.CATALOG_SNAPSHOT_SECONDS // 60)} "
+            "minutes, so the number is not picked. Pick from this one.\n\n"
+            + _model_picker_text(refresh=True, chat=chat, numbers=numbers)
+        )
     catalog = config.host_model_catalog(chat=chat)
     if catalog:
         if position:

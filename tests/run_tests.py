@@ -576,6 +576,16 @@ def load_plugin_init():
 
 
 plugin_init = load_plugin_init()
+
+
+def _no_host_inventory():
+    """The host model inventory is the one a test fakes (``_fake_inventory``), never
+    whatever Hermes this machine has: by default the picker is the config list."""
+    config._inventory_present.clear()
+    config._inventory_present["value"] = False
+
+
+_no_host_inventory()
 # register() starts the once-per-event checks on a thread that can reach GitHub.
 # NoticesTests exercises those functions directly; nothing else may start them.
 _real_start_background_checks = plugin_init.notices.start_background_checks
@@ -23527,6 +23537,10 @@ class PathTraceTests(unittest.TestCase):
         llm._call_meta.value = {}
         config._set_runtime_journal_dir(None)
         update_check._memory.clear()
+        _no_host_inventory()
+        config._catalog_snapshot.clear()
+        self.addCleanup(_no_host_inventory)
+        self.addCleanup(config._catalog_snapshot.clear)
 
         self.route = ContextVar("plugin_invocation_binding", default=None)
         self.parent = ContextVar("hermes_subagent_lifecycle_parent", default=None)
@@ -24383,7 +24397,7 @@ class PathTraceTests(unittest.TestCase):
         module.build_models_payload = lambda ctx, **kwargs: next(builds)
         config._inventory_present.clear()
         config._catalog_snapshot.clear()
-        self.addCleanup(config._inventory_present.clear)
+        self.addCleanup(_no_host_inventory)
         self.addCleanup(config._catalog_snapshot.clear)
         return patch.dict(sys.modules, {"hermes_cli.inventory": module})
 
@@ -24483,6 +24497,42 @@ class PathTraceTests(unittest.TestCase):
         self.assertIn("No list was shown here in the last 30 minutes", reply)
         self.assertIn("1. OpenRouter — 2 models", reply, "the list as it is now")
         self.assertEqual(self.probe_calls, [], "nothing picked")
+
+    def test_a_number_from_an_expired_list_is_not_picked_from_the_config_list_either(self):
+        # The host lists nothing now (a catalog failed, a key was removed): the number
+        # on screen named a host row, so the config list is shown, not picked from.
+        shown = {"providers": [{"slug": "fast-provider", "name": "Fast", "models": ["fast-model", "fast-big"]}]}
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        with self._fake_inventory(shown, {"providers": []}):
+            self._model_command(agent, "")
+            for kept in config._catalog_snapshot.values():
+                kept["at"] -= config.CATALOG_SNAPSHOT_SECONDS + 1
+            reply = self._model_command(agent, "3")
+        self.assertIn("No list was shown here", reply)
+        self.assertIn("Models your Hermes has:", reply)
+        self.assertEqual(self.probe_calls, [])
+
+    def test_a_model_typed_by_name_is_found_in_the_host_list(self):
+        payload = {"providers": [
+            {"slug": "openrouter", "name": "OpenRouter", "models": ["anthropic/x", "fast-model", "shared/m"]},
+            {"slug": "other", "name": "Other", "models": ["shared/m", "own-model"]},
+        ]}
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        for typed, expected in (
+            ("fast-model", ("fast-provider", "fast-model")),      # config.yaml names it: its provider
+            ("openrouter/anthropic/x", ("openrouter", "anthropic/x")),  # provider/model in a row
+            ("anthropic/x", ("openrouter", "anthropic/x")),        # an OpenRouter id as a whole
+            ("shared/m", ("openrouter", "shared/m")),              # several rows: the first, as Hermes orders them
+            ("other/own-model", ("other", "own-model")),
+        ):
+            self.probe_calls.clear()
+            with self._fake_inventory(payload):
+                self._model_command(agent, typed)
+            self.assertEqual(self.probe_calls, [expected], typed)
 
     def test_expired_lists_are_dropped(self):
         payload = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}

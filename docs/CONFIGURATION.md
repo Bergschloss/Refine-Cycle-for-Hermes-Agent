@@ -67,8 +67,9 @@ llm:
 
 Off, every pass runs on the session's own model, as before. On, automatic
 passes (turn trigger and session end) send the evidence to `llm.model` /
-`llm.provider` instead. `/refine model <number>` turns the same thing on
-without editing this file: it picks from the models your config names, tests
+`llm.provider` instead. `/refine model` turns the same thing on
+without editing this file: it picks from the providers and models Hermes lists
+in its own model picker (on an older Hermes, from the models your config names), tests
 the pick with one short call, and stores it in refine's own
 `model_override.json` (see [USAGE.md](USAGE.md)); the trust flags above are
 still needed. Manual passes (`/refine`, `refine_run`, dry runs) keep the
