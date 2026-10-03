@@ -850,7 +850,9 @@ _BACKEND_ID = f"{os.getpid()}-{time.time():.6f}"
 # When the desktop half last asked THIS process for its state (monotonic, 0 =
 # never). Only a desktop backend is asked, and the half asks at least every ten
 # minutes while it runs (IDLE_POLL_MS in desktop/plugin.js), so a quarter of an
-# hour without a question means nobody is there to restart this process.
+# hour without a question means nobody is there to restart this process. A plain
+# float, written by the half's poll and read by a typed command without a lock:
+# a stale read only shifts the window by one poll.
 _desktop_half_seen = 0.0
 _DESKTOP_HALF_FRESH_SECONDS = 15 * 60
 # The desktop half listens for ``plugin.refine.desktop.changed``: the job started
