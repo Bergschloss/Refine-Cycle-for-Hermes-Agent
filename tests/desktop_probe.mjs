@@ -42,6 +42,7 @@ export const host = {
   state: { profile: { get: () => 'default' } },
   request: async (name, args) => {
     calls.request.push([name, args])
+    if (globalThis.__hold) await globalThis.__hold
     if (globalThis.__backendDown) throw new Error('backend restarting')
     return { output: JSON.stringify(globalThis.__state) }
   },
@@ -375,6 +376,39 @@ listeners10['plugin.refine.desktop.changed']?.({ type: 'plugin.refine.desktop.ch
 requests = calls.request.length
 await advance(60 * 60 * 1000)
 check('an event after dispose starts nothing', calls.request.length - requests, 0)
+
+// 11. The event lands while a poll is still waiting for its answer: two questions
+//     in flight, both answered "done". The job is still reported and the backend
+//     restarted once, because each answer checks and marks it in one step.
+withBridge()
+recycled = 0
+globalThis.__state = state()
+const ctx11 = context()
+const listeners11 = {}
+ctx11.onEvent = (type, fn) => {
+  listeners11[type] = fn
+  return () => delete listeners11[type]
+}
+plugin.register(ctx11)
+await advance(1)
+let release11
+globalThis.__hold = new Promise((resolve) => { release11 = resolve })
+globalThis.__state = state({
+  job: { status: 'done', started: 11, restart: true, reply: 'RC updated to 1.3.13.' }
+})
+const before11 = calls.request.length
+listeners11['plugin.refine.desktop.changed']({ type: 'plugin.refine.desktop.changed', payload: {} })
+await advance(1)
+listeners11['plugin.refine.desktop.changed']({ type: 'plugin.refine.desktop.changed', payload: {} })
+await advance(1)
+check('two questions are in flight at once', calls.request.length - before11, 2)
+globalThis.__hold = null
+release11()
+await advance(1)
+check('two overlapping answers report the job once', messages(), ['RC updated to 1.3.13. Restarting Hermes…'])
+await advance(1600)
+check('two overlapping answers restart the backend once', recycled, 1)
+dispose()
 
 console.log(failures ? `${failures} failed` : 'all ok')
 process.exit(failures ? 1 : 0)

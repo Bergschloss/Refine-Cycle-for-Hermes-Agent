@@ -25577,6 +25577,7 @@ class NoticesTests(unittest.TestCase):
             self.notices.desktop_state()
             reply = asyncio_run(plugin_init._refine_command_entry("fix"))
         self.assertEqual(reply, "♾️ Refine Cycle fixed.")
+        self.assertNotIn("Restarting", reply, "only the half can restart this backend")
         self.assertTrue(self.notices._job["restart"])
         restart.assert_not_called()
 
