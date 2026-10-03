@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import asyncio
+import functools
 import contextvars
 import inspect
 import threading
@@ -1099,19 +1100,20 @@ def _lesson_model_line() -> str:
     return line
 
 
-def _model_picker_text() -> str:
+def _model_picker_text(*, refresh: bool = False) -> str:
     """The current lesson model and what to pick from.
 
-    With the host's model inventory: its providers, numbered, as Hermes's own
-    model picker lists them (a few hundred models do not fit one chat message).
-    Without it (an older Hermes): the models config.yaml names, numbered.
+    With the host's model inventory: its providers, numbered, as Hermes's model
+    picker lists them (a few hundred models do not fit one chat message). Without it
+    (an older Hermes): the models config.yaml names, numbered. ``refresh`` lists the
+    providers anew; otherwise the list shown last is shown again with its numbers.
     """
     name = _command_display_name()
     lines = [_lesson_model_line()]
     lines.extend(f"⚠ {issue}" for issue in config.effective_llm_target().get("issues", ()))
-    catalog = config.host_model_catalog()
+    catalog = config.host_model_catalog(refresh=refresh)
     if catalog:
-        lines.extend(["", "Providers your Hermes has (the same list as its model picker):"])
+        lines.extend(["", "Providers your Hermes lists in its model picker:"])
         for number, row in enumerate(catalog, start=1):
             count = len(row["models"])
             lines.append(f"  {number}. {row['name']} — {count} model{'s' if count != 1 else ''}")
@@ -1167,46 +1169,83 @@ def _model_command_match(text: str) -> Optional["re.Match[str]"]:
 
 
 def _picker_chat_key(event: Any) -> str:
+    """One picker conversation: the bot profile, the chat and the sender.
+
+    With ``multiplex_profiles`` one gateway serves several bots, and in a direct
+    chat the chat id is the user's id for every bot, so the profile is part of it.
+    """
     source = getattr(event, "source", None)
     platform = getattr(source, "platform", None)
     platform = str(getattr(platform, "value", platform) or "")
+    profile = str(getattr(source, "profile", "") or "")
     chat = str(getattr(source, "chat_id", "") or "")
     user = str(getattr(source, "user_id", "") or "")
-    return f"{platform}:{chat}:{user}" if chat else ""
+    return f"{profile}|{platform}:{chat}:{user}" if chat and user else ""
+
+
+def _shown_catalog() -> Optional[List[Dict[str, Any]]]:
+    """The provider list last shown, without building one (this runs on the gateway loop)."""
+    return config.shown_model_catalog() if config.host_model_inventory_available() else None
 
 
 def _on_pre_gateway_dispatch(event: Any = None, **kwargs: Any) -> Optional[Dict[str, str]]:
-    """Read a bare number after a picker list as the pick; leave everything else alone."""
+    """Read a bare number after a picker list as the pick; leave everything else alone.
+
+    It runs on the gateway's event loop before the sender is authorised, so it does no
+    more than compare text: no catalog is built here, and a rewrite only produces the
+    command the sender could have typed, which the host then authorises as usual.
+    """
     try:
         text = str(getattr(event, "text", "") or "").strip()
         key = _picker_chat_key(event)
         if not text or not key:
             return None
+        # Only in a direct chat with the bot, and only a message meant for it: in a
+        # group a number may be meant for a person, and an unaddressed message or a
+        # reply to another prompt is not the picker's.
+        source = getattr(event, "source", None)
+        if str(getattr(source, "chat_type", "dm") or "dm") != "dm" or getattr(event, "reply_expected", None) is False:
+            return None
         now = time.monotonic()
         command = _model_command_match(text)
         with _picker_views_lock:
+            for old in [k for k, (_, at) in _picker_views.items() if now - at > _PICKER_WINDOW_SECONDS]:
+                del _picker_views[old]
             if command:
                 argument = command.group(1) or ""
+                shown = _shown_catalog()
                 if not argument:
                     _picker_views[key] = ("", now)
-                elif argument.isdigit() and config.host_model_catalog():
-                    _picker_views[key] = (argument, now)  # a provider's models are shown
+                elif argument.isdigit() and shown:
+                    # A provider's models are shown, or (out of range) the providers again.
+                    _picker_views[key] = (argument if 1 <= int(argument) <= len(shown) else "", now)
                 else:
                     _picker_views.pop(key, None)
                 return None
             view = _picker_views.get(key)
             if view is None:
                 return None
-            stage, shown_at = view
-            if now - shown_at > _PICKER_WINDOW_SECONDS or not text.isdigit():
+            stage, _ = view
+            if not text.isdigit():
                 _picker_views.pop(key, None)
                 return None
-            if not stage and config.host_model_catalog():
-                _picker_views[key] = (text, now)
+            shown = _shown_catalog()
+            number = int(text)
+            if shown and not stage:
+                # In range: that provider's models come next; out of range: the error
+                # shows the providers again, so the window stays on them.
+                _picker_views[key] = (text if 1 <= number <= len(shown) else "", now)
                 argument = text
+            elif shown:
+                argument = f"{stage}.{text}"
+                row = shown[int(stage) - 1] if 1 <= int(stage) <= len(shown) else None
+                if row is not None and 1 <= number <= len(row["models"]):
+                    _picker_views.pop(key, None)  # a pick ends it
+                else:
+                    _picker_views[key] = (stage, now)  # the models are shown again
             else:
-                _picker_views.pop(key, None)
-                argument = f"{stage}.{text}" if stage else text
+                _picker_views.pop(key, None)  # the config list: one number is the pick
+                argument = text
         return {"action": "rewrite", "text": f"{_command_display_name()} model {argument}"}
     except Exception:
         # Fail open: the message reaches the agent unchanged.
@@ -1326,7 +1365,7 @@ def _handle_model_subcommand(remainder: str) -> str:
     host answered, and a bare number is always a position in the list.
     """
     if not remainder:
-        return _model_picker_text()
+        return _model_picker_text(refresh=True)
     if remainder == "auto":
         outcome = journal.clear_model_override()
         prefix = {
@@ -1352,20 +1391,25 @@ def _handle_model_subcommand(remainder: str) -> str:
                     "\n\n" + _provider_models_text(row_number, row)
                 )
             return _pick_lesson_model(row["provider"], row["models"][model_number - 1], listed=True)
-        typed_provider, typed_model = (
-            remainder.split("/", 1) if "/" in remainder else ("", remainder)
-        )
+    choices = config.host_model_choices()
+    if catalog and not remainder.isdigit():
+        provider, model = remainder.split("/", 1) if "/" in remainder else ("", remainder)
+        for choice in choices:
+            if choice["reachable"] and core._same_model_id(choice["model"], model) and (
+                not provider or choice["provider"].casefold() == provider.casefold()
+            ):
+                # Typed by name, and config.yaml names it: the provider it names it with.
+                return _pick_lesson_model(choice["provider"], choice["model"], listed=True)
         for row in catalog:
-            same_provider = bool(typed_provider) and row["provider"].casefold() == typed_provider.casefold()
-            for model in row["models"]:
+            same_provider = bool(provider) and row["provider"].casefold() == provider.casefold()
+            for listed in row["models"]:
                 # "openrouter/anthropic/x" names the provider; "anthropic/x" may be
                 # an OpenRouter id as a whole.
-                if (same_provider and core._same_model_id(model, typed_model)) or (
-                    model.casefold() == remainder.casefold()
+                if (same_provider and core._same_model_id(listed, model)) or (
+                    listed.casefold() == remainder.casefold()
                 ):
                     # A listed model typed by name: the provider Hermes lists it under.
-                    return _pick_lesson_model(row["provider"], model, listed=True)
-    choices = config.host_model_choices()
+                    return _pick_lesson_model(row["provider"], listed, listed=True)
     if remainder.isdigit():
         index = int(remainder)
         if not 1 <= index <= len(choices):
@@ -1448,12 +1492,17 @@ async def _update_command() -> str:
     """
     chat = _capture_active_chat()
     try:
+        # Only this process runs old code: restart it alone, never another one.
+        reload_only = await asyncio.to_thread(notices.needs_reload)
         reply, restart_head = await asyncio.to_thread(notices.run_update_command, chat)
         if restart_head:
             # New code only loads in a new process. Restart instead of asking the
             # user to: the gateway's own restart, scheduled after this reply.
             reply = await asyncio.to_thread(
-                notices.finish_with_restart, restart_head, asyncio.get_running_loop()
+                functools.partial(
+                    notices.finish_with_restart, restart_head, asyncio.get_running_loop(),
+                    this_process_only=reload_only,
+                )
             )
     except Exception as exc:
         logger.exception("refine update failed")
@@ -2215,12 +2264,16 @@ def register(ctx) -> None:
     ctx.register_hook("transform_llm_output", _on_transform_llm_output)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
+    # Only where Hermes has the hook: an older Hermes stores an unknown hook name with
+    # a warning on every start and never calls it. The picker then needs the command
+    # typed in full, as in the desktop app.
     try:
-        # Hermes versions without this hook refuse the name; the picker then needs
-        # the command typed in full, as in the desktop app.
-        ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
+        from hermes_cli import plugins as _host_plugins
+        _has_dispatch_hook = "pre_gateway_dispatch" in getattr(_host_plugins, "VALID_HOOKS", ())
     except Exception:
-        logger.debug("refine: pre_gateway_dispatch is not available on this Hermes", exc_info=True)
+        _has_dispatch_hook = False
+    if _has_dispatch_hook:
+        ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     _warn_if_core_patch_missing()

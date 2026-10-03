@@ -83,13 +83,16 @@ session after confirming it through the read-only Hermes sessions table.
 That restart is the gateway's own (`request_restart`): it stops taking new turns, waits for turns in progress up to `restart_after_turn_timeout`, then stops what is still running (a long task, a subagent, a turn past the timeout). Sessions are kept in `state.db` and continue after the restart. The desktop button restarts the desktop backend straight away, which cuts off a reply the app is still receiving. So an update is a deliberate interruption, and it only ever starts from the user's own tap or command.
 
 `model` picks the model that writes lessons, without typing an id. Bare `model`
-shows which model writes them now and the providers your Hermes has, numbered,
-from the same list as Hermes's own model picker (every provider with
-credentials). `model <number>` shows that provider's models numbered
-`<number>.<number>`, and `model 3.12` picks one. In a messaging chat (Telegram
-and the like) a bare number works too for two minutes after a list: `3`, then
-`12`; any other message ends that. The desktop app does not pass messages
-through the hook this needs, so there the command is typed in full. On a Hermes
+shows which model writes them now and the providers Hermes lists in its model
+picker (every provider with credentials), numbered. `model <number>` shows that
+provider's models numbered `<number>.<number>`, and `model 3.12` picks one. A
+pick by number names the row that was on screen: the list is kept as it was
+shown, and only a new bare `model` lists anew. In a direct chat with the bot
+(Telegram and the like) a bare number works too for two minutes after a list:
+`3`, then `12`; any other message ends that, and a number out of range shows the
+same list again. Not in groups, and not for a message the bot was not addressed
+in. The desktop app does not pass messages through the hook this needs, so
+there the command is typed in full. On a Hermes
 without that model list, `model` falls back to the models your config names
 (`model.default` / `model.provider`, `model_aliases` and `model.aliases`, and
 each `providers.<name>` block's `default` and `models`), picked with

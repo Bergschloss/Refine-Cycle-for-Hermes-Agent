@@ -8272,6 +8272,35 @@ class RefineTests(unittest.TestCase):
         refine.assert_not_called()
         self.assertFalse(plugin_init._AUTO_THREAD_GUARD.locked())
 
+    def test_the_number_hook_is_registered_only_where_hermes_has_it(self):
+        class RegisterContext:
+            llm = object()
+
+            def __init__(self):
+                self.hooks = {}
+
+            def register_command(self, *args, **kwargs):
+                return None
+
+            def register_tool(self, *args, **kwargs):
+                return None
+
+            def register_hook(self, name, callback):
+                self.hooks[name] = callback
+
+        for hooks, registered in ((None, False), ({"pre_llm_call"}, False), ({"pre_gateway_dispatch"}, True)):
+            host_plugins = types.ModuleType("hermes_cli.plugins")
+            if hooks is not None:
+                host_plugins.VALID_HOOKS = hooks
+            context = RegisterContext()
+            with patch.dict(sys.modules, {"hermes_cli.plugins": host_plugins}):
+                if "hermes_cli" in sys.modules:
+                    with patch.object(sys.modules["hermes_cli"], "plugins", host_plugins, create=True):
+                        plugin_init.register(context)
+                else:
+                    plugin_init.register(context)
+            self.assertEqual("pre_gateway_dispatch" in context.hooks, registered, hooks)
+
     def test_post_llm_hook_runs_in_background_without_a_bound_route(self):
         class RegisterContext:
             def __init__(self):
@@ -8335,7 +8364,6 @@ class RefineTests(unittest.TestCase):
                 "transform_llm_output",
                 "on_session_end",
                 "on_session_reset",
-                "pre_gateway_dispatch",
                 "subagent_start",
                 "subagent_stop",
             },
@@ -24249,17 +24277,27 @@ class PathTraceTests(unittest.TestCase):
             self.assertEqual(self.probe_calls, [("openrouter", "deepseek/deepseek-chat")])
             self.assertIn("Lessons are now written by openrouter/deepseek/deepseek-chat", reply)
 
-    def _gateway_message(self, text, chat="1", user="u"):
-        return types.SimpleNamespace(text=text, source=types.SimpleNamespace(platform="telegram", chat_id=chat, user_id=user))
+    def _gateway_message(self, text, chat="1", user="u", **source):
+        fields = {"platform": "telegram", "chat_id": chat, "user_id": user, **source}
+        reply_expected = fields.pop("reply_expected", None)
+        return types.SimpleNamespace(text=text, source=types.SimpleNamespace(**fields), reply_expected=reply_expected)
 
-    def test_a_bare_number_after_a_list_becomes_the_pick_in_that_chat_only(self):
+    def _shown(self, catalog):
+        """The hook reads only the list last shown; it never builds one."""
+        return patch.multiple(config, host_model_inventory_available=lambda: catalog is not None,
+                              shown_model_catalog=lambda: catalog)
+
+    def _hook_clean(self):
         plugin_init._picker_views.clear()
         self.addCleanup(plugin_init._picker_views.clear)
-        hook = plugin_init._on_pre_gateway_dispatch
-        name = plugin_init._command_display_name()
-        with patch.object(config, "host_model_catalog", return_value=self._CATALOG):
+        return plugin_init._on_pre_gateway_dispatch, plugin_init._command_display_name()
+
+    def test_a_bare_number_after_a_list_becomes_the_pick_in_that_chat_only(self):
+        hook, name = self._hook_clean()
+        with self._shown(self._CATALOG), patch.object(config, "host_model_catalog",
+                                                      side_effect=AssertionError("no catalog build in the hook")):
             self.assertIsNone(hook(event=self._gateway_message(f"{name} model")))
-            self.assertIsNone(hook(event=self._gateway_message("2", chat="other")), "another chat is untouched")
+            self.assertIsNone(hook(event=self._gateway_message("2", chat="other", user="other")), "another chat is untouched")
             self.assertEqual(hook(event=self._gateway_message("2")), {"action": "rewrite", "text": f"{name} model 2"})
             self.assertEqual(hook(event=self._gateway_message("1")), {"action": "rewrite", "text": f"{name} model 2.1"})
             self.assertIsNone(hook(event=self._gateway_message("1")), "a pick ends the window")
@@ -24273,28 +24311,86 @@ class PathTraceTests(unittest.TestCase):
             stage, _ = plugin_init._picker_views[key]
             plugin_init._picker_views[key] = (stage, time.monotonic() - plugin_init._PICKER_WINDOW_SECONDS - 1)
             self.assertIsNone(hook(event=self._gateway_message("2")), "two minutes later a number is just a number")
+            self.assertEqual(plugin_init._picker_views, {}, "expired views are dropped")
+
+    def test_an_out_of_range_number_keeps_the_window_on_the_list_shown_again(self):
+        hook, name = self._hook_clean()
+        with self._shown(self._CATALOG):
+            hook(event=self._gateway_message(f"{name} model"))
+            self.assertEqual(hook(event=self._gateway_message("9"))["text"], f"{name} model 9")
+            self.assertEqual(hook(event=self._gateway_message("2"))["text"], f"{name} model 2", "still on providers")
+            self.assertEqual(hook(event=self._gateway_message("7"))["text"], f"{name} model 2.7")
+            self.assertEqual(hook(event=self._gateway_message("1"))["text"], f"{name} model 2.1", "still on the models")
+            self.assertIsNone(hook(event=self._gateway_message("1")))
+
+    def test_the_number_hook_keeps_to_direct_messages_meant_for_this_bot(self):
+        hook, name = self._hook_clean()
+        with self._shown(self._CATALOG):
+            hook(event=self._gateway_message(f"{name} model", profile="bot-a"))
+            self.assertIsNone(hook(event=self._gateway_message("2", profile="bot-b")), "another bot of the same gateway")
+            self.assertEqual(hook(event=self._gateway_message("2", profile="bot-a"))["text"], f"{name} model 2")
+
+            plugin_init._picker_views.clear()
+            hook(event=self._gateway_message(f"{name} model", chat_type="group"))
+            self.assertIsNone(hook(event=self._gateway_message("2", chat_type="group")), "not in groups")
+            hook(event=self._gateway_message(f"{name} model"))
+            self.assertIsNone(hook(event=self._gateway_message("2", reply_expected=False)), "not an unaddressed message")
 
     def test_without_the_host_inventory_a_bare_number_is_the_flat_pick(self):
-        plugin_init._picker_views.clear()
-        self.addCleanup(plugin_init._picker_views.clear)
-        hook = plugin_init._on_pre_gateway_dispatch
-        name = plugin_init._command_display_name()
-        with patch.object(config, "host_model_catalog", return_value=None):
+        hook, name = self._hook_clean()
+        with self._shown(None):
             hook(event=self._gateway_message(f"{name} model"))
             self.assertEqual(hook(event=self._gateway_message("3")), {"action": "rewrite", "text": f"{name} model 3"})
             self.assertIsNone(hook(event=self._gateway_message("4")))
 
     def test_the_number_hook_follows_only_the_command_this_plugin_registered(self):
-        plugin_init._picker_views.clear()
-        self.addCleanup(plugin_init._picker_views.clear)
-        hook = plugin_init._on_pre_gateway_dispatch
-        with patch.object(plugin_init, "_COMMAND_NAME", "refine-cycle"), \
-             patch.object(config, "host_model_catalog", return_value=self._CATALOG):
-            hook(event=self._gateway_message("/refine model"))  # Hermes's own /refine
+        hook, _ = self._hook_clean()
+        with patch.object(plugin_init, "_COMMAND_NAME", "refine-cycle"), self._shown(self._CATALOG):
+            hook(event=self._gateway_message("/refine model"))  # the host's own /refine
             self.assertIsNone(hook(event=self._gateway_message("2")))
             hook(event=self._gateway_message("/refine_cycle@my_bot model"))  # as Telegram sends it
             self.assertEqual(hook(event=self._gateway_message("2")),
                              {"action": "rewrite", "text": "/refine-cycle model 2"})
+
+    def _fake_inventory(self, *payloads):
+        """hermes_cli.inventory as the host has it, answering each build with the next payload."""
+        builds = iter(payloads)
+        module = types.ModuleType("hermes_cli.inventory")
+        module.load_picker_context = lambda: object()
+        module.build_models_payload = lambda ctx, **kwargs: next(builds)
+        config._inventory_present.clear()
+        config._catalog_snapshot.clear()
+        self.addCleanup(config._inventory_present.clear)
+        self.addCleanup(config._catalog_snapshot.clear)
+        return patch.dict(sys.modules, {"hermes_cli.inventory": module})
+
+    def test_the_catalog_reads_the_host_payload_shape(self):
+        payload = {"providers": [
+            {"slug": "moa", "name": "Mixture of Agents", "models": ["moa-default"]},
+            {"slug": "openrouter", "name": "OpenRouter", "models": ["a/x", "a/x", " ", "b/y"]},
+            {"slug": "empty", "name": "Empty", "models": []},
+            {"name": "no slug", "models": ["z"]},
+            "not a row",
+        ], "model": "m", "provider": "p"}
+        with self._fake_inventory(payload):
+            self.assertEqual(config.host_model_catalog(refresh=True),
+                             [{"provider": "openrouter", "name": "OpenRouter", "models": ["a/x", "b/y"]}])
+
+    def test_a_pick_by_number_names_the_row_that_was_on_screen(self):
+        # The host warms a cold provider catalog in the background and orders rows by
+        # size, so a rebuild between the list and the pick renumbers the rows.
+        shown = {"providers": [{"slug": "fast-provider", "name": "Fast", "models": ["fast-model", "fast-big"]},
+                               {"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
+        rebuilt = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x", "a/y", "a/z"]},
+                                 {"slug": "fast-provider", "name": "Fast", "models": ["fast-big", "fast-model"]}]}
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        with self._fake_inventory(shown, rebuilt):
+            self.assertIn("1. Fast — 2 models", self._model_command(agent, ""))
+            self.assertIn("1.2 fast-big", self._model_command(agent, "1"))
+            self._model_command(agent, "1.2")
+        self.assertEqual(self.probe_calls, [("fast-provider", "fast-big")])
 
     def test_model_lists_the_models_hermes_has_and_auto(self):
         agent = self.Agent("session")
@@ -24690,6 +24786,51 @@ class NoticesTests(unittest.TestCase):
         self.assertEqual(restart_head, "")
         self.assertIn("is up to date", reply)
         self.assertTrue(state["working"])
+
+    def test_a_stale_process_restarts_without_asking_github_or_the_catalog(self):
+        # Offline, or installed from the catalog: the update path answers first and
+        # nothing restarted, so the [Fix] never worked.
+        with patch.object(update_check, "run_update", side_effect=AssertionError("no update path for a reload")), \
+             self._working(True), patch.object(self.notices, "code_stale", return_value=True):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(restart_head, "♾️ Refine Cycle fixed.")
+
+    def test_a_stale_cli_never_restarts_another_process(self):
+        with patch("subprocess.Popen") as popen, patch.object(self.notices, "_gateway_runner", return_value=None):
+            self.assertFalse(self.notices.restart_hermes(None, this_process_only=True))
+        popen.assert_not_called()
+        with patch.object(self.notices, "restart_hermes", return_value=False) as restart:
+            reply = self.notices.finish_with_restart("♾️ Refine Cycle fixed.", None, this_process_only=True)
+        restart.assert_called_once_with(None, this_process_only=True)
+        self.assertEqual(reply, "♾️ Refine Cycle fixed. It loads the next time Hermes starts.")
+
+    def test_a_restart_that_changed_nothing_is_not_repeated(self):
+        with self._working(False), patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_host_patched_on_disk", return_value=True), \
+             patch.object(self.notices, "_host_supported", return_value=True):
+            self.assertTrue(self.notices.needs_reload())
+            self.notices._record_reload()
+            self.assertTrue(self.notices.needs_reload(), "this process has not restarted yet")
+            with patch.object(self.notices, "_PROCESS_STARTED", time.time() + 60):
+                self.assertFalse(self.notices.needs_reload(), "restarted, and still broken: no loop")
+                with self._already_latest():
+                    reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(restart_head, "")
+        self.assertIn("could not fix itself", reply)
+
+    def test_the_desktop_fix_for_a_stale_backend_leaves_the_gateway_alone(self):
+        self.notices._job.clear()
+        self.addCleanup(self.notices._job.clear)
+        with patch.object(self.notices, "needs_reload", return_value=True), \
+             patch.object(self.notices, "restart_hermes") as restart, \
+             patch.object(self.notices, "check_update"):
+            self.notices.start_desktop_job()
+            for _ in range(250):
+                if self.notices._job.get("status") == "done":
+                    break
+                time.sleep(0.02)
+        self.assertEqual((self.notices._job.get("status"), self.notices._job.get("restart")), ("done", True))
+        restart.assert_not_called()
 
     def test_code_stale_compares_the_disk_with_what_was_loaded(self):
         with patch.object(self.notices, "_LOADED_STAMP", 100.0), \

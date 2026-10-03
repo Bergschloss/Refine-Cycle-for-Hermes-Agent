@@ -599,47 +599,88 @@ def picked_lesson_model() -> Optional[Dict[str, str]]:
     return None
 
 
-_CATALOG_TTL_SECONDS = 60.0
-_catalog_cache: Dict[str, Any] = {}
+# The numbered list the user was last shown. A pick by number resolves against it,
+# never against a rebuilt catalog: the host serves a cold provider from its curated
+# fallback and warms the real catalog in the background, and orders rows by size,
+# so a rebuild renumbers rows and "3.12" would name another model.
+_CATALOG_SNAPSHOT_SECONDS = 30 * 60.0
+_catalog_snapshot: Dict[str, Any] = {}
+_inventory_present: Dict[str, bool] = {}
 
 
-def host_model_catalog() -> Optional[List[Dict[str, Any]]]:
-    """Providers and their models exactly as Hermes's own model picker lists them.
+def host_model_inventory_available() -> bool:
+    """Whether this Hermes has the model inventory the picker lists (an import check only)."""
+    if "value" not in _inventory_present:
+        try:
+            from hermes_cli import inventory
+            _inventory_present["value"] = callable(getattr(inventory, "build_models_payload", None))
+        except Exception:
+            _inventory_present["value"] = False
+    return _inventory_present["value"]
 
-    ``hermes_cli.inventory.build_models_payload`` on its GUI read path: provider
-    catalogs from the disk cache only and no live probes, so a slow provider never
-    stalls a chat command. Only providers with credentials are listed, each with the
-    model ids the host would accept. None on a Hermes without that inventory (the
-    picker then falls back to ``host_model_choices``). Cached for a minute, so a list
-    and the pick that follows it number the same rows.
-    """
-    now = time.monotonic()
-    if "value" in _catalog_cache and now - _catalog_cache["at"] < _CATALOG_TTL_SECONDS:
-        return _catalog_cache["value"]
-    try:
-        from hermes_cli.inventory import build_models_payload, load_picker_context
-        payload = build_models_payload(
-            load_picker_context(), for_picker=True, non_blocking_catalogs=True,
-            probe_custom_providers=False,
-        )
-    except Exception:
-        logger.debug("refine: the host model inventory is not available", exc_info=True)
-        return None
+
+def _catalog_rows(payload: Any) -> List[Dict[str, Any]]:
+    """The host payload's provider rows as the picker numbers them."""
     providers: List[Dict[str, Any]] = []
-    for row in (payload or {}).get("providers") or []:
+    rows = payload.get("providers") if isinstance(payload, dict) else None
+    for row in rows or []:
         if not isinstance(row, dict):
             continue
         slug = str(row.get("slug") or "").strip()
+        # Mixture of Agents is a virtual provider the host unwraps to an aggregator;
+        # the host itself drops it for auxiliary-style callers.
+        if not slug or slug.lower() == "moa":
+            continue
         models: List[str] = []
         for item in row.get("models") or []:
             model = str(item or "").strip()
             if model and model not in models:
                 models.append(model)
-        if slug and models:
+        if models:
             providers.append({"provider": slug, "name": str(row.get("name") or slug).strip(), "models": models})
-    value = providers or None
-    _catalog_cache.update(value=value, at=now)
+    return providers
+
+
+def host_model_catalog(*, refresh: bool = False) -> Optional[List[Dict[str, Any]]]:
+    """Providers and their models as Hermes's own model picker lists them.
+
+    ``hermes_cli.inventory.build_models_payload`` on its GUI read path (canonical
+    order, provider catalogs from the disk cache only, no live probes), so a slow
+    provider never stalls a chat command. Only providers with credentials, each with
+    the model ids the host would accept. None on a Hermes without that inventory (the
+    picker then falls back to ``host_model_choices``).
+
+    ``refresh`` builds it anew and keeps it as the list the user is shown; without it
+    the last shown list is returned as it was, so the numbers a pick names are the
+    numbers that were on screen.
+    """
+    now = time.monotonic()
+    if not refresh and "value" in _catalog_snapshot and now - _catalog_snapshot["at"] < _CATALOG_SNAPSHOT_SECONDS:
+        return _catalog_snapshot["value"]
+    if not host_model_inventory_available():
+        return None
+    try:
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+        try:
+            payload = build_models_payload(
+                load_picker_context(), for_picker=True, non_blocking_catalogs=True,
+                probe_custom_providers=False, canonical_order=True,
+            )
+        except TypeError:  # a Hermes without one of these keyword arguments
+            payload = build_models_payload(load_picker_context())
+    except Exception:
+        logger.debug("refine: the host model inventory failed", exc_info=True)
+        return None
+    value = _catalog_rows(payload) or None
+    _catalog_snapshot.update(value=value, at=now)
     return value
+
+
+def shown_model_catalog() -> Optional[List[Dict[str, Any]]]:
+    """The list last shown, without building anything (None when none is fresh)."""
+    if "value" in _catalog_snapshot and time.monotonic() - _catalog_snapshot["at"] < _CATALOG_SNAPSHOT_SECONDS:
+        return _catalog_snapshot["value"]
+    return None
 
 
 def host_model_choices() -> List[Dict[str, Any]]:

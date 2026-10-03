@@ -18,6 +18,7 @@ failures, as ``notify`` does.
 import json
 import logging
 import os
+import hashlib
 import shutil
 import subprocess
 import tempfile
@@ -225,25 +226,67 @@ def plugin_working() -> bool:
 
 
 def _code_stamp() -> float:
-    """The newest modification time among this plugin's Python files on disk."""
+    """A digest of this plugin's Python files on disk ("" when they cannot be read).
+
+    By content, not modification time: a release install extracts a tarball whose
+    files carry commit times, which can be older than the copy they replace.
+    """
     try:
-        return max((path.stat().st_mtime for path in update_check._plugin_dir().glob("*.py")), default=0.0)
+        digest = hashlib.sha256()
+        for path in sorted(update_check._plugin_dir().glob("*.py")):
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
     except Exception:
-        return 0.0
+        return ""
 
 
-# The plugin code this process runs, as it was on disk when it was imported.
+# The plugin code this process runs, as it was on disk when it was imported, and
+# when that was: about when this process started.
 _LOADED_STAMP = _code_stamp()
+_PROCESS_STARTED = time.time()
 
 
 def code_stale() -> bool:
-    """The plugin on disk is newer than the code this process loaded.
+    """The plugin on disk differs from the code this process loaded.
 
     A plugin updated outside this process (another backend, `hermes plugins`, git)
     only runs after a restart; until then the Hermes desktop app's own backend keeps
     answering with the old code, whatever the gateway does.
     """
-    return bool(_LOADED_STAMP) and _code_stamp() > _LOADED_STAMP
+    if not _LOADED_STAMP:
+        return False
+    current = _code_stamp()
+    return bool(current) and current != _LOADED_STAMP
+
+
+def needs_reload() -> bool:
+    """Only a restart of this process can fix it: nothing to download or install.
+
+    The plugin on disk is not the one this process loaded, or Hermes's route patch
+    is on disk while this process loaded Hermes before it was there. Not when a
+    restart already happened for the same state and changed nothing: then saying
+    "fixed" and restarting again would loop, and the honest answer is the normal one.
+    """
+    stale = code_stale()
+    if not stale and (plugin_working() or not _host_patched_on_disk()):
+        return False
+    tried = _load().get("reload_tried")
+    if isinstance(tried, dict) and float(tried.get("at") or 0) < _PROCESS_STARTED and (
+        tried.get("hermes") == hermes_version() and tried.get("plugin") == _code_stamp()
+    ):
+        return False
+    return True
+
+
+def _record_reload() -> None:
+    try:
+        with _mutation() as state:
+            if state is not None:
+                state["reload_tried"] = {"at": time.time(), "hermes": hermes_version(), "plugin": _code_stamp()}
+                state["pending"] = {"kind": "fix", "version": update_check.installed_version()}
+    except Exception:
+        logger.warning("refine notices: cannot record the reload", exc_info=True)
 
 
 def _host_patched_on_disk() -> bool:
@@ -632,16 +675,20 @@ def _hermes_argv() -> List[str]:
     return []
 
 
-def restart_hermes(loop: Any = None) -> bool:
+def restart_hermes(loop: Any = None, *, this_process_only: bool = False) -> bool:
     """Restart Hermes so the new code loads. True when a restart was started.
 
     Inside the gateway: the gateway's own restart, a few seconds from now so this
     command's reply is delivered first. Elsewhere: ``hermes gateway restart`` when a
     gateway is running; a CLI process itself loads the new code on its next start.
+    With ``this_process_only``, only the gateway's own restart: another process is
+    never restarted for code that only this one is missing.
     """
     # The loop check first: without one the runner cannot be used at all, and
     # finding it walks the whole heap. Every desktop and CLI call passes None.
     runner = _gateway_runner() if loop is not None else None
+    if runner is None and this_process_only:
+        return False
     if runner is not None:
         try:
             from gateway.restart import is_container_restart_context, is_gateway_supervisor_process
@@ -687,6 +734,15 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
     head, so the caller can say "Restarting Hermes…" only when it really is.
     """
     remember_chat(chat)
+    # First, and without the network or the install source: a process that runs
+    # older code than the disk holds needs only a restart. Checked after GitHub, an
+    # offline check or a catalog install answered first and nothing ever restarted
+    # (live, 2026-10-03: the desktop backend kept the old code through every Fix).
+    # The caller restarts only this process (``needs_reload`` before the call).
+    if needs_reload():
+        _record_reload()
+        head = f"{BRAND} fixed."
+        return head, head
     was_working = plugin_working()
     result = update_check.run_update()
     outcome = result.get("outcome")
@@ -718,20 +774,6 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
             head = f"{head} {host_note}"
         return head, head
     if outcome == "already_latest":
-        # Everything on disk is already right, but this process loaded an older copy:
-        # Hermes was updated and re-patched while it ran, or the plugin was updated
-        # outside it. Only a restart loads it, so say "fixed" and restart rather than
-        # "could not fix itself" with nothing changing (live, 2026-10-03: the desktop
-        # backend kept the old code through every Fix).
-        if code_stale() or (not was_working and _host_patched_on_disk()):
-            head = f"{BRAND} fixed."
-            try:
-                with _mutation() as state:
-                    if state is not None:
-                        state["pending"] = {"kind": "fix", "version": update_check.installed_version()}
-            except Exception:
-                logger.warning("refine notices: cannot record the pending confirmation", exc_info=True)
-            return head, head
         if was_working:
             return f"{BRAND} {plain_version(update_check.installed_version())} is up to date.", ""
         if _host_supported() is False:
@@ -742,9 +784,14 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None) -> Tuple[str
     return f"{BRAND} update failed. {message}".strip(), ""
 
 
-def finish_with_restart(head: str, loop: Any = None) -> str:
-    """Restart Hermes and say so; without anything to restart, say when it loads."""
-    if restart_hermes(loop):
+def finish_with_restart(head: str, loop: Any = None, *, this_process_only: bool = False) -> str:
+    """Restart Hermes and say so; without anything to restart, say when it loads.
+
+    ``this_process_only``: only this process runs old code (``needs_reload``), so
+    restarting a gateway from a CLI process would cut off its turns and change
+    nothing here. Only the gateway restarting itself counts then.
+    """
+    if restart_hermes(loop, this_process_only=this_process_only):
         return f"{head} Restarting Hermes…"
     return f"{head} It loads the next time Hermes starts."
 
@@ -811,6 +858,9 @@ def start_desktop_job() -> Dict[str, Any]:
 
             def work() -> None:
                 try:
+                    # Only this desktop backend runs old code: the button recycles it,
+                    # and a gateway on this host is left alone.
+                    reload_only = needs_reload()
                     reply, restart_head = run_update_command(None)
                     if restart_head:
                         # A Telegram gateway on this host restarts too; the desktop
@@ -819,7 +869,8 @@ def start_desktop_job() -> Dict[str, Any]:
                         # it is the only side that knows whether it can recycle the
                         # backend, and this side must not claim a restart that only
                         # the other side can perform.
-                        restart_hermes(None)
+                        if not reload_only:
+                            restart_hermes(None)
                         reply = restart_head
                     result = {"status": "done", "reply": reply, "restart": bool(restart_head)}
                 except Exception as exc:
