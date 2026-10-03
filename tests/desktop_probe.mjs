@@ -344,5 +344,37 @@ dispose()
 await advance(5000)
 check('dispose cancels a pending backend restart', recycled, 0)
 
+// 10. A job the backend announces -- a typed `/refine update` -- is picked up at
+//     once and ends the way a press does: toast, then the backend restart. No
+//     ten-minute wait for the next poll.
+withBridge()
+recycled = 0
+globalThis.__state = state()
+const ctx10 = context()
+const listeners10 = {}
+ctx10.onEvent = (type, fn) => {
+  listeners10[type] = fn
+  return () => delete listeners10[type]
+}
+plugin.register(ctx10)
+await advance(1)
+check('the half listens for the backend job event', Object.keys(listeners10), ['plugin.refine.desktop.changed'])
+globalThis.__state = state({
+  job: { status: 'done', started: 10, restart: true, reply: 'RC updated to 1.3.13.' }
+})
+const before10 = calls.request.length
+listeners10['plugin.refine.desktop.changed']({ type: 'plugin.refine.desktop.changed', payload: {} })
+listeners10['plugin.refine.desktop.changed']({ type: 'plugin.refine.desktop.changed', payload: {} })
+await advance(1)
+check('the event asks for the state at once', calls.request.length - before10, 1)
+check('a typed update is reported like a press', messages(), ['RC updated to 1.3.13. Restarting Hermes…'])
+await advance(1600)
+check('a typed update restarts the backend without waiting for the poll', recycled, 1)
+dispose()
+listeners10['plugin.refine.desktop.changed']?.({ type: 'plugin.refine.desktop.changed', payload: {} })
+requests = calls.request.length
+await advance(60 * 60 * 1000)
+check('an event after dispose starts nothing', calls.request.length - requests, 0)
+
 console.log(failures ? `${failures} failed` : 'all ok')
 process.exit(failures ? 1 : 0)

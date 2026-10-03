@@ -550,6 +550,9 @@ def install_fake_host():
         "hermes_constants": constants,
         "hermes_cli": cli,
         "hermes_cli.config": cli_config,
+        # Hermes's desktop event door. The venv's editable install would find the
+        # real one even under this fake package, and it reaches tui_gateway.
+        "hermes_cli.plugin_events": None,
     })
 
 
@@ -24891,6 +24894,10 @@ class NoticesTests(unittest.TestCase):
         send.start()
         self.addCleanup(send.stop)
         self.addCleanup(self.temp.cleanup)
+        # No desktop half has asked this process anything yet.
+        seen = patch.object(self.notices, "_desktop_half_seen", 0.0)
+        seen.start()
+        self.addCleanup(seen.stop)
 
     def _working(self, value):
         return patch.object(self.notices, "plugin_working", return_value=value)
@@ -25513,6 +25520,120 @@ class NoticesTests(unittest.TestCase):
         restart.assert_called_once_with(None)
         self.assertTrue(state["working"])
         self.notices._job.clear()
+
+    def _event_door(self):
+        """Hermes's hermes_cli.plugin_events, recording what reaches the desktop half."""
+        events = []
+        door = types.ModuleType("hermes_cli.plugin_events")
+        door.broadcast_plugin_event = lambda plugin_id, event, payload=None: events.append(
+            (plugin_id, event, payload))
+        return events, patch.dict(sys.modules, {"hermes_cli.plugin_events": door})
+
+    def test_a_typed_update_in_the_desktop_app_runs_the_buttons_job_and_wakes_the_half(self):
+        """Live, Hermes Desktop 0.21.5: a typed update installed, said "Restarting
+        Hermes…", restarted a gateway and left the desktop backend on the old code
+        until the status bar's next poll said "not working". Only the desktop half
+        can restart that backend, so the typed command runs the button's own job and
+        tells the half, which restarts it as it does after a press."""
+        head = "♾️ Refine Cycle updated to 1.3.18."
+
+        def install(chat=None, *, details=None):
+            time.sleep(0.2)   # an install takes a while: the reply waits for it
+            return head, head
+
+        self.notices._job.clear()
+        self.addCleanup(self.notices._job.clear)
+        events, door = self._event_door()
+        with door, patch.object(self.notices, "_desktop_half_seen", 0.0), \
+             patch.object(self.notices, "run_update_command", side_effect=install), \
+             patch.object(self.notices, "restart_hermes", return_value=True) as restart, \
+             patch.object(self.notices, "finish_with_restart",
+                          side_effect=AssertionError("no restart from inside the desktop backend")), \
+             patch.object(self.notices, "check_update"), self._working(True):
+            self.notices.desktop_state()   # the half asked this process: it is a desktop backend
+            reply = asyncio_run(plugin_init._refine_command_entry("update"))
+            for _ in range(250):   # the finished job is announced after its waiter is woken
+                if len(events) == 2:
+                    break
+                time.sleep(0.02)
+        self.assertEqual(reply, head, "no restart claimed: only the half can restart this backend")
+        self.assertEqual((self.notices._job["status"], self.notices._job["restart"], self.notices._job["reply"]),
+                         ("done", True, head), "the half restarts the backend after this job, as after a press")
+        self.assertEqual(events, [("refine", "desktop.changed", {})] * 2, "told when it starts and ends")
+        restart.assert_called_once_with(None)   # a gateway on this host restarts, as after a press
+
+    def test_a_typed_fix_of_a_stale_desktop_backend_restarts_only_that_backend(self):
+        def stale(chat=None, *, details=None):
+            details["reload"] = True
+            return "♾️ Refine Cycle fixed.", "♾️ Refine Cycle fixed."
+
+        self.notices._job.clear()
+        self.addCleanup(self.notices._job.clear)
+        events, door = self._event_door()
+        with door, patch.object(self.notices, "_desktop_half_seen", 0.0), \
+             patch.object(self.notices, "run_update_command", side_effect=stale), \
+             patch.object(self.notices, "restart_hermes") as restart, \
+             patch.object(self.notices, "check_update"), self._working(True):
+            self.notices.desktop_state()
+            reply = asyncio_run(plugin_init._refine_command_entry("fix"))
+        self.assertEqual(reply, "♾️ Refine Cycle fixed.")
+        self.assertTrue(self.notices._job["restart"])
+        restart.assert_not_called()
+
+    def test_a_typed_update_outside_a_running_desktop_half_is_unchanged(self):
+        """A gateway (Telegram) or a CLI is never asked by a desktop half; a desktop
+        backend whose half went quiet, or a Hermes without the event door, cannot be
+        restarted by it. All of them keep the restart they had."""
+        head = "♾️ Refine Cycle updated to 1.3.18."
+        cases = {
+            "never asked": (0.0, True),
+            "asked too long ago": (time.monotonic() - 16 * 60, True),
+            "no event door": (time.monotonic(), False),
+        }
+        for name, (seen, has_door) in cases.items():
+            with self.subTest(name):
+                events, door = self._event_door()
+                finished = []
+                with (door if has_door else patch.dict(sys.modules, {})), \
+                     patch.object(self.notices, "_desktop_half_seen", seen), \
+                     patch.object(self.notices, "start_desktop_job",
+                                  side_effect=AssertionError("not the desktop job")), \
+                     patch.object(self.notices, "run_update_command", return_value=(head, head)), \
+                     patch.object(self.notices, "finish_with_restart",
+                                  side_effect=lambda h, loop=None, **kw: finished.append(kw) or f"{h} Restarting Hermes…"):
+                    reply = asyncio_run(plugin_init._update_command())
+                self.assertEqual(reply, f"{head} Restarting Hermes…")
+                self.assertEqual(finished, [{"this_process_only": False}])
+                self.assertEqual(events, [])
+
+    def test_a_typed_update_that_outlasts_the_desktop_wait_says_so_and_still_finishes(self):
+        """Hermes desktop gives a plugin command 30 seconds. An install that takes
+        longer is answered honestly, and the half is still told when it is done."""
+        release = threading.Event()
+
+        def slow(chat=None, *, details=None):
+            release.wait(5)
+            return "♾️ Refine Cycle updated to 1.3.18.", "♾️ Refine Cycle updated to 1.3.18."
+
+        self.notices._job.clear()
+        self.addCleanup(self.notices._job.clear)
+        events, door = self._event_door()
+        with door, patch.object(self.notices, "_desktop_half_seen", time.monotonic()), \
+             patch.object(self.notices, "run_update_command", side_effect=slow), \
+             patch.object(self.notices, "restart_hermes"), \
+             patch.object(self.notices, "check_update"), self._working(True):
+            reply = self.notices.run_update_in_desktop(None, wait=0.05)
+            self.assertEqual(reply, "♾️ Refine Cycle is updating in the background. "
+                                    "The status bar says when it is done.")
+            self.assertNotIn("Restarting", reply)
+            release.set()
+            with self.notices._job_changed:
+                self.notices._job_changed.wait_for(lambda: self.notices._job.get("status") == "done", 5)
+            for _ in range(250):
+                if len(events) == 2:
+                    break
+                time.sleep(0.02)
+        self.assertEqual(len(events), 2, "the finished job reaches the half too")
 
     def test_an_install_ships_the_desktop_half(self):
         import install

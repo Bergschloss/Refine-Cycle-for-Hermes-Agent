@@ -29,6 +29,11 @@ const STARTUP_POLL_MS = 3000
 // How long a restart may take before this stops waiting for its confirmation. A
 // backend that never comes back must not leave the poll running at BUSY forever.
 const RESTART_WAIT_MS = 2 * 60 * 1000
+// Sent by the backend (notices._announce_job) when an update or fix starts or
+// finishes, including one typed as `/refine update` in chat: the status bar asks
+// for the state at once instead of at its next ten-minute poll, and restarts the
+// backend the same way after a typed command as after a press.
+const JOB_EVENT = 'plugin.refine.desktop.changed'
 
 const listeners = new Set()
 let current = null
@@ -325,6 +330,12 @@ export default {
       area: DIRECTIVE_AREA,
       data: { name: DIRECTIVE_NAME, render: () => jsx(RefineCard, {}) }
     })
+    // An app without host events keeps the poll alone.
+    if (typeof ctx.onEvent === 'function') {
+      ctx.onEvent(JOB_EVENT, () => {
+        if (pluginCtx) schedule(0)
+      })
+    }
     ctx.onDispose(() => {
       generation += 1
       clearTimeout(timer)

@@ -840,10 +840,94 @@ def finish_with_restart(head: str, loop: Any = None, *, this_process_only: bool 
 
 _job: Dict[str, Any] = {}
 _job_lock = threading.Lock()
+# Signalled whenever the job changes, so a typed command can wait for the job it
+# started instead of polling it.
+_job_changed = threading.Condition(_job_lock)
 # Which backend process answered. New code only runs in a new process, so this
 # changing is the one honest proof a restart happened; the button waits for it
 # instead of announcing the new version while the old code is still answering.
 _BACKEND_ID = f"{os.getpid()}-{time.time():.6f}"
+# When the desktop half last asked THIS process for its state (monotonic, 0 =
+# never). Only a desktop backend is asked, and the half asks at least every ten
+# minutes while it runs (IDLE_POLL_MS in desktop/plugin.js), so a quarter of an
+# hour without a question means nobody is there to restart this process.
+_desktop_half_seen = 0.0
+_DESKTOP_HALF_FRESH_SECONDS = 15 * 60
+# The desktop half listens for ``plugin.refine.desktop.changed``: the job started
+# or finished, so it asks for the state now instead of at its next poll.
+_PLUGIN_EVENT_ID = "refine"
+_JOB_EVENT = "desktop.changed"
+# Hermes desktop stops waiting for a plugin command after 30 seconds. A typed
+# command answers before that, finished or not; the job goes on either way.
+_TYPED_WAIT_SECONDS = 25.0
+
+
+def _event_door() -> Any:
+    """Hermes's sanctioned way for a plugin backend to reach its desktop half, or None.
+
+    Looked up by name at call time, like every other host symbol here: a Hermes
+    without it must not stop the plugin loading.
+    """
+    try:
+        import importlib
+        door = getattr(importlib.import_module("hermes_cli.plugin_events"), "broadcast_plugin_event", None)
+        return door if callable(door) else None
+    except Exception:
+        return None
+
+
+def _announce_job() -> None:
+    """Tell the desktop half the job changed. Best effort: the half also polls."""
+    door = _event_door()
+    if door is None:
+        return
+    try:
+        door(_PLUGIN_EVENT_ID, _JOB_EVENT, {})
+    except Exception:
+        logger.debug("refine: could not tell the desktop half about the job", exc_info=True)
+
+
+def desktop_half_listening() -> bool:
+    """This process is a desktop backend whose half is running and can be told to look now.
+
+    Only then can a typed update end the way the button does: the half is the
+    only side that can restart this process, and without the event it would see
+    the finished job at its next poll, up to ten minutes later.
+    """
+    seen = _desktop_half_seen
+    if not seen or time.monotonic() - seen > _DESKTOP_HALF_FRESH_SECONDS:
+        return False
+    return _event_door() is not None
+
+
+def run_update_in_desktop(chat: Optional[Tuple[str, str, str]] = None,
+                          wait: float = _TYPED_WAIT_SECONDS) -> Optional[str]:
+    """A typed ``update`` / ``fix`` in a desktop backend: the button's own job. None elsewhere.
+
+    The new code only loads in a new backend process, and only the desktop half
+    can start one (it recycles the backend, as Settings ▸ Restart backend does).
+    A typed command used to update in place and restart a gateway instead, while
+    this backend kept the old code until the status bar's next poll said "not
+    working". Running the same job the button runs, and telling the half it is
+    done, ends both the same way.
+
+    The reply carries no sentence about restarting: like the button's job, it is
+    left to the half, the only side that knows whether it can restart Hermes.
+    """
+    if not desktop_half_listening():
+        return None
+    start_desktop_job(chat)
+    deadline = time.monotonic() + wait
+    with _job_changed:
+        while _job.get("status") == "running":
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            _job_changed.wait(left)
+        job = dict(_job)
+    if job.get("status") == "done":
+        return str(job.get("reply") or "")
+    return f"{BRAND} is updating in the background. The status bar says when it is done."
 
 
 def desktop_state(cards: bool = False) -> Dict[str, Any]:
@@ -852,6 +936,8 @@ def desktop_state(cards: bool = False) -> Dict[str, Any]:
     ``cards``: the app this half runs in renders the ``::refine`` card. An app
     without transcript directives would show it as raw text under a reply.
     """
+    global _desktop_half_seen
+    _desktop_half_seen = time.monotonic()
     known = _load()
     if not known.get("desktop_seen") or bool(known.get("desktop_cards")) != cards:
         # The half is switched on and talking, so the "turn it on" notice is moot.
@@ -880,12 +966,18 @@ def desktop_state(cards: bool = False) -> Dict[str, Any]:
     }
 
 
-def start_desktop_job() -> Dict[str, Any]:
-    """Start one update-or-fix in the background; a second press while it runs does nothing."""
+def start_desktop_job(chat: Optional[Tuple[str, str, str]] = None) -> Dict[str, Any]:
+    """Start one update-or-fix in the background; a second press while it runs does nothing.
+
+    ``chat`` is the chat a typed command came from, remembered as the command
+    does everywhere else; the buttons have none.
+    """
+    started = False
     with _job_lock:
         if _job.get("status") == "running":
             pass
         else:
+            started = True
             _job.clear()
             _job.update(status="running", started=time.time())
 
@@ -894,7 +986,7 @@ def start_desktop_job() -> Dict[str, Any]:
                     # Only this desktop backend runs old code: the button recycles it,
                     # and a gateway on this host is left alone.
                     details: Dict[str, Any] = {}
-                    reply, restart_head = run_update_command(None, details=details)
+                    reply, restart_head = run_update_command(chat, details=details)
                     if restart_head:
                         # A Telegram gateway on this host restarts too; the desktop
                         # backend is restarted by the button once it sees this. The
@@ -910,8 +1002,12 @@ def start_desktop_job() -> Dict[str, Any]:
                     logger.exception("refine desktop update failed")
                     result = {"status": "done", "restart": False,
                               "reply": f"{BRAND} update failed. {type(exc).__name__}"}
-                with _job_lock:
+                with _job_changed:
                     _job.update(result)
+                    _job_changed.notify_all()
+                _announce_job()
 
             threading.Thread(target=work, name="refine-desktop-update", daemon=True).start()
+    if started:
+        _announce_job()
     return desktop_state()

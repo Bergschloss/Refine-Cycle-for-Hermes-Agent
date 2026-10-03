@@ -1037,7 +1037,7 @@ _SESSION_SUBCOMMAND = "session"
 # Every subcommand _handle_refine_command actually implements. Kept beside the
 # two names above so the list cannot drift from the branches that consume them.
 _KNOWN_SUBCOMMANDS = ("audit", "dry-run", _MODEL_SUBCOMMAND, "rollback",
-                      _SESSION_SUBCOMMAND, "status", "update")
+                      _SESSION_SUBCOMMAND, "status", "update", "fix")
 
 
 def _explicit_session_status(value: Any) -> tuple[str, str]:
@@ -1562,6 +1562,12 @@ async def _update_command() -> str:
     """
     chat = _capture_active_chat()
     try:
+        # In the desktop app this process is the desktop backend, which neither a
+        # gateway restart nor anything here can restart: the desktop half does,
+        # after the same job its Update / Fix button runs.
+        desktop_reply = await asyncio.to_thread(notices.run_update_in_desktop, chat)
+        if desktop_reply is not None:
+            return desktop_reply
         details: Dict[str, Any] = {}
         reply, restart_head = await asyncio.to_thread(
             functools.partial(notices.run_update_command, chat, details=details)
@@ -1631,7 +1637,9 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
             logger.exception("refine audit failed")
             return f"❌ Audit failed: {str(exc)}"
 
-    if args == "update":
+    if args in ("update", "fix"):
+        # One command for both, as /refine_update and /refine_fix are: it updates,
+        # or repairs after a Hermes update, whichever this install needs.
         return _update_command()
 
     if args == "status":
@@ -2282,7 +2290,7 @@ def register(ctx) -> None:
         _refine_command_entry,
         description=(
             "Self-improve skills/memory. "
-            f"Usage: /{command_name} [reason|audit|status|update|dry-run [session <session_id>|reason]|"
+            f"Usage: /{command_name} [reason|audit|status|update|fix|dry-run [session <session_id>|reason]|"
             "model [target|auto]|session <session_id>|rollback <id>]"
         ),
         args_hint=(
