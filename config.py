@@ -627,7 +627,15 @@ def host_model_inventory_available() -> bool:
 
 
 def _catalog_rows(payload: Any) -> List[Dict[str, Any]]:
-    """The host payload's provider rows as the picker numbers them."""
+    """The host payload's provider rows as the picker numbers them.
+
+    Only ids refine can store (``journal.model_override_field_problem``): a listed
+    model it would refuse after the test call is not offered.
+    """
+    try:
+        from . import journal
+    except ImportError:
+        import journal  # type: ignore
     providers: List[Dict[str, Any]] = []
     rows = payload.get("providers") if isinstance(payload, dict) else None
     for row in rows or []:
@@ -636,19 +644,23 @@ def _catalog_rows(payload: Any) -> List[Dict[str, Any]]:
         slug = str(row.get("slug") or "").strip()
         # Mixture of Agents is a virtual provider the host unwraps to an aggregator;
         # the host itself drops it for auxiliary-style callers.
-        if not slug or slug.lower() == "moa":
+        if not slug or slug.lower() == "moa" or journal.model_override_field_problem(slug):
             continue
         models: List[str] = []
         for item in row.get("models") or []:
             model = str(item or "").strip()
-            if model and model not in models:
+            if model and model not in models and not journal.model_override_field_problem(
+                model, allow_namespace=True
+            ):
                 models.append(model)
         if models:
             providers.append({"provider": slug, "name": str(row.get("name") or slug).strip(), "models": models})
     return providers
 
 
-def host_model_catalog(*, refresh: bool = False, chat: str = "") -> Optional[List[Dict[str, Any]]]:
+def host_model_catalog(
+    *, refresh: bool = False, chat: str = "", keep: bool = True
+) -> Optional[List[Dict[str, Any]]]:
     """Providers and their models as Hermes's own model picker lists them.
 
     ``hermes_cli.inventory.build_models_payload`` on its GUI read path (canonical
@@ -661,6 +673,7 @@ def host_model_catalog(*, refresh: bool = False, chat: str = "") -> Optional[Lis
     without it the list last shown there is returned as it was, so the numbers a pick
     names are the numbers that were on screen. A refresh that fails or finds nothing
     forgets the old list, because the screen then shows the config list instead.
+    ``keep`` False: a list built here is not shown, so it is not kept as shown either.
     """
     now = time.monotonic()
     with _catalog_lock:
@@ -680,6 +693,8 @@ def host_model_catalog(*, refresh: bool = False, chat: str = "") -> Optional[Lis
         except Exception:
             logger.debug("refine: the host model inventory failed", exc_info=True)
             value = None
+    if not keep:
+        return value
     # Plugin commands of different chats run on the gateway's thread pool at once.
     with _catalog_lock:
         for old in [key for key, kept in _catalog_snapshot.items() if now - kept["at"] >= CATALOG_SNAPSHOT_SECONDS]:

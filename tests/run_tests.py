@@ -24534,6 +24534,49 @@ class PathTraceTests(unittest.TestCase):
                 self._model_command(agent, typed)
             self.assertEqual(self.probe_calls, [expected], typed)
 
+    def test_a_provider_typed_by_name_wins_over_an_aggregator_listed_first(self):
+        # Hermes lists OpenRouter before Anthropic, and OpenRouter lists "anthropic/x":
+        # the user named Anthropic, its account and bill.
+        payload = {"providers": [
+            {"slug": "openrouter", "name": "OpenRouter", "models": ["anthropic/x"]},
+            {"slug": "anthropic", "name": "Anthropic", "models": ["x"]},
+        ]}
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        with self._fake_inventory(payload):
+            self._model_command(agent, "anthropic/x")
+        self.assertEqual(self.probe_calls, [("anthropic", "x")])
+
+    def test_a_name_typed_with_no_list_on_screen_does_not_make_one(self):
+        payload = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x", "a/y"]}]}
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        with self._fake_inventory(payload, payload):
+            self._model_command(agent, "a/x")
+            self.assertFalse(config.catalog_shown(""), "built to match a name, never shown")
+            reply = self._model_command(agent, "1.2")
+        self.assertIn("No list was shown here", reply)
+        self.assertEqual(self.probe_calls, [("openrouter", "a/x")], "only the named pick")
+
+    def test_a_model_number_with_no_provider_list_is_not_a_model_name(self):
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        reply = self._model_command(agent, "3.12")  # an older Hermes: the config list
+        self.assertIn("names a model of a provider list", reply)
+        self.assertEqual(self.probe_calls, [], "no test call to a model named 3.12")
+
+    def test_ids_refine_could_not_store_are_not_listed(self):
+        payload = {"providers": [
+            {"slug": "vertex", "name": "Vertex", "models": ["claude@20250101", "ok-model", "x" * 200]},
+            {"slug": "bad slug", "name": "Bad", "models": ["m"]},
+        ]}
+        with self._fake_inventory(payload):
+            self.assertEqual(config.host_model_catalog(refresh=True),
+                             [{"provider": "vertex", "name": "Vertex", "models": ["ok-model"]}])
+
     def test_expired_lists_are_dropped(self):
         payload = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
         with self._fake_inventory(payload, payload):

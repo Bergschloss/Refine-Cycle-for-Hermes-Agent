@@ -1435,7 +1435,14 @@ def _handle_model_subcommand(remainder: str) -> str:
             "minutes, so the number is not picked. Pick from this one.\n\n"
             + _model_picker_text(refresh=True, chat=chat, numbers=numbers)
         )
-    catalog = config.host_model_catalog(chat=chat)
+    # The list on screen for a number (fresh: checked above); for a name, any list,
+    # and one built for it is not on screen, so it is not kept as if it were.
+    catalog = config.host_model_catalog(chat=chat, keep=False)
+    if position and position.group(2) is not None and not catalog:
+        return (
+            f"❌ {remainder} names a model of a provider list, and the list here has no providers."
+            "\n\n" + _model_picker_text(chat=chat, numbers=numbers)
+        )
     if catalog:
         if position:
             row_number = int(position.group(1))
@@ -1460,14 +1467,17 @@ def _handle_model_subcommand(remainder: str) -> str:
             ):
                 # Typed by name, and config.yaml names it: the provider it names it with.
                 return _pick_lesson_model(choice["provider"], choice["model"], listed=True)
+        # "anthropic/x" names the provider anthropic first; only when no such row
+        # lists x is it an aggregator's id as a whole ("anthropic/x" on OpenRouter).
+        # In one pass the aggregator, listed earlier, would take a provider the user named.
         for row in catalog:
-            same_provider = bool(provider) and row["provider"].casefold() == provider.casefold()
+            if provider and row["provider"].casefold() == provider.casefold():
+                for listed in row["models"]:
+                    if core._same_model_id(listed, model):
+                        return _pick_lesson_model(row["provider"], listed, listed=True)
+        for row in catalog:
             for listed in row["models"]:
-                # "openrouter/anthropic/x" names the provider; "anthropic/x" may be
-                # an OpenRouter id as a whole.
-                if (same_provider and core._same_model_id(listed, model)) or (
-                    listed.casefold() == remainder.casefold()
-                ):
+                if listed.casefold() == remainder.casefold():
                     # A listed model typed by name: the provider Hermes lists it under.
                     return _pick_lesson_model(row["provider"], listed, listed=True)
     if remainder.isdigit():
