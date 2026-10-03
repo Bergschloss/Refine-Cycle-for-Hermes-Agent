@@ -25641,6 +25641,20 @@ class NoticesTests(unittest.TestCase):
                 time.sleep(0.02)
         self.assertEqual(len(events), 2, "the finished job reaches the half too")
 
+    def test_a_typed_update_reports_the_job_even_when_the_state_answer_fails(self):
+        """The job started and finished; only reading the state afterwards failed.
+        The chat must get the job's result, not "update failed"."""
+        head = "♾️ Refine Cycle updated to 1.3.18."
+        self.notices._job.clear()
+        self.addCleanup(self.notices._job.clear)
+        events, door = self._event_door()
+        with door, patch.object(self.notices, "_desktop_half_seen", time.monotonic()), \
+             patch.object(self.notices, "run_update_command", return_value=(head, head)), \
+             patch.object(self.notices, "restart_hermes"), \
+             patch.object(self.notices, "desktop_state", side_effect=OSError("disk full")):
+            reply = self.notices.run_update_in_desktop(None, wait=5)
+        self.assertEqual(reply, head)
+
     def test_an_install_ships_the_desktop_half(self):
         import install
         self.assertIn("desktop/plugin.js", install.plugin_files())

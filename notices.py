@@ -921,9 +921,16 @@ def run_update_in_desktop(chat: Optional[Tuple[str, str, str]] = None,
     """
     if not desktop_half_listening():
         return None
-    start_desktop_job(chat)
+    try:
+        start_desktop_job(chat)
+    except Exception:
+        # The state answer after the start failed (an unwritable state file), not
+        # necessarily the job: report what the job does, not "update failed".
+        logger.warning("refine: the desktop job state could not be read", exc_info=True)
     deadline = time.monotonic() + wait
     with _job_changed:
+        if _job.get("status") not in ("running", "done"):
+            return None
         while _job.get("status") == "running":
             left = deadline - time.monotonic()
             if left <= 0:
