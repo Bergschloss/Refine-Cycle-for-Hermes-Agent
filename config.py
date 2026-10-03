@@ -603,7 +603,7 @@ def picked_lesson_model() -> Optional[Dict[str, str]]:
 # never against a rebuilt catalog: the host serves a cold provider from its curated
 # fallback and warms the real catalog in the background, and orders rows by size,
 # so a rebuild renumbers rows and "3.12" would name another model.
-_CATALOG_SNAPSHOT_SECONDS = 30 * 60.0
+CATALOG_SNAPSHOT_SECONDS = 30 * 60.0
 # Per chat ("platform:chat_id"; "" for the desktop app and the CLI): a list asked
 # for in one chat never renumbers the rows another chat is picking from.
 _catalog_snapshot: Dict[str, Dict[str, Any]] = {}
@@ -662,7 +662,7 @@ def host_model_catalog(*, refresh: bool = False, chat: str = "") -> Optional[Lis
     """
     now = time.monotonic()
     shown = _catalog_snapshot.get(chat)
-    if not refresh and shown is not None and now - shown["at"] < _CATALOG_SNAPSHOT_SECONDS:
+    if not refresh and shown is not None and now - shown["at"] < CATALOG_SNAPSHOT_SECONDS:
         return shown["value"]
     value = None
     if host_model_inventory_available():
@@ -677,14 +677,23 @@ def host_model_catalog(*, refresh: bool = False, chat: str = "") -> Optional[Lis
         except Exception:
             logger.debug("refine: the host model inventory failed", exc_info=True)
             value = None
+    for old in [key for key, kept in _catalog_snapshot.items() if now - kept["at"] >= CATALOG_SNAPSHOT_SECONDS]:
+        del _catalog_snapshot[old]
     _catalog_snapshot[chat] = {"value": value, "at": now}
     return value
+
+
+def catalog_shown(chat: str = "") -> bool:
+    """A list (possibly the config fallback after a failed build) was shown in this
+    chat recently enough that its numbers still name its rows."""
+    shown = _catalog_snapshot.get(chat)
+    return shown is not None and time.monotonic() - shown["at"] < CATALOG_SNAPSHOT_SECONDS
 
 
 def shown_model_catalog(chat: str = "") -> Optional[List[Dict[str, Any]]]:
     """The list last shown in this chat, without building anything (None when none is fresh)."""
     shown = _catalog_snapshot.get(chat)
-    if shown is not None and time.monotonic() - shown["at"] < _CATALOG_SNAPSHOT_SECONDS:
+    if shown is not None and time.monotonic() - shown["at"] < CATALOG_SNAPSHOT_SECONDS:
         return shown["value"]
     return None
 

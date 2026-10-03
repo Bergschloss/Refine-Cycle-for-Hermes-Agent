@@ -24285,16 +24285,30 @@ class PathTraceTests(unittest.TestCase):
         reply_expected = fields.pop("reply_expected", None)
         return types.SimpleNamespace(text=text, source=types.SimpleNamespace(**fields), reply_expected=reply_expected)
 
-    def _shown(self, catalog):
-        """The hook reads only the list last shown; it never builds one."""
+    def _shown(self, catalog, *, inventory=None, listed=True):
+        """The hook reads only the list last shown; it never builds one.
+
+        ``catalog`` None: the config list (no host inventory, unless ``inventory``).
+        ``listed`` False: no list is on screen in that chat any more.
+        """
         def shown_in(chat=""):
             # The hook asks for the list of the message's own chat, keyed as the
-            # command keys it ("platform:chat_id").
+            # command keys it ("profile|platform:chat_id").
             self.shown_chats.append(chat)
             return catalog
         self.shown_chats = []
-        return patch.multiple(config, host_model_inventory_available=lambda: catalog is not None,
-                              shown_model_catalog=shown_in)
+        available = catalog is not None if inventory is None else inventory
+        return patch.multiple(config, host_model_inventory_available=lambda: available,
+                              shown_model_catalog=shown_in, catalog_shown=lambda chat="": listed)
+
+    def _session(self, chat_type="dm", profile="", chat="7"):
+        """The host's session context, as a plugin command runs in it."""
+        env = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_CHAT_ID": chat,
+               "HERMES_SESSION_CHAT_TYPE": chat_type, "HERMES_SESSION_PROFILE": profile}
+        module = types.ModuleType("gateway.session_context")
+        module.get_session_env = lambda name, default="": env.get(name, default)
+        module.session_is_messaging_surface = lambda: True
+        return patch.dict(sys.modules, {"gateway.session_context": module})
 
     def _hook_clean(self):
         plugin_init._picker_views.clear()
@@ -24424,39 +24438,98 @@ class PathTraceTests(unittest.TestCase):
         with self._shown(self._CATALOG):
             hook(event=self._gateway_message(f"{name} model", chat="42"))
             hook(event=self._gateway_message("2", chat="42"))
-        self.assertEqual(set(self.shown_chats), {"telegram:42"})
-
-    def test_a_provider_asked_for_before_any_list_still_takes_the_next_number(self):
-        hook, name = self._hook_clean()
-        with self._shown(None), patch.object(config, "host_model_inventory_available", lambda: True):
-            hook(event=self._gateway_message(f"{name} model 2"))  # the command builds the list
+        self.assertEqual(set(self.shown_chats), {"|telegram:42"})
+        self.shown_chats.clear()
         with self._shown(self._CATALOG):
-            self.assertEqual(hook(event=self._gateway_message("1"))["text"], f"{name} model 2.1")
+            hook(event=self._gateway_message(f"{name} model", chat="42", profile="bot-a"))
+            hook(event=self._gateway_message("2", chat="42", profile="bot-a"))
+        self.assertEqual(set(self.shown_chats), {"bot-a|telegram:42"}, "one gateway, several bots")
+
+    def test_a_number_with_no_list_on_screen_shows_the_providers_again(self):
+        hook, name = self._hook_clean()
+        with self._shown(None, inventory=True, listed=False):
+            hook(event=self._gateway_message(f"{name} model 2"))  # no list: the reply is the providers
+        with self._shown(self._CATALOG):
+            self.assertEqual(hook(event=self._gateway_message("1"))["text"], f"{name} model 1")
+            # The list expires between the provider and the model: the providers again.
+            with self._shown(None, inventory=True, listed=False):
+                self.assertEqual(hook(event=self._gateway_message("2"))["text"], f"{name} model 1.2")
+            self.assertEqual(hook(event=self._gateway_message("2"))["text"], f"{name} model 2")
         plugin_init._picker_views.clear()
-        with self._shown(None), patch.object(config, "host_model_inventory_available", lambda: True):
-            hook(event=self._gateway_message(f"{name} model 2"))
-            # No list came of it: that command was the config list's pick already.
+        with self._shown(None, inventory=True, listed=True):
+            # A refresh failed, so the config list is on screen: a number there is the pick.
+            hook(event=self._gateway_message(f"{name} model"))
+            self.assertEqual(hook(event=self._gateway_message("3"))["text"], f"{name} model 3")
             self.assertIsNone(hook(event=self._gateway_message("1")))
         with self._shown(self._CATALOG):
             hook(event=self._gateway_message(f"{name} model 9"))
             self.assertEqual(hook(event=self._gateway_message("2"))["text"], f"{name} model 2",
                              "out of range: the providers again")
 
+    def test_a_numbered_pick_after_the_list_expired_is_not_resolved_blind(self):
+        # Rows reorder as the host warms its catalogs; after the snapshot expired a
+        # rebuilt list could put another model under the number on screen.
+        shown = {"providers": [{"slug": "fast-provider", "name": "Fast", "models": ["fast-model", "fast-big"]}]}
+        rebuilt = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x", "a/y"]},
+                                 {"slug": "fast-provider", "name": "Fast", "models": ["fast-big", "fast-model"]}]}
+        agent = self.Agent("session")
+        self._host_models()
+        self._unbound_host_facade()
+        with self._fake_inventory(shown, rebuilt):
+            self._model_command(agent, "")
+            for kept in config._catalog_snapshot.values():
+                kept["at"] -= config.CATALOG_SNAPSHOT_SECONDS + 1
+            reply = self._model_command(agent, "1.2")
+        self.assertIn("No list was shown here in the last 30 minutes", reply)
+        self.assertIn("1. OpenRouter — 2 models", reply, "the list as it is now")
+        self.assertEqual(self.probe_calls, [], "nothing picked")
+
+    def test_expired_lists_are_dropped(self):
+        payload = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
+        with self._fake_inventory(payload, payload):
+            config.host_model_catalog(refresh=True, chat="a")
+            config._catalog_snapshot["a"]["at"] -= config.CATALOG_SNAPSHOT_SECONDS + 1
+            config.host_model_catalog(refresh=True, chat="b")
+            self.assertEqual(set(config._catalog_snapshot), {"b"})
+            self.assertFalse(config.catalog_shown("a"))
+
+    def test_the_number_hook_leaves_a_plugins_own_events_alone(self):
+        hook, name = self._hook_clean()
+        with self._shown(self._CATALOG):
+            hook(event=self._gateway_message(f"{name} model"))
+            event = self._gateway_message("2")
+            event.allow_gateway_control = False
+            self.assertIsNone(hook(event=event), "the host would not dispatch it as a command")
+            self.assertEqual(hook(event=self._gateway_message("2"))["text"], f"{name} model 2")
+
     def test_the_bare_number_hint_shows_only_where_numbers_work(self):
         agent = self.Agent("session")
         self._host_models()
         payload = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
         hint = "a bare number works"
-        for registered, chat, shown in ((True, ("telegram", "1", ""), True), (True, None, False),
-                                        (False, ("telegram", "1", ""), False)):
-            with self._fake_inventory(payload), \
-                 patch.object(plugin_init, "_NUMBER_HOOK_REGISTERED", registered), \
-                 patch.object(plugin_init, "_capture_active_chat", return_value=chat):
-                self.assertEqual(hint in self._model_command(agent, ""), shown, (registered, chat))
-        with self._fake_inventory(payload), \
-             patch.object(plugin_init, "_capture_active_chat", return_value=("telegram", "7", "")):
-            self._model_command(agent, "")
-            self.assertIn("telegram:7", config._catalog_snapshot, "the command keys the list by its chat")
+        for registered, chat_type, shown in ((True, "dm", True), (True, "group", False),
+                                             (True, "thread", False), (False, "dm", False)):
+            with self._fake_inventory(payload), self._session(chat_type), \
+                 patch.object(plugin_init, "_NUMBER_HOOK_REGISTERED", registered):
+                self.assertEqual(hint in self._model_command(agent, ""), shown, (registered, chat_type))
+        with self._fake_inventory(payload), patch.object(plugin_init, "_NUMBER_HOOK_REGISTERED", True), \
+             patch.object(plugin_init, "_capture_active_chat", return_value=None):
+            self.assertNotIn(hint, self._model_command(agent, ""), "the desktop app and the CLI")
+
+    def test_each_bot_of_one_gateway_keeps_its_own_list(self):
+        # With multiplex_profiles a direct chat has the same id for every bot.
+        first = {"providers": [{"slug": "fast-provider", "name": "Fast", "models": ["fast-model"]}]}
+        other = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
+        agent = self.Agent("session")
+        self._host_models()
+        with self._fake_inventory(first, other):
+            with self._session(profile="bot-a"):
+                self._model_command(agent, "")
+            with self._session(profile="bot-b"):
+                self._model_command(agent, "")
+            with self._session(profile="bot-a"):
+                self.assertIn("1.1 fast-model", self._model_command(agent, "1"), "bot-a's own row 1")
+        self.assertEqual(set(config._catalog_snapshot), {"bot-a|telegram:7", "bot-b|telegram:7"})
 
     def test_model_lists_the_models_hermes_has_and_auto(self):
         agent = self.Agent("session")
@@ -24868,7 +24941,8 @@ class NoticesTests(unittest.TestCase):
         with patch.object(self.notices, "restart_hermes", return_value=False) as restart:
             reply = self.notices.finish_with_restart("♾️ Refine Cycle fixed.", None, this_process_only=True)
         restart.assert_called_once_with(None, this_process_only=True)
-        self.assertEqual(reply, "♾️ Refine Cycle fixed. It loads the next time Hermes starts.")
+        # Nothing restarted, so nothing runs fixed yet.
+        self.assertEqual(reply, "♾️ Refine Cycle is fixed on disk; it loads when this Hermes process restarts.")
 
     def test_a_restart_that_changed_nothing_is_not_repeated(self):
         with self._working(False), patch.object(self.notices, "code_stale", return_value=False), \

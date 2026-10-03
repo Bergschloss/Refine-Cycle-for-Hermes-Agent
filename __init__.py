@@ -1100,22 +1100,35 @@ def _lesson_model_line() -> str:
     return line
 
 
-def _picker_chat() -> str:
-    """The chat a picker command came from ("platform:chat_id"), "" off a messaging chat.
+def _picker_chat() -> Tuple[str, bool]:
+    """The chat a picker command came from, and whether a bare number works there.
 
-    Called on the command's own task, where the host's session context is set.
+    The key is the one the number hook builds from the message ("profile|platform:
+    chat_id"; with ``multiplex_profiles`` a direct chat has the same id for every
+    bot), "" off a messaging chat. A bare number works in a direct chat where the
+    hook is registered. Called on the command's own task, where the host's session
+    context is set.
     """
     chat = _capture_active_chat()
-    return f"{chat[0]}:{chat[1]}" if chat else ""
+    if not chat:
+        return "", False
+    try:
+        from gateway.session_context import get_session_env  # type: ignore
+        profile = get_session_env("HERMES_SESSION_PROFILE", "") or ""
+        chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or "dm"
+    except Exception:
+        profile, chat_type = "", "dm"
+    return f"{profile}|{chat[0]}:{chat[1]}", _NUMBER_HOOK_REGISTERED and chat_type == "dm"
 
 
-def _model_picker_text(*, refresh: bool = False, chat: str = "") -> str:
+def _model_picker_text(*, refresh: bool = False, chat: str = "", numbers: bool = False) -> str:
     """The current lesson model and what to pick from.
 
     With the host's model inventory: its providers, numbered, as Hermes's model
     picker lists them (a few hundred models do not fit one chat message). Without it
     (an older Hermes): the models config.yaml names, numbered. ``refresh`` lists the
     providers anew; otherwise the list shown last in this chat is shown again.
+    ``numbers``: a bare number works here (``_picker_chat``), so the list says so.
     """
     name = _command_display_name()
     lines = [_lesson_model_line()]
@@ -1127,11 +1140,7 @@ def _model_picker_text(*, refresh: bool = False, chat: str = "") -> str:
             count = len(row["models"])
             lines.append(f"  {number}. {row['name']} — {count} model{'s' if count != 1 else ''}")
         lines.append("  auto — the session's own model (default)")
-        # A bare number works only where the hook that reads it runs: a messaging chat.
-        bare = (
-            " Here a bare number works too, for two minutes after a list."
-            if _NUMBER_HOOK_REGISTERED and chat else ""
-        )
+        bare = " Here a bare number works too, for two minutes after a list." if numbers else ""
         lines.append(
             f"Pick a provider with {name} model <number>, then a model with "
             f"{name} model <number>.<number>.{bare} A pick is tested with one short call first."
@@ -1197,16 +1206,23 @@ def _picker_chat_key(event: Any) -> str:
     return f"{profile}|{platform}:{chat}:{user}" if chat and user else ""
 
 
-def _shown_catalog(event: Any) -> Optional[List[Dict[str, Any]]]:
-    """The provider list last shown in this message's chat, without building one
-    (this runs on the gateway loop). The chat key is the one ``_picker_chat`` gives
-    the command that showed it."""
+def _shown_catalog(event: Any) -> Tuple[bool, Optional[List[Dict[str, Any]]]]:
+    """What a number in this message's chat would name, without building a list
+    (this runs on the gateway loop): ``(relist, rows)``.
+
+    ``relist``: no list is on screen there any more, so the command shows the
+    providers again whatever the number. ``rows``: the providers on screen, or None
+    for the config list. The key is the one ``_picker_chat`` gives the command.
+    """
     if not config.host_model_inventory_available():
-        return None
+        return False, None
     source = getattr(event, "source", None)
     platform = getattr(source, "platform", None)
     platform = str(getattr(platform, "value", platform) or "")
-    return config.shown_model_catalog(f"{platform}:{getattr(source, 'chat_id', '')}")
+    chat = f"{getattr(source, 'profile', '') or ''}|{platform}:{getattr(source, 'chat_id', '')}"
+    if not config.catalog_shown(chat):
+        return True, None
+    return False, config.shown_model_catalog(chat)
 
 
 def _on_pre_gateway_dispatch(event: Any = None, **kwargs: Any) -> Optional[Dict[str, str]]:
@@ -1227,6 +1243,10 @@ def _on_pre_gateway_dispatch(event: Any = None, **kwargs: Any) -> Optional[Dict[
         source = getattr(event, "source", None)
         if str(getattr(source, "chat_type", "dm") or "dm") != "dm" or getattr(event, "reply_expected", None) is False:
             return None
+        # A plugin's own event is conversation, never a command (the host does not
+        # dispatch one), so a rewrite would reach the agent as command text.
+        if getattr(event, "allow_gateway_control", True) is False:
+            return None
         now = time.monotonic()
         command = _model_command_match(text)
         with _picker_views_lock:
@@ -1234,14 +1254,13 @@ def _on_pre_gateway_dispatch(event: Any = None, **kwargs: Any) -> Optional[Dict[
                 del _picker_views[old]
             if command:
                 argument = command.group(1) or ""
-                shown = _shown_catalog(event)
+                relist, shown = _shown_catalog(event)
                 if not argument:
                     _picker_views[key] = ("", now)
-                elif argument.isdigit() and (shown or config.host_model_inventory_available()):
-                    # A provider's models are shown, or (out of range) the providers
-                    # again. With no list shown yet here, the command builds one, so
-                    # the range is checked when the next number comes.
-                    in_range = not shown or 1 <= int(argument) <= len(shown)
+                elif argument.isdigit() and (shown or relist):
+                    # A provider's models are shown, or (out of range, or no list on
+                    # screen any more) the providers again.
+                    in_range = bool(shown) and 1 <= int(argument) <= len(shown)
                     _picker_views[key] = (argument if in_range else "", now)
                 else:
                     _picker_views.pop(key, None)
@@ -1253,9 +1272,13 @@ def _on_pre_gateway_dispatch(event: Any = None, **kwargs: Any) -> Optional[Dict[
             if not text.isdigit():
                 _picker_views.pop(key, None)
                 return None
-            shown = _shown_catalog(event)
+            relist, shown = _shown_catalog(event)
             number = int(text)
-            if shown and not stage:
+            if relist:
+                # The list expired: the command shows the providers again.
+                argument = f"{stage}.{text}" if stage else text
+                _picker_views[key] = ("", now)
+            elif shown and not stage:
                 # In range: that provider's models come next; out of range: the error
                 # shows the providers again, so the window stays on them.
                 _picker_views[key] = (text if 1 <= number <= len(shown) else "", now)
@@ -1271,10 +1294,6 @@ def _on_pre_gateway_dispatch(event: Any = None, **kwargs: Any) -> Optional[Dict[
                     _picker_views[key] = (stage, now)  # the models are shown again
             else:
                 _picker_views.pop(key, None)  # the config list: one number is the pick
-                if stage:
-                    # A provider was asked for but no list came of it: that reply was
-                    # the config list's pick already, so this number is not the picker's.
-                    return None
                 argument = text
         return {"action": "rewrite", "text": f"{_command_display_name()} model {argument}"}
     except Exception:
@@ -1394,9 +1413,9 @@ def _handle_model_subcommand(remainder: str) -> str:
     the one users actually met. Nothing is stored without a test call that the
     host answered, and a bare number is always a position in the list.
     """
-    chat = _picker_chat()
+    chat, numbers = _picker_chat()
     if not remainder:
-        return _model_picker_text(refresh=True, chat=chat)
+        return _model_picker_text(refresh=True, chat=chat, numbers=numbers)
     if remainder == "auto":
         outcome = journal.clear_model_override()
         prefix = {
@@ -1405,13 +1424,24 @@ def _handle_model_subcommand(remainder: str) -> str:
             "failed": "⚠ Could not remove the picked model, so it is still in use",
         }[outcome]
         return f"{prefix}: {_lesson_model_line()}."
+    position = re.fullmatch(r"(\d+)(?:\.(\d+))?", remainder)
+    if position and config.host_model_inventory_available() and not config.catalog_shown(chat):
+        # A number names a row of the list on screen. With none there any more (or
+        # never), a list built now may order the rows differently, so it is shown
+        # instead of being picked from blind. When the host lists nothing, the config
+        # list is the one, and its order does not move: the number is picked from it.
+        if config.host_model_catalog(refresh=True, chat=chat):
+            return (
+                f"No list was shown here in the last {int(config.CATALOG_SNAPSHOT_SECONDS // 60)} "
+                "minutes, so the number is not picked. Pick from this one.\n\n"
+                + _model_picker_text(chat=chat, numbers=numbers)
+            )
     catalog = config.host_model_catalog(chat=chat)
     if catalog:
-        position = re.fullmatch(r"(\d+)(?:\.(\d+))?", remainder)
         if position:
             row_number = int(position.group(1))
             if not 1 <= row_number <= len(catalog):
-                return f"❌ Pick a provider between 1 and {len(catalog)}.\n\n" + _model_picker_text(chat=chat)
+                return f"❌ Pick a provider between 1 and {len(catalog)}.\n\n" + _model_picker_text(chat=chat, numbers=numbers)
             row = catalog[row_number - 1]
             if position.group(2) is None:
                 return _provider_models_text(row_number, row)
@@ -1447,14 +1477,14 @@ def _handle_model_subcommand(remainder: str) -> str:
             return (
                 f"❌ Pick a number between 1 and {len(choices)}."
                 if choices else "❌ Your config.yaml names no models to pick from."
-            ) + "\n\n" + _model_picker_text(chat=chat)
+            ) + "\n\n" + _model_picker_text(chat=chat, numbers=numbers)
         choice = choices[index - 1]
         if not choice["reachable"]:
             target = "/".join(p for p in (choice["provider"], choice["model"]) if p)
             return (
                 f"❌ Not switched to {target}: it is an alias with its own endpoint, and "
                 "a plugin call can name only a provider and a model. Nothing was changed."
-                "\n\n" + _model_picker_text(chat=chat)
+                "\n\n" + _model_picker_text(chat=chat, numbers=numbers)
             )
         return _pick_lesson_model(choice["provider"], choice["model"], listed=True)
     provider, model = remainder.split("/", 1) if "/" in remainder else ("", remainder)

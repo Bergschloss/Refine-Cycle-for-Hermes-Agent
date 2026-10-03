@@ -822,6 +822,10 @@ def finish_with_restart(head: str, loop: Any = None, *, this_process_only: bool 
     """
     if restart_hermes(loop, this_process_only=this_process_only):
         return f"{head} Restarting Hermes…"
+    if this_process_only:
+        # Nothing was installed or restarted: only a restart of this process loads
+        # what is already on disk, so "fixed" would not be true yet.
+        return f"{BRAND} is fixed on disk; it loads when this Hermes process restarts."
     return f"{head} It loads the next time Hermes starts."
 
 
