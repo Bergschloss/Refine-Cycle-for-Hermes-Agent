@@ -604,8 +604,13 @@ def picked_lesson_model() -> Optional[Dict[str, str]]:
 # fallback and warms the real catalog in the background, and orders rows by size,
 # so a rebuild renumbers rows and "3.12" would name another model.
 _CATALOG_SNAPSHOT_SECONDS = 30 * 60.0
-_catalog_snapshot: Dict[str, Any] = {}
+# Per chat ("platform:chat_id"; "" for the desktop app and the CLI): a list asked
+# for in one chat never renumbers the rows another chat is picking from.
+_catalog_snapshot: Dict[str, Dict[str, Any]] = {}
 _inventory_present: Dict[str, bool] = {}
+_PAYLOAD_KEYWORDS = {
+    "for_picker": True, "non_blocking_catalogs": True, "probe_custom_providers": False, "canonical_order": True,
+}
 
 
 def host_model_inventory_available() -> bool:
@@ -641,7 +646,7 @@ def _catalog_rows(payload: Any) -> List[Dict[str, Any]]:
     return providers
 
 
-def host_model_catalog(*, refresh: bool = False) -> Optional[List[Dict[str, Any]]]:
+def host_model_catalog(*, refresh: bool = False, chat: str = "") -> Optional[List[Dict[str, Any]]]:
     """Providers and their models as Hermes's own model picker lists them.
 
     ``hermes_cli.inventory.build_models_payload`` on its GUI read path (canonical
@@ -650,36 +655,37 @@ def host_model_catalog(*, refresh: bool = False) -> Optional[List[Dict[str, Any]
     the model ids the host would accept. None on a Hermes without that inventory (the
     picker then falls back to ``host_model_choices``).
 
-    ``refresh`` builds it anew and keeps it as the list the user is shown; without it
-    the last shown list is returned as it was, so the numbers a pick names are the
-    numbers that were on screen.
+    ``refresh`` builds it anew and keeps it as the list this ``chat`` is shown;
+    without it the list last shown there is returned as it was, so the numbers a pick
+    names are the numbers that were on screen. A refresh that fails or finds nothing
+    forgets the old list, because the screen then shows the config list instead.
     """
     now = time.monotonic()
-    if not refresh and "value" in _catalog_snapshot and now - _catalog_snapshot["at"] < _CATALOG_SNAPSHOT_SECONDS:
-        return _catalog_snapshot["value"]
-    if not host_model_inventory_available():
-        return None
-    try:
-        from hermes_cli.inventory import build_models_payload, load_picker_context
+    shown = _catalog_snapshot.get(chat)
+    if not refresh and shown is not None and now - shown["at"] < _CATALOG_SNAPSHOT_SECONDS:
+        return shown["value"]
+    value = None
+    if host_model_inventory_available():
         try:
-            payload = build_models_payload(
-                load_picker_context(), for_picker=True, non_blocking_catalogs=True,
-                probe_custom_providers=False, canonical_order=True,
-            )
-        except TypeError:  # a Hermes without one of these keyword arguments
-            payload = build_models_payload(load_picker_context())
-    except Exception:
-        logger.debug("refine: the host model inventory failed", exc_info=True)
-        return None
-    value = _catalog_rows(payload) or None
-    _catalog_snapshot.update(value=value, at=now)
+            import inspect
+            from hermes_cli.inventory import build_models_payload, load_picker_context
+            accepted = inspect.signature(build_models_payload).parameters
+            # Only the keywords this Hermes has: retrying with its defaults on a
+            # TypeError would block on live probes and change the row order.
+            kwargs = {key: arg for key, arg in _PAYLOAD_KEYWORDS.items() if key in accepted}
+            value = _catalog_rows(build_models_payload(load_picker_context(), **kwargs)) or None
+        except Exception:
+            logger.debug("refine: the host model inventory failed", exc_info=True)
+            value = None
+    _catalog_snapshot[chat] = {"value": value, "at": now}
     return value
 
 
-def shown_model_catalog() -> Optional[List[Dict[str, Any]]]:
-    """The list last shown, without building anything (None when none is fresh)."""
-    if "value" in _catalog_snapshot and time.monotonic() - _catalog_snapshot["at"] < _CATALOG_SNAPSHOT_SECONDS:
-        return _catalog_snapshot["value"]
+def shown_model_catalog(chat: str = "") -> Optional[List[Dict[str, Any]]]:
+    """The list last shown in this chat, without building anything (None when none is fresh)."""
+    shown = _catalog_snapshot.get(chat)
+    if shown is not None and time.monotonic() - shown["at"] < _CATALOG_SNAPSHOT_SECONDS:
+        return shown["value"]
     return None
 
 

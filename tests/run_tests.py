@@ -8293,12 +8293,15 @@ class RefineTests(unittest.TestCase):
             if hooks is not None:
                 host_plugins.VALID_HOOKS = hooks
             context = RegisterContext()
-            with patch.dict(sys.modules, {"hermes_cli.plugins": host_plugins}):
+            with patch.dict(sys.modules, {"hermes_cli.plugins": host_plugins}), \
+                 patch.object(plugin_init, "_NUMBER_HOOK_REGISTERED", None):
                 if "hermes_cli" in sys.modules:
                     with patch.object(sys.modules["hermes_cli"], "plugins", host_plugins, create=True):
                         plugin_init.register(context)
                 else:
                     plugin_init.register(context)
+                # The picker offers bare numbers only where this hook reads them.
+                self.assertIs(plugin_init._NUMBER_HOOK_REGISTERED, registered, hooks)
             self.assertEqual("pre_gateway_dispatch" in context.hooks, registered, hooks)
 
     def test_post_llm_hook_runs_in_background_without_a_bound_route(self):
@@ -24284,8 +24287,14 @@ class PathTraceTests(unittest.TestCase):
 
     def _shown(self, catalog):
         """The hook reads only the list last shown; it never builds one."""
+        def shown_in(chat=""):
+            # The hook asks for the list of the message's own chat, keyed as the
+            # command keys it ("platform:chat_id").
+            self.shown_chats.append(chat)
+            return catalog
+        self.shown_chats = []
         return patch.multiple(config, host_model_inventory_available=lambda: catalog is not None,
-                              shown_model_catalog=lambda: catalog)
+                              shown_model_catalog=shown_in)
 
     def _hook_clean(self):
         plugin_init._picker_views.clear()
@@ -24391,6 +24400,63 @@ class PathTraceTests(unittest.TestCase):
             self.assertIn("1.2 fast-big", self._model_command(agent, "1"))
             self._model_command(agent, "1.2")
         self.assertEqual(self.probe_calls, [("fast-provider", "fast-big")])
+
+    def test_a_failed_refresh_forgets_the_list_it_replaces(self):
+        # The screen then shows the config list, so a number names a row of that one.
+        payload = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
+        with self._fake_inventory(payload, {"providers": []}):
+            self.assertTrue(config.host_model_catalog(refresh=True, chat="telegram:1"))
+            self.assertIsNone(config.host_model_catalog(refresh=True, chat="telegram:1"))
+            self.assertIsNone(config.shown_model_catalog("telegram:1"))
+            self.assertIsNone(config.host_model_catalog(chat="telegram:1"), "not rebuilt behind the screen")
+
+    def test_each_chat_keeps_the_list_it_was_shown(self):
+        first = {"providers": [{"slug": "fast-provider", "name": "Fast", "models": ["fast-model"]}]}
+        other = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
+        with self._fake_inventory(first, other):
+            config.host_model_catalog(refresh=True, chat="telegram:1")
+            config.host_model_catalog(refresh=True, chat="telegram:2")
+            self.assertEqual(config.host_model_catalog(chat="telegram:1")[0]["provider"], "fast-provider")
+            self.assertEqual(config.shown_model_catalog("telegram:2")[0]["provider"], "openrouter")
+
+    def test_the_hook_reads_the_list_of_the_messages_own_chat(self):
+        hook, name = self._hook_clean()
+        with self._shown(self._CATALOG):
+            hook(event=self._gateway_message(f"{name} model", chat="42"))
+            hook(event=self._gateway_message("2", chat="42"))
+        self.assertEqual(set(self.shown_chats), {"telegram:42"})
+
+    def test_a_provider_asked_for_before_any_list_still_takes_the_next_number(self):
+        hook, name = self._hook_clean()
+        with self._shown(None), patch.object(config, "host_model_inventory_available", lambda: True):
+            hook(event=self._gateway_message(f"{name} model 2"))  # the command builds the list
+        with self._shown(self._CATALOG):
+            self.assertEqual(hook(event=self._gateway_message("1"))["text"], f"{name} model 2.1")
+        plugin_init._picker_views.clear()
+        with self._shown(None), patch.object(config, "host_model_inventory_available", lambda: True):
+            hook(event=self._gateway_message(f"{name} model 2"))
+            # No list came of it: that command was the config list's pick already.
+            self.assertIsNone(hook(event=self._gateway_message("1")))
+        with self._shown(self._CATALOG):
+            hook(event=self._gateway_message(f"{name} model 9"))
+            self.assertEqual(hook(event=self._gateway_message("2"))["text"], f"{name} model 2",
+                             "out of range: the providers again")
+
+    def test_the_bare_number_hint_shows_only_where_numbers_work(self):
+        agent = self.Agent("session")
+        self._host_models()
+        payload = {"providers": [{"slug": "openrouter", "name": "OpenRouter", "models": ["a/x"]}]}
+        hint = "a bare number works"
+        for registered, chat, shown in ((True, ("telegram", "1", ""), True), (True, None, False),
+                                        (False, ("telegram", "1", ""), False)):
+            with self._fake_inventory(payload), \
+                 patch.object(plugin_init, "_NUMBER_HOOK_REGISTERED", registered), \
+                 patch.object(plugin_init, "_capture_active_chat", return_value=chat):
+                self.assertEqual(hint in self._model_command(agent, ""), shown, (registered, chat))
+        with self._fake_inventory(payload), \
+             patch.object(plugin_init, "_capture_active_chat", return_value=("telegram", "7", "")):
+            self._model_command(agent, "")
+            self.assertIn("telegram:7", config._catalog_snapshot, "the command keys the list by its chat")
 
     def test_model_lists_the_models_hermes_has_and_auto(self):
         agent = self.Agent("session")
@@ -24809,12 +24875,16 @@ class NoticesTests(unittest.TestCase):
              patch.object(self.notices, "_host_patched_on_disk", return_value=True), \
              patch.object(self.notices, "_host_supported", return_value=True):
             self.assertTrue(self.notices.needs_reload())
-            self.notices._record_reload()
-            self.assertTrue(self.notices.needs_reload(), "this process has not restarted yet")
-            with patch.object(self.notices, "_PROCESS_STARTED", time.time() + 60):
-                self.assertFalse(self.notices.needs_reload(), "restarted, and still broken: no loop")
-                with self._already_latest():
-                    reply, restart_head = self.notices.run_update_command(None)
+            with patch.object(self.notices, "_host_identity", return_value="0.21.4@abc"):
+                self.notices._record_reload()
+                self.assertTrue(self.notices.needs_reload(), "this process has not restarted yet")
+                with patch.object(self.notices, "_PROCESS_STARTED", time.time() + 60):
+                    self.assertFalse(self.notices.needs_reload(), "restarted, and still broken: no loop")
+                    with self._already_latest():
+                        reply, restart_head = self.notices.run_update_command(None)
+            with patch.object(self.notices, "_host_identity", return_value="0.21.4@def"), \
+                 patch.object(self.notices, "_PROCESS_STARTED", time.time() + 60):
+                self.assertTrue(self.notices.needs_reload(), "another Hermes on disk: worth one restart")
         self.assertEqual(restart_head, "")
         self.assertIn("could not fix itself", reply)
 
@@ -24833,12 +24903,60 @@ class NoticesTests(unittest.TestCase):
         restart.assert_not_called()
 
     def test_code_stale_compares_the_disk_with_what_was_loaded(self):
-        with patch.object(self.notices, "_LOADED_STAMP", 100.0), \
-             patch.object(self.notices, "_code_stamp", return_value=100.0):
+        with patch.object(self.notices, "_LOADED_STAMP", "aa"), \
+             patch.object(self.notices, "_code_stamp", return_value="aa"):
             self.assertFalse(self.notices.code_stale())
-        with patch.object(self.notices, "_LOADED_STAMP", 100.0), \
-             patch.object(self.notices, "_code_stamp", return_value=200.0):
+        with patch.object(self.notices, "_LOADED_STAMP", "aa"), \
+             patch.object(self.notices, "_code_stamp", return_value="bb"):
             self.assertTrue(self.notices.code_stale())
+        with patch.object(self.notices, "_LOADED_STAMP", "aa"), \
+             patch.object(self.notices, "_code_stamp", return_value=""):
+            self.assertFalse(self.notices.code_stale(), "an unreadable disk is not a newer one")
+        self.assertIsInstance(self.notices._code_stamp(), str)
+
+    def test_new_plugin_code_always_restarts_whatever_an_earlier_restart_did(self):
+        # The loop guard is for the host patch only: new code on disk is loaded by a
+        # restart every time.
+        with self._working(False), patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_host_patched_on_disk", return_value=True), \
+             patch.object(self.notices, "_host_identity", return_value="0.21.4@abc"):
+            self.notices._record_reload()
+        with patch.object(self.notices, "_PROCESS_STARTED", time.time() + 60), \
+             patch.object(self.notices, "_host_identity", return_value="0.21.4@abc"), \
+             patch.object(self.notices, "code_stale", return_value=True):
+            self.assertTrue(self.notices.needs_reload())
+            self.notices._record_reload()
+        self.assertEqual(self.notices._load()["pending"]["kind"], "update",
+                         "the restarted process says which version runs")
+
+    def test_a_working_start_forgets_the_restart_it_tried(self):
+        with self._working(False), patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_host_identity", return_value="0.21.4@abc"):
+            self.notices._record_reload()
+        self.assertIn("reload_tried", self.notices._load())
+        with self._working(True), patch.object(self.notices, "_send", return_value=True):
+            self.notices.startup_check()
+        self.assertNotIn("reload_tried", self.notices._load(), "a later break is a new episode")
+
+    def test_update_from_a_stale_process_restarts_only_this_process(self):
+        # A newer release on GitHub too: the restart that loads the code on disk
+        # comes first, and only this process restarts.
+        finished = []
+
+        def finish(head, loop=None, *, this_process_only=False):
+            finished.append(this_process_only)
+            return head
+
+        with patch.object(update_check, "run_update", side_effect=AssertionError("reload first")), \
+             patch.object(self.notices, "code_stale", return_value=True), \
+             patch.object(self.notices, "finish_with_restart", side_effect=finish):
+            reply = asyncio_run(plugin_init._update_command())
+        self.assertEqual((reply, finished), ("♾️ Refine Cycle fixed.", [True]))
+        with self._already_latest(), self._working(True), \
+             patch.object(self.notices, "code_stale", return_value=False):
+            details = {}
+            self.notices.run_update_command(None, details=details)
+        self.assertEqual(details, {}, "nothing stale: a normal update restarts as before")
 
     def test_the_user_is_never_asked_to_restart(self):
         with patch.object(self.notices, "restart_hermes", return_value=False):
@@ -25201,7 +25319,7 @@ class NoticesTests(unittest.TestCase):
         button starts the update and polls; a restart is left to the button."""
         release = threading.Event()
 
-        def slow_update(chat=None):
+        def slow_update(chat=None, **kwargs):
             release.wait(5)
             return "♾️ Refine Cycle updated to 1.3.12.", "♾️ Refine Cycle updated to 1.3.12."
 

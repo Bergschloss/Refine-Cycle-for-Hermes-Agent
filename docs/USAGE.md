@@ -78,7 +78,7 @@ proposal path and journals the preview without applying an edit or consuming the
 daily edit budget. `dry-run session <session_id>` previews one exact historical
 session after confirming it through the read-only Hermes sessions table.
 
-`update` installs the latest release when it is newer than the installed one. It downloads the commit the release tag points at, not a branch tip, runs the `install.py` shipped in that release with `--plugin-only`, and checks that the plugin directory now reports the new version. If anything fails, the previous files are put back. When the plugin is already current, the command still checks the host: if a Hermes update removed the route patch, it asks the installer to put it back, and says so when no bundled patch fits this Hermes. After an update or a repair it restarts Hermes itself: inside the gateway through the gateway's own restart (the same one `/restart` uses), scheduled a few seconds after the reply; from a CLI it runs `hermes gateway restart` when a gateway is running. An install from the Hermes plugin catalog is left alone and the reply points to `hermes plugins update refine-cycle`. The plugin never runs this on its own. `/refine_update` and `/refine_fix` run the same command in one tap.
+`update` first checks whether this process runs older plugin code than the disk holds (the desktop backend keeps the code it started with), or loaded Hermes before its route patch was put back. Then a restart is all it needs: it says `♾️ Refine Cycle fixed.` without asking GitHub, and restarts only this process, never a gateway from a CLI. A restart for the route patch is not repeated for the same Hermes when it changed nothing. Otherwise `update` installs the latest release when it is newer than the installed one. It downloads the commit the release tag points at, not a branch tip, runs the `install.py` shipped in that release with `--plugin-only`, and checks that the plugin directory now reports the new version. If anything fails, the previous files are put back. When the plugin is already current, the command still checks the host: if a Hermes update removed the route patch, it asks the installer to put it back, and says so when no bundled patch fits this Hermes. After an update or a repair it restarts Hermes itself: inside the gateway through the gateway's own restart (the same one `/restart` uses), scheduled a few seconds after the reply; from a CLI it runs `hermes gateway restart` when a gateway is running. An install from the Hermes plugin catalog is left alone and the reply points to `hermes plugins update refine-cycle`. The plugin never runs this on its own. `/refine_update` and `/refine_fix` run the same command in one tap.
 
 That restart is the gateway's own (`request_restart`): it stops taking new turns, waits for turns in progress up to `restart_after_turn_timeout`, then stops what is still running (a long task, a subagent, a turn past the timeout). Sessions are kept in `state.db` and continue after the restart. The desktop button restarts the desktop backend straight away, which cuts off a reply the app is still receiving. So an update is a deliberate interruption, and it only ever starts from the user's own tap or command.
 
@@ -87,11 +87,12 @@ shows which model writes them now and the providers Hermes lists in its model
 picker (every provider with credentials), numbered. `model <number>` shows that
 provider's models numbered `<number>.<number>`, and `model 3.12` picks one. A
 pick by number names the row that was on screen: the list is kept as it was
-shown, and only a new bare `model` lists anew. In a direct chat with the bot
+shown in that chat, and only a new bare `model` lists anew. In a direct chat with the bot
 (Telegram and the like) a bare number works too for two minutes after a list:
 `3`, then `12`; any other message ends that, and a number out of range shows the
 same list again. Not in groups, and not for a message the bot was not addressed
-in. The desktop app does not pass messages through the hook this needs, so
+in. The list says so only where it works. The desktop app does not pass messages
+through the hook this needs, and neither does a Hermes without that hook, so
 there the command is typed in full. On a Hermes
 without that model list, `model` falls back to the models your config names
 (`model.default` / `model.provider`, `model_aliases` and `model.aliases`, and
