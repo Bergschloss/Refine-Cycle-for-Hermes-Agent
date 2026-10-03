@@ -6818,6 +6818,11 @@ class RefineTests(unittest.TestCase):
             invalid_result = plugin_init._handle_refine_command("rollback not-an-id")
             self.assertIn("Invalid rollback format", invalid_result)
             self.assertEqual(run.call_count, 1)  # only the "audit logging failures" call
+            # Only a bare "fix" is the update command; text after it stays a reason.
+            with patch.object(plugin_init, "_update_command",
+                              side_effect=AssertionError("a reason, not the update")):
+                plugin_init._handle_refine_command("fix the flaky tests")
+            self.assertEqual(run.call_args.kwargs["reason"], "fix the flaky tests")
 
     def test_session_subcommand_routes_an_explicit_historical_session(self):
         """An explicit historical session keeps the registered host LLM."""

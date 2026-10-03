@@ -857,8 +857,11 @@ _DESKTOP_HALF_FRESH_SECONDS = 15 * 60
 # or finished, so it asks for the state now instead of at its next poll.
 _PLUGIN_EVENT_ID = "refine"
 _JOB_EVENT = "desktop.changed"
-# Hermes desktop stops waiting for a plugin command after 30 seconds. A typed
-# command answers before that, finished or not; the job goes on either way.
+# Hermes desktop stops waiting for a plugin command after 30 seconds
+# (_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS in hermes_cli/plugins.py, 2026-10). A typed
+# command answers before that, finished or not; the job goes on either way. If
+# Hermes ever lowers that bound below this wait, the typed reply is lost (the job
+# and the status bar still finish), so this stays well under it.
 _TYPED_WAIT_SECONDS = 25.0
 
 
