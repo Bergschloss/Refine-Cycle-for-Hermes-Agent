@@ -58,20 +58,20 @@ Recurrence is decided by the plugin, not the model. `patterns.py` normalizes req
 
 | File | Lines | Does |
 |---|---|---|
-| `core.py` | 7,911 | Orchestration: evidence, guardrails, durable apply, rollback |
-| `journal.py` | 3,153 | Append-only journal, mutation lock, approvals, rollback |
-| `llm.py` | 2,603 | Proposal calls, structured output, salvage, route classification |
-| `__init__.py` | 1,971 | Registration, hooks, slash command, prompt-note rule enforcement |
-| `install.py` | 1,835 | Host classification, patch apply/verify, plugin install |
-| `ledger.py` | 1,086 | Whether an applied edit actually helped, measured later |
-| `patterns.py` | 919 | Error fingerprinting and aggregation |
-| `config.py` | 814 | Settings, host config writes |
+| `core.py` | 8,244 | Orchestration: evidence, guardrails, durable apply, rollback |
+| `journal.py` | 3,339 | Append-only journal, mutation lock, approvals, rollback, the picked lesson model |
+| `llm.py` | 2,596 | Proposal calls, structured output, salvage, route classification |
+| `__init__.py` | 2,461 | Registration, hooks, slash command, the `model` picker and its bare-number hook, prompt-note rule enforcement |
+| `install.py` | 1,904 | Host classification, patch apply/verify, plugin install |
+| `config.py` | 1,148 | Settings, host config writes, the host's model list as the picker shows it |
+| `ledger.py` | 1,084 | Whether an applied edit actually helped, measured later |
+| `notices.py` | 1,025 | What the user is told and when: releases, a broken or paused plugin, a full memory store; one-tap update and fix, and which process restarts (a process running older plugin code than the disk holds restarts alone) |
+| `patterns.py` | 954 | Error fingerprinting and aggregation |
 | `lesson_effect_checker.py` | 555 | Frozen grader for the experiment programme |
+| `desktop/plugin.js` | 354 | The desktop app's status-bar item with Update / Fix, restarting the desktop backend after a press or a typed update; all decisions stay in `notices.py` |
+| `notify.py` | 268 | User notifications through the CLI entry point |
+| `refine_trace.py` | 159 | Invocation trace, in a plugin-owned log |
 | `sanitization.py` | 47 | Line-structure hygiene (the credential filter was removed) |
-| `notify.py` | 272 | User notifications through the CLI entry point |
-| `notices.py` | 675 | What the user is told and when: releases, a broken or paused plugin, a full memory store; one-tap update and fix, restart |
-| `desktop/plugin.js` | 245 | The desktop app's status-bar item with Update / Fix; all decisions stay in `notices.py` |
-| `refine_trace.py` | 170 | Invocation trace, in a plugin-owned log |
 
 ## What it may write
 

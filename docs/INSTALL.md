@@ -38,9 +38,10 @@ capability it depends on is gone. New proposals then fail closed with
 `llm_invocation_unavailable` until the patch is reapplied.
 
 This is not specific to any one release. Expect it after every Hermes update.
-From chat, send `/refine update` and then `/restart`: it installs a newer plugin
-release if there is one, then asks that release's installer for the host state
-and reapplies the patch when it is missing. From a terminal:
+From chat, send `/refine update` (or tap `/refine_fix`): it installs a newer plugin
+release if there is one, then asks that release's installer for the host state,
+reapplies the patch when it is missing, and restarts Hermes. In the desktop app
+the status bar's **Fix** does the same. From a terminal:
 
 ```bash
 python install.py --status      # says `stock` again if the patch was removed

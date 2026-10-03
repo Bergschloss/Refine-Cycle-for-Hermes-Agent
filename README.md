@@ -65,7 +65,7 @@ Hermes saves what is worth keeping from the conversation in front of it. Refine 
 
 ## What it changes on your host
 
-- Connects the plugin to the model your session already uses, so it never calls a model you did not pick.
+- Connects the plugin to the model your session already uses, so it never calls a model you did not pick. To have automatic lessons written by another model, a local one included, pick it with `/refine model` ([USAGE.md](docs/USAGE.md)).
 - Raises Hermes's memory limit to at least 4,400 characters. A higher value you set yourself stays.
 - Turns off Hermes's approval queue for memory and skill writes, because with it on no lesson ever lands. Your config is backed up first.
 
@@ -104,7 +104,7 @@ hermes gateway restart
 
 ![In the Hermes desktop app: Capabilities → Plugins → Refine Cycle → Desktop switched on](assets/turn-on-desktop.gif)
 
-When a new version is out, or a Hermes update stops the plugin, Refine Cycle tells you in chat. Tap `/refine_update` or `/refine_fix` and it updates or repairs itself and restarts Hermes. In the desktop app the same **Update** and **Fix** buttons sit in the status bar.
+When a new version is out, or a Hermes update stops the plugin, Refine Cycle tells you in chat. Tap `/refine_update` or `/refine_fix` and it updates or repairs itself and restarts Hermes. In the desktop app the same **Update** and **Fix** buttons sit in the status bar, and typing `/refine update` in the desktop chat ends the same way.
 
 **The restart interrupts work in progress.** Hermes stops taking new messages, lets the current reply finish within its restart timeout, then stops whatever is still running, such as a long task or a subagent. Your conversations are kept. In the desktop app the button restarts the backend at once, so a reply being written is cut off. Tap it when Hermes is not in the middle of something. Version support, troubleshooting and everything the installer changes: [docs/INSTALL.md](docs/INSTALL.md).
 

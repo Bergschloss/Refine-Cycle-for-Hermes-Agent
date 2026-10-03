@@ -59,18 +59,21 @@ registration warning and command help show which name is active.
 /refine audit
 /refine status
 /refine update
+/refine fix
 /refine dry-run
 /refine dry-run focus on Gmail API failures
 /refine dry-run session <session_id>
 /refine session <session_id>
 /refine model
 /refine model 3
+/refine model 3.12
 /refine model auto
 /refine rollback 1f2a3b4c5d6e
 ```
 
-`audit`, `status`, `dry-run`, `model`, `session <session_id>`, and
-`rollback <12-character-id>` are exact subcommands. `status` reports whether
+`audit`, `status`, `update`, `fix`, `dry-run`, `model`, `session <session_id>`, and
+`rollback <12-character-id>` are exact subcommands (`/refine fix <text>` is still a
+reason for a pass, like any other text). `status` reports whether
 automatic refinement is active, which session and database source would be
 analyzed, configured source skips, what blocks refinement, which model it will
 use, and the active journal/migration state. `dry-run [reason]` runs the normal
