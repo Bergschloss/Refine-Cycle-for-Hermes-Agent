@@ -260,7 +260,7 @@ def code_stale() -> bool:
     return bool(current) and current != _LOADED_STAMP
 
 
-def needs_reload() -> bool:
+def needs_reload(host_state: Optional[Dict[str, str]] = None) -> bool:
     """Only a restart of this process can fix it: nothing to download or install.
 
     The plugin on disk is not the one this process loaded: a restart always loads
@@ -268,10 +268,13 @@ def needs_reload() -> bool:
     it was there -- unless a restart already happened for the same Hermes and
     changed nothing: then saying "fixed" and restarting again would loop, and the
     honest answer is the normal one.
+
+    ``host_state`` receives the installer's answer when this asked it, so a repair
+    right after does not wait for the same subprocess again.
     """
     if code_stale():
         return True
-    if plugin_working() or not _host_patched_on_disk():
+    if plugin_working() or not _host_patched_on_disk(host_state):
         return False
     tried = _load().get("reload_tried")
     return not (isinstance(tried, dict) and float(tried.get("at") or 0) < _PROCESS_STARTED
@@ -309,14 +312,20 @@ def _host_identity() -> str:
     return f"{hermes_version()}@{head}"
 
 
-def _host_patched_on_disk() -> bool:
-    """The Hermes checkout on disk carries the route patch (this process may not have loaded it)."""
+def _host_patched_on_disk(host_state: Optional[Dict[str, str]] = None) -> bool:
+    """The Hermes checkout on disk carries the route patch (this process may not have loaded it).
+
+    ``host_state``, when given, receives the installer's whole answer.
+    """
     try:
         host = update_check._host_checkout()
         installer = update_check._plugin_dir() / "install.py"
         if host is None or not installer.is_file():
             return False
-        return update_check._host_state(subprocess.run, installer, host).get("state") == "patched"
+        state = update_check._host_state(subprocess.run, installer, host)
+        if host_state is not None:
+            host_state.update(state)
+        return state.get("state") == "patched"
     except Exception:
         return False
 
@@ -766,14 +775,17 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None, *,
     # offline check or a catalog install answered first and nothing ever restarted
     # (live, 2026-10-03: the desktop backend kept the old code through every Fix).
     # The caller restarts only this process (``details["reload"]``).
-    if needs_reload():
+    # The installer's host state, when the check below asked for it: the repair
+    # reads the same thing next, and each read is a subprocess of up to a minute.
+    host_state: Dict[str, str] = {}
+    if needs_reload(host_state):
         _record_reload()
         if details is not None:
             details["reload"] = True
         head = f"{BRAND} fixed."
         return head, head
     was_working = plugin_working()
-    result = update_check.run_update()
+    result = update_check.run_update(host_state=host_state or None)
     outcome = result.get("outcome")
     # The installer's own stdout and stderr are quoted in this message, so it can
     # carry whatever the environment that ran it had in it. Turned into words here,

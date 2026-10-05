@@ -16382,6 +16382,23 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                        "--hermes-src", str(self.root / "hermes")], calls)
         self.assertIn("/restart", result["message"])
 
+    def test_update_asks_the_release_installer_whatever_the_installed_one_said(self):
+        # The installed installer's answer spares a second read on the latest release
+        # only: a newer one may carry a patch that fits where the installed one had none.
+        tree = self._release_tree("99.0.0")
+        calls = []
+        runner = self._installer_runner(["stock", "patched"], calls)
+
+        with self._update_env(installed=["1.3.6", "99.0.0"], latest="v99.0.0", tree=tree):
+            result = update_check.run_update(
+                runner=runner, host_state={"state": "incompatible", "detail": "no patch fits"})
+
+        self.assertEqual(result["outcome"], "updated")
+        self.assertIn([sys.executable, str(tree / "install.py"), "--status", "--json",
+                       "--hermes-src", str(self.root / "hermes")], calls)
+        self.assertTrue(any("--patch-only" in argv for argv in calls))
+        self.assertNotIn("no patch fits", result["message"])
+
     def test_update_explains_a_hermes_no_bundled_patch_fits(self):
         plugin_dir = self.root / "installed-plugin"
         plugin_dir.mkdir()
@@ -16503,7 +16520,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         """The gateway calls handlers on its event loop; the update must not run there."""
         seen = {}
 
-        def run_update():
+        def run_update(**kwargs):
             seen["thread"] = threading.current_thread()
             return {"outcome": "updated", "tag": "v99.0.0", "message": "Updated to v99.0.0."}
 
@@ -25013,6 +25030,61 @@ class NoticesTests(unittest.TestCase):
             reply, restart_head = self.notices.run_update_command(None)
         self.assertEqual(restart_head, "")
         self.assertIn("could not fix itself", reply)
+
+    def _fix_on_a_broken_host(self, status):
+        """One /refine fix on the latest release while the route patch is missing.
+
+        ``status(calls)`` answers each ``--status --json`` call, given the installer
+        calls so far. Returns the reply, the restart head and the calls, in order.
+        """
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            if "--status" in argv:
+                return status(calls)
+            return types.SimpleNamespace(returncode=0, stdout="Host patch applied.", stderr="")
+
+        run_update = update_check.run_update
+        with self._working(False), patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(update_check, "installed_version", return_value="1.3.17"), \
+             patch.object(update_check, "_fetch_latest_release", return_value={"tag": "v1.3.17", "url": ""}), \
+             patch.object(update_check, "_plugin_dir", return_value=plugin_dir), \
+             patch.object(update_check, "_host_checkout", return_value=self.root / "hermes"), \
+             patch("subprocess.run", runner), \
+             patch.object(update_check, "run_update",
+                          side_effect=lambda **kwargs: run_update(runner=runner, **kwargs)):
+            reply, restart_head = self.notices.run_update_command(None)
+        return reply, restart_head, calls
+
+    def test_fix_asks_the_installer_for_the_host_state_once_before_repairing(self):
+        # Each --status is a subprocess of up to a minute: needs_reload already asked,
+        # so the repair must not ask the same thing again.
+        def status(calls):
+            patched = any("--patch-only" in argv for argv in calls)
+            report = {"state": "patched" if patched else "stock", "detail": ""}
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(report) + "\n", stderr="")
+
+        reply, restart_head, calls = self._fix_on_a_broken_host(status)
+        repair = next(i for i, argv in enumerate(calls) if "--patch-only" in argv)
+        self.assertEqual(sum("--status" in argv for argv in calls[:repair]), 1)
+        self.assertEqual(sum("--status" in argv for argv in calls[repair:]), 1, "the repair checks its result")
+        self.assertEqual(restart_head, "♾️ Refine Cycle fixed.")
+
+    def test_fix_reads_a_timed_out_host_state_once_before_deciding(self):
+        def status(calls):
+            raise subprocess.TimeoutExpired("install.py", 60)
+
+        reply, restart_head, calls = self._fix_on_a_broken_host(status)
+        self.assertFalse(any("--patch-only" in argv for argv in calls))
+        self.assertEqual(restart_head, "")
+        self.assertIn("could not fix itself", reply)
+        self.assertIn("Could not read the host state: the installer could not run (TimeoutExpired)", reply)
+        # One read before the repair decision; the other is _host_supported choosing the reply.
+        self.assertEqual(sum("--status" in argv for argv in calls), 2)
 
     def test_newer_plugin_code_on_disk_needs_a_restart_and_shows_not_working(self):
         with self._already_latest(), self._working(True), \

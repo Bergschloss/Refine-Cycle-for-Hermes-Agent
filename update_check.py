@@ -281,7 +281,8 @@ def _host_state(runner: Callable[..., Any], installer: Path, host: Path) -> Dict
     return {"state": str(report.get("state") or "unknown"), "detail": str(report.get("detail") or "")}
 
 
-def _repair_host(runner: Callable[..., Any], installer: Path, host: Path) -> Tuple[bool, str]:
+def _repair_host(runner: Callable[..., Any], installer: Path, host: Path,
+                 before: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
     """Put the host route patch back when an update removed it.
 
     The installer decides everything here: which bundled patch fits this Hermes,
@@ -289,8 +290,9 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path) -> Tup
     by hand and one no patch fits, and reverses a half-applied patch with a backup
     first. This only asks for its state, asks it to patch when the patch is
     missing, and reports what it said. Returns ``(changed, sentence)``.
+    ``before``: this installer's answer for this host, when the caller already has it.
     """
-    before = _host_state(runner, installer, host)
+    before = before or _host_state(runner, installer, host)
     if before["state"] == "patched":
         return False, ""
     if before["state"] == "incompatible":
@@ -322,12 +324,17 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path) -> Tup
     )
 
 
-def run_update(*, runner: Callable[..., Any] = subprocess.run) -> Dict[str, str]:
+def run_update(*, runner: Callable[..., Any] = subprocess.run,
+               host_state: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Install the latest release over this plugin, when the user asks for it.
 
     Uses the installer shipped inside that release, the same one a manual
     install runs, and puts the previous files back if it fails. The running
     process keeps the old code until Hermes restarts.
+
+    ``host_state``: what this plugin's installer just said about the host, so the
+    repair does not ask it again. A newer release's installer is asked anyway: it
+    may carry a patch that fits where this one had none.
     """
     plugin_dir = _plugin_dir()
     if (plugin_dir / _CATALOG_SIDECAR).is_file():
@@ -356,7 +363,7 @@ def run_update(*, runner: Callable[..., Any] = subprocess.run) -> Dict[str, str]
         installer = plugin_dir / "install.py"
         if host is None or not installer.is_file():
             return {"outcome": "already_latest", "message": message}
-        changed, note = _repair_host(runner, installer, host)
+        changed, note = _repair_host(runner, installer, host, host_state)
         if changed:
             return {"outcome": "repaired",
                     "message": message + note + " Restart Hermes to load it (in chat: /restart)."}
