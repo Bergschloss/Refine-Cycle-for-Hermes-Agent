@@ -12747,6 +12747,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                 text = plugin_init._handle_refine_command("status")
             self.assertIn("route: MISSING — automatic passes run on the chosen lesson model", text)
             self.assertNotIn("refine_run will stop", text)
+            # Where no patch fits that Hermes, the line agrees with the headline: it waits.
+            with patch.object(plugin_init.notices, "automatic_lessons_without_route", return_value=True), \
+                 patch.object(plugin_init.notices, "_host_supported", return_value=False):
+                text = plugin_init._handle_refine_command("status")
+            self.assertIn("needs no route. A manual /refine pass waits until Hermes", text)
+            self.assertNotIn("install.py --patch-only", text)
 
             # import failure -> unknown, honestly
             # import failure -> unknown, honestly
@@ -13159,6 +13165,14 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
              patch.object(config, "auto_enabled", return_value=False):
             result = plugin_init._handle_refine_command("model deepseek-v4-flash")
         self.assertIn("Automatic refinement is off (auto_enabled), so it writes nothing", result)
+        # Stored, but config.yaml keeps the host from using it: said, whatever the route.
+        with self._trusted_probe(), \
+             patch.object(config, "configured_model_problem",
+                          return_value="llm.allowed_providers does not list openai-codex, so the host would refuse the provider"):
+            result = plugin_init._handle_refine_command("model deepseek-v4-flash")
+        self.assertIn("Lessons are now written by deepseek-v4-flash", result)
+        self.assertIn("Not in force: llm.allowed_providers does not list openai-codex", result)
+        self.assertNotIn("automatic lessons run without it", result)
 
     def test_model_command_set_provider_and_model(self):
         with self._trusted_probe():
@@ -25145,24 +25159,24 @@ class NoticesTests(unittest.TestCase):
         with patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
              patch.object(config, "auto_enabled", return_value=False):
             # No automatic lessons at all: a lesson model would change nothing.
-            self.assertNotIn("Or pick", self.notices.stopped_text())
-            self.assertNotIn("Or pick", self.notices.paused_text("0.22.0"))
+            self.assertNotIn("Or send", self.notices.stopped_text())
+            self.assertNotIn("Or send", self.notices.paused_text("0.22.0"))
         with patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
              patch.object(config, "auto_enabled", return_value=True):
-            self.assertIn("Or pick the model that writes lessons with /refine model", self.notices.stopped_text())
-            self.assertIn("Or pick the model", self.notices.paused_text("0.22.0"),
+            self.assertIn("Or send /refine model and pick the model that writes lessons", self.notices.stopped_text())
+            self.assertIn("Or send /refine model", self.notices.paused_text("0.22.0"),
                           "no patch fits: a lesson model is the only way lessons run")
         with patch.object(config, "llm_use_model_for_auto_runs", return_value=True), \
              patch.object(config, "configured_model_problem", return_value="llm.allow_model_override is not on"), \
              patch.object(config, "auto_enabled", return_value=True):
             text = self.notices.stopped_text()
         self.assertIn("The chosen lesson model cannot write lessons: llm.allow_model_override is not on.", text)
-        self.assertNotIn("Or pick", text)
+        self.assertNotIn("Or send", text)
         with patch.object(config, "llm_use_model_for_auto_runs", return_value=True), \
              patch.object(config, "configured_model_problem", return_value=""), \
              patch.object(config, "auto_enabled", return_value=False):
             text = self.notices.stopped_text()
-        self.assertNotIn("Or pick", text)
+        self.assertNotIn("Or send", text)
         self.assertEqual(text, "♾️ Refine Cycle stopped working after the Hermes update.\n"
                                "/refine_fix — Hermes will restart.", "the fix is the only way left")
 

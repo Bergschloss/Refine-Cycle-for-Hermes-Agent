@@ -1403,7 +1403,11 @@ def _pick_lesson_model(provider: str, model: str, *, listed: bool) -> str:
         f"✅ Lessons are now written by {target}{answered} on automatic passes; "
         f"manual {name} keeps the session's model. {name} model auto goes back."
     )
-    if not notices.plugin_working():
+    problem = config.configured_model_problem()
+    if problem:
+        # Stored, but the rest of config.yaml keeps the host from using it.
+        reply += f" Not in force: {problem}."
+    elif not notices.plugin_working():
         if notices.automatic_lessons_without_route():
             reply += " This Hermes lacks the route a manual pass needs; automatic lessons run without it."
         elif not config.auto_enabled():
@@ -1713,8 +1717,8 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 if status.get("route_present") is True
                 else (
                     "route: MISSING — automatic passes run on the chosen lesson model, which "
-                    "needs no route; a manual pass stops with llm_invocation_unavailable "
-                    "until install.py --patch-only from the plugin directory."
+                    "needs no route. "
+                    + notices.manual_pass_line(_command_display_name(), messaging=False)
                     if status.get("route_present") is False
                     and notices.automatic_lessons_without_route()
                     else

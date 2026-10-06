@@ -199,7 +199,8 @@ def _second_way_out(*, messaging: bool = True) -> str:
         logger.debug("refine notices: lesson model state unreadable", exc_info=True)
     model = tap(config.command_display_name().lstrip("/"), messaging=messaging) + " model"
     return (
-        f"Or pick the model that writes lessons with {model}: automatic lessons on it "
+        # Sent as text: a command with an argument is not one tap on Telegram.
+        f"Or send {model} and pick the model that writes lessons: automatic lessons on it "
         "keep running after Hermes updates."
     )
 
