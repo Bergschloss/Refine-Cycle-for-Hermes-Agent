@@ -155,7 +155,7 @@ Every message starts with `♾️ Refine Cycle` and is sent once per event, to t
 |---|---|
 | A new release is out (checked once a day across all Hermes processes) | `♾️ Refine Cycle — update available: 1.3.12.` + `/refine_update — Hermes will restart.` |
 | A Hermes update stopped the plugin | `♾️ Refine Cycle stopped working after the Hermes update.` + `/refine_fix — Hermes will restart.` + `Or pick the model that writes lessons with /refine model: automatic lessons on it keep running after Hermes updates.` Not sent while a picked model writes the lessons: those keep running without the route patch. |
-| No bundled patch fits the new Hermes | `♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.` + the same model line as above. With a lesson model already set, the line names what stops it instead (a missing `allow_*_override`, or automatic refinement off). |
+| No bundled patch fits the new Hermes | `♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.` + the same model line as above. With a lesson model already set, the line names what stops it instead (no `llm.model`, or a missing `allow_*_override`); with automatic refinement off there is no such line. |
 | Hermes restarted on the new version | `♾️ Refine Cycle 1.3.12 is running.` |
 | Hermes restarted after a fix | `♾️ Refine Cycle is working again.` |
 | A desktop app on this host has the plugin's desktop half, switched off (once per host) | `♾️ Refine Cycle — please turn on the plugin: Capabilities → Plugins → Refine Cycle → Desktop — switch ON.` |

@@ -13153,6 +13153,12 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             result = plugin_init._handle_refine_command("model deepseek-v4-flash")
         self.assertIn("Lessons are now written by deepseek-v4-flash", result)
         self.assertIn("automatic lessons run without it", result)
+        with self._trusted_probe(), \
+             patch.object(plugin_init.notices, "plugin_working", return_value=False), \
+             patch.object(plugin_init.notices, "automatic_lessons_without_route", return_value=False), \
+             patch.object(config, "auto_enabled", return_value=False):
+            result = plugin_init._handle_refine_command("model deepseek-v4-flash")
+        self.assertIn("Automatic refinement is off (auto_enabled), so it writes nothing", result)
 
     def test_model_command_set_provider_and_model(self):
         with self._trusted_probe():
@@ -25045,6 +25051,28 @@ class NoticesTests(unittest.TestCase):
         self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(update_check.installed_version())])
         self.assertNotIn("pending", after)
 
+    def test_a_delivered_running_message_does_not_hold_the_next_one(self):
+        version = update_check.installed_version()
+        with self._working(False), self._picked(True):
+            self._start_with({"pending": {"kind": "update", "version": version}})
+            # A reload of the same version inside the hour still gets its message.
+            self._start_with(dict(self.notices._load(), pending={"kind": "update", "version": version}))
+        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(version)] * 2)
+
+    def test_on_a_hermes_no_patch_fits_a_manual_pass_waits_rather_than_asks_for_a_fix(self):
+        with patch.object(self.notices, "_host_supported", return_value=False):
+            line = self.notices.manual_pass_line("/refine", messaging=False)
+        self.assertIn("waits until Hermes", line)
+        self.assertNotIn("refine-fix", line)
+        with patch.object(self.notices, "_host_supported", return_value=True):
+            self.assertIn("needs the Hermes fix: /refine-fix", self.notices.manual_pass_line("/refine", messaging=False))
+        with patch.object(self.notices, "_host_supported", side_effect=AttributeError("no host checkout")):
+            self.assertIn("needs the Hermes fix", self.notices.manual_pass_line("/refine", messaging=False),
+                          "an unreadable host state still points at the fix")
+        with patch.object(self.notices, "_host_supported", return_value=False):
+            self.assertEqual(self.notices.manual_pass_line("/refine", messaging=False, lessons=True),
+                             f"Lessons on the session's model wait until Hermes {self.notices.hermes_version()} is supported.")
+
     def test_an_update_without_the_route_leaves_the_break_for_the_routes_return(self):
         broken = ["stopped", self.notices.hermes_version()]
         version = update_check.installed_version()
@@ -25068,12 +25096,19 @@ class NoticesTests(unittest.TestCase):
             self.assertEqual(self.notices.desktop_reply_note(), self.notices.DESKTOP_CARD)
 
     def test_the_second_way_out_names_what_blocks_a_lesson_model_already_set(self):
-        with patch.object(config, "llm_use_model_for_auto_runs", return_value=False):
+        with patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
+             patch.object(config, "auto_enabled", return_value=False):
+            # No automatic lessons at all: a lesson model would change nothing.
+            self.assertNotIn("Or pick", self.notices.stopped_text())
+            self.assertNotIn("Or pick", self.notices.paused_text("0.22.0"))
+        with patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
+             patch.object(config, "auto_enabled", return_value=True):
             self.assertIn("Or pick the model that writes lessons with /refine model", self.notices.stopped_text())
             self.assertIn("Or pick the model", self.notices.paused_text("0.22.0"),
                           "no patch fits: a lesson model is the only way lessons run")
         with patch.object(config, "llm_use_model_for_auto_runs", return_value=True), \
-             patch.object(config, "configured_model_problem", return_value="llm.allow_model_override is not on"):
+             patch.object(config, "configured_model_problem", return_value="llm.allow_model_override is not on"), \
+             patch.object(config, "auto_enabled", return_value=True):
             text = self.notices.stopped_text()
         self.assertIn("The chosen lesson model cannot write lessons: llm.allow_model_override is not on.", text)
         self.assertNotIn("Or pick", text)
@@ -25081,10 +25116,9 @@ class NoticesTests(unittest.TestCase):
              patch.object(config, "configured_model_problem", return_value=""), \
              patch.object(config, "auto_enabled", return_value=False):
             text = self.notices.stopped_text()
-        self.assertIn("automatic refinement is off", text)
         self.assertNotIn("Or pick", text)
-        self.assertTrue(text.startswith("♾️ Refine Cycle stopped working after the Hermes update.\n"
-                                        "/refine_fix — Hermes will restart.\n"))
+        self.assertEqual(text, "♾️ Refine Cycle stopped working after the Hermes update.\n"
+                               "/refine_fix — Hermes will restart.", "the fix is the only way left")
 
     def test_update_on_a_hermes_no_patch_fits_still_says_lessons_run_on_the_picked_model(self):
         with self._already_latest(), self._working(False), self._picked(True), \

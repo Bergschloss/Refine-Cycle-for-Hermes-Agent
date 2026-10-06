@@ -188,13 +188,13 @@ def _second_way_out() -> str:
     suggesting it again would point at the wrong thing: say what stops it.
     """
     try:
+        if not config.auto_enabled():
+            # No automatic lessons at all: a lesson model would change nothing, and
+            # the only pass left, a manual one, needs the fix above.
+            return ""
         if config.llm_use_model_for_auto_runs():
             problem = config.configured_model_problem()
-            if problem:
-                return f"The chosen lesson model cannot write lessons: {problem}."
-            if not config.auto_enabled():
-                return "A lesson model is chosen, but automatic refinement is off (auto_enabled)."
-            return ""
+            return f"The chosen lesson model cannot write lessons: {problem}." if problem else ""
     except Exception:
         logger.debug("refine notices: lesson model state unreadable", exc_info=True)
     model = tap(config.command_display_name().lstrip("/")) + " model"
@@ -202,6 +202,27 @@ def _second_way_out() -> str:
         f"Or pick the model that writes lessons with {model}: automatic lessons on it "
         "keep running after Hermes updates."
     )
+
+
+def manual_pass_line(command: str, *, messaging: bool, lessons: bool = False) -> str:
+    """What a pass on the session's own model needs on a Hermes without the route.
+
+    ``lessons``: said of all lessons on the session's model (no lesson model is
+    chosen), not of a manual pass.
+    """
+    who, waits, needs = (
+        ("Lessons on the session's model", "wait", "need") if lessons
+        else (f"A manual {command} pass", "waits", "needs")
+    )
+    try:
+        unsupported = _host_supported() is False
+    except Exception:
+        # Unknown is not "unsupported": the fix is still the thing to try.
+        logger.debug("refine notices: host state unreadable", exc_info=True)
+        unsupported = False
+    if unsupported:
+        return f"{who} {waits} until Hermes {hermes_version()} is supported."
+    return f"{who} {needs} the Hermes fix: {action_line(FIX_COMMAND, messaging=messaging)}"
 
 
 def stopped_text() -> str:
@@ -600,6 +621,9 @@ def startup_check(now: Optional[float] = None) -> None:
                 with _mutation() as fresh:
                     if fresh is not None:
                         fresh.pop("pending", None)
+                        # Delivered: the claim is done with, so the next restart's own
+                        # message is not held for the retry window.
+                        _forget_attempts(fresh, ("running:",))
                         if route:
                             fresh.pop("broken", None)
                             # The episode is over: its claims go with its latch, so a

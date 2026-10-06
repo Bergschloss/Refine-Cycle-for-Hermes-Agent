@@ -1403,8 +1403,11 @@ def _pick_lesson_model(provider: str, model: str, *, listed: bool) -> str:
         f"✅ Lessons are now written by {target}{answered} on automatic passes; "
         f"manual {name} keeps the session's model. {name} model auto goes back."
     )
-    if not notices.plugin_working() and notices.automatic_lessons_without_route():
-        reply += " This Hermes lacks the route a manual pass needs; automatic lessons run without it."
+    if not notices.plugin_working():
+        if notices.automatic_lessons_without_route():
+            reply += " This Hermes lacks the route a manual pass needs; automatic lessons run without it."
+        elif not config.auto_enabled():
+            reply += " Automatic refinement is off (auto_enabled), so it writes nothing until that is on."
     return reply
 
 
@@ -1429,10 +1432,8 @@ def _handle_model_subcommand(remainder: str) -> str:
         reply = f"{prefix}: {_lesson_model_line()}."
         if not notices.plugin_usable():
             # The picked model was what kept lessons running on a Hermes without the route.
-            reply += (
-                "\n⚠ Lessons on the session's model need the Hermes fix: "
-                + notices.action_line(notices.FIX_COMMAND, messaging=bool(chat))
-            )
+            reply += "\n⚠ " + notices.manual_pass_line(
+                _command_display_name(), messaging=bool(chat), lessons=True)
         return reply
     position = re.fullmatch(r"(\d+)(?:\.(\d+))?", remainder)
     if position and config.host_model_inventory_available() and not config.catalog_shown(chat):
@@ -1613,8 +1614,8 @@ def _status_headline() -> list:
             return [f"{head} · not working", notices.action_line(notices.FIX_COMMAND, messaging=messaging)]
         # Working on a picked model without the route: say what still needs the fix.
         manual = [] if notices.plugin_working() else [
-            f"Automatic lessons run on the chosen lesson model. A manual {_command_display_name()} pass "
-            f"needs the Hermes fix: {notices.action_line(notices.FIX_COMMAND, messaging=messaging)}"
+            "Automatic lessons run on the chosen lesson model. "
+            + notices.manual_pass_line(_command_display_name(), messaging=messaging)
         ]
         latest = notices.latest_known()
         if latest:
