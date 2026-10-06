@@ -829,7 +829,31 @@ def configured_model_problem() -> str:
             "a provider is set but llm.allow_provider_override is not on, so the "
             "host would drop the provider and answer on the session's provider"
         )
+    for kind in ("model", "provider"):
+        value = str(target.get(kind) or "")
+        if value and _host_allowlist_refuses(kind, value):
+            return (
+                f"llm.allowed_{kind}s does not list {value}, so the host would refuse "
+                f"the {kind}"
+            )
     return ""
+
+
+def _host_allowlist_refuses(kind: str, value: str) -> bool:
+    """Hermes's own ``llm.allowed_models`` / ``llm.allowed_providers`` check.
+
+    The host gates an override by its ``allow_*_override`` flag and then, when the
+    list is set, by membership (case-insensitive, ``"*"`` allows any): stock
+    ``agent/plugin_llm.py`` ``_gate_ref_override``. A model it refuses would fail
+    every automatic pass, so it is a problem here, before any call.
+    """
+    raw = _llm_entry().get(f"allowed_{kind}s")
+    if not isinstance(raw, list):
+        return False
+    listed = {item.strip().lower() for item in raw if isinstance(item, str)}
+    if "*" in listed:
+        return False
+    return value.strip().lower() not in (listed - {""})
 
 
 def llm_target_trust_denials(target: Dict[str, Any]) -> Dict[str, str]:

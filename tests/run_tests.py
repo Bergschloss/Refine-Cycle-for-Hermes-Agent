@@ -25059,6 +25059,52 @@ class NoticesTests(unittest.TestCase):
             self._start_with(dict(self.notices._load(), pending={"kind": "update", "version": version}))
         self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(version)] * 2)
 
+    def test_a_lesson_model_the_hosts_allowlist_refuses_is_a_problem_not_working(self):
+        # Hermes gates an override by its flag and then by llm.allowed_models /
+        # allowed_providers (case-insensitive, "*" allows any). A config-set model it
+        # refuses would fail every automatic pass, so it is not "working".
+        target = {"source": "config", "model": "Luna-900K", "provider": "openai-codex"}
+        cases = (
+            ({}, ""),
+            ({"allowed_models": ["luna-900k"]}, ""),
+            ({"allowed_models": ["*"]}, ""),
+            ({"allowed_models": ["other"]}, "llm.allowed_models does not list Luna-900K"),
+            ({"allowed_models": ["luna-900k"], "allowed_providers": ["openrouter"]},
+             "llm.allowed_providers does not list openai-codex"),
+            ({"allowed_models": "luna-900k"}, ""),  # not a list: no allowlist, as the host reads it
+        )
+        for entry, expected in cases:
+            with patch.object(config, "effective_llm_target", return_value=dict(target)), \
+                 patch.object(config, "llm_allow_model_override", return_value=True), \
+                 patch.object(config, "llm_allow_provider_override", return_value=True), \
+                 patch.object(config, "_llm_entry", return_value=entry):
+                problem = config.configured_model_problem()
+                if expected:
+                    self.assertIn(expected, problem, entry)
+                else:
+                    self.assertEqual(problem, "", entry)
+        with patch.object(config, "effective_llm_target", return_value=dict(target)), \
+             patch.object(config, "llm_allow_model_override", return_value=True), \
+             patch.object(config, "llm_allow_provider_override", return_value=True), \
+             patch.object(config, "_llm_entry", return_value={"allowed_models": ["other"]}), \
+             patch.object(config, "auto_enabled", return_value=True), \
+             patch.object(config, "llm_use_model_for_auto_runs", return_value=True), \
+             self._working(False):
+            self.assertFalse(self.notices.plugin_usable())
+
+    def test_the_paused_reply_to_a_typed_fix_writes_the_command_as_typed_there(self):
+        with self._already_latest(), self._working(False), self._picked(False), \
+             patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_host_patched_on_disk", return_value=False), \
+             patch.object(self.notices, "_host_supported", return_value=False), \
+             patch.object(config, "auto_enabled", return_value=True), \
+             patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
+             patch.object(config, "_COMMAND_NAME", "refine-cycle"):
+            typed, _ = self.notices.run_update_command(None)
+            tapped, _ = self.notices.run_update_command(("telegram", "1", ""))
+        self.assertIn("/refine-cycle model", typed)
+        self.assertIn("/refine_cycle model", tapped)
+
     def test_on_a_hermes_no_patch_fits_a_manual_pass_waits_rather_than_asks_for_a_fix(self):
         with patch.object(self.notices, "_host_supported", return_value=False):
             line = self.notices.manual_pass_line("/refine", messaging=False)

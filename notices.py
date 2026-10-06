@@ -180,7 +180,7 @@ def update_available_text(latest: str) -> str:
     return f"{BRAND} — update available: {plain_version(latest)}.\n{action_line(UPDATE_COMMAND)}"
 
 
-def _second_way_out() -> str:
+def _second_way_out(*, messaging: bool = True) -> str:
     """The way back that needs no route, or what blocks the one already chosen.
 
     A lesson model writes the automatic lessons without the route a Hermes update
@@ -197,7 +197,7 @@ def _second_way_out() -> str:
             return f"The chosen lesson model cannot write lessons: {problem}." if problem else ""
     except Exception:
         logger.debug("refine notices: lesson model state unreadable", exc_info=True)
-    model = tap(config.command_display_name().lstrip("/")) + " model"
+    model = tap(config.command_display_name().lstrip("/"), messaging=messaging) + " model"
     return (
         f"Or pick the model that writes lessons with {model}: automatic lessons on it "
         "keep running after Hermes updates."
@@ -233,9 +233,9 @@ def stopped_text() -> str:
     )
 
 
-def paused_text(hermes_version: str) -> str:
+def paused_text(hermes_version: str, *, messaging: bool = True) -> str:
     # No patch fits this Hermes yet, so a lesson model is the only way lessons run now.
-    second = _second_way_out()
+    second = _second_way_out(messaging=messaging)
     return (
         f"{BRAND} is paused: Hermes {hermes_version} isn't supported yet. "
         "You'll get a message when it is."
@@ -919,7 +919,8 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None, *,
                     f"{config.command_display_name()} pass waits until Hermes "
                     f"{hermes_version()} is supported."
                 ), ""
-            return paused_text(hermes_version()), ""
+            # Typed in the desktop app or a CLI (no chat), the command is written as typed there.
+            return paused_text(hermes_version(), messaging=chat is not None), ""
         return f"{BRAND} could not fix itself. {message}".strip(), ""
     if outcome == "catalog_install":
         return f"{BRAND}: {message}", ""
