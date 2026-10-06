@@ -778,6 +778,60 @@ def compile_all(src: Path, patch: Path | None = None) -> None:
             )
 
 
+def capability_script(src: Path, dest: Path) -> str:
+    """The synthetic route smoke the installer runs in a fresh interpreter.
+
+    ``hermes_bootstrap`` comes first, as in Hermes's own launchers: a Hermes that
+    runs on its bundled Python re-executes into it, and only the bootstrap puts the
+    venv's packages (ruamel.yaml and the rest) on the path. Without it the probe
+    failed on Hermes main 2026-10 with "No module named 'ruamel'" although the
+    install was fine. An older Hermes has no such module; the import is skipped.
+    """
+    return (
+        "import sys; sys.path.insert(0, r'%s')\n"
+        "sys.path.insert(0, r'%s')\n"
+        "try:\n"
+        "    import hermes_bootstrap  # noqa: F401\n"
+        "except ImportError:\n"
+        "    pass\n" % (str(src), str(dest))
+    ) + r'''
+import json
+from types import SimpleNamespace
+from agent.plugin_llm import PluginInvocationRoute, PluginLlm
+import llm as refine_llm
+
+class RecordingClient:
+    def __init__(self):
+        self.calls = []
+        outer = self
+        class Completions:
+            def create(self, **kwargs):
+                outer.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                        "action": "no_op", "kind": "memory",
+                        "reason": "synthetic route smoke"
+                    })))],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                    model="refine-smoke-model",
+                )
+        self.chat = SimpleNamespace(completions=Completions())
+
+client = RecordingClient()
+route = PluginInvocationRoute(
+    provider="custom", model="refine-smoke-model",
+    base_url="https://synthetic.invalid/v1", api_key="synthetic",
+    api_mode="chat_completions", client=client,
+).validated()
+facade = PluginLlm(plugin_id="refine").bind_invocation(route)
+proposal = refine_llm.propose(facade, "synthetic evidence only", [], [])
+assert proposal.get("action") == "no_op", proposal
+assert not proposal.get("failure"), proposal
+assert len(client.calls) == 1, f"expected one physical request, got {len(client.calls)}"
+print("CAPABILITY_OK")
+'''
+
+
 def python_of(src: Path) -> str:
     """Pick the interpreter that runs this Hermes checkout."""
     for cand in (
@@ -1780,45 +1834,7 @@ def do_install(args) -> None:
     # exactly one request and the installed Refine proposer must parse its reply.
     # The subprocess gets an empty disposable HERMES_HOME, so no real trajectory,
     # credentials, journal, or memory can enter the probe.
-    ver = (
-        "import sys; sys.path.insert(0, r'%s')\n"
-        "sys.path.insert(0, r'%s')\n" % (str(src), str(dest))
-    ) + r'''
-import json
-from types import SimpleNamespace
-from agent.plugin_llm import PluginInvocationRoute, PluginLlm
-import llm as refine_llm
-
-class RecordingClient:
-    def __init__(self):
-        self.calls = []
-        outer = self
-        class Completions:
-            def create(self, **kwargs):
-                outer.calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                        "action": "no_op", "kind": "memory",
-                        "reason": "synthetic route smoke"
-                    })))],
-                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
-                    model="refine-smoke-model",
-                )
-        self.chat = SimpleNamespace(completions=Completions())
-
-client = RecordingClient()
-route = PluginInvocationRoute(
-    provider="custom", model="refine-smoke-model",
-    base_url="https://synthetic.invalid/v1", api_key="synthetic",
-    api_mode="chat_completions", client=client,
-).validated()
-facade = PluginLlm(plugin_id="refine").bind_invocation(route)
-proposal = refine_llm.propose(facade, "synthetic evidence only", [], [])
-assert proposal.get("action") == "no_op", proposal
-assert not proposal.get("failure"), proposal
-assert len(client.calls) == 1, f"expected one physical request, got {len(client.calls)}"
-print("CAPABILITY_OK")
-'''
+    ver = capability_script(src, Path(dest))
     import tempfile as _tf
     with _tf.NamedTemporaryFile("w", suffix="_capver.py", delete=False, encoding="utf-8") as tf:
         tf.write(ver)

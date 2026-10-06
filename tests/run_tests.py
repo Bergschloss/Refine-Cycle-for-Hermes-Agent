@@ -30135,6 +30135,25 @@ class FakeHostContractTests(unittest.TestCase):
         self.assertEqual(drift, [], f"fake and real MemoryStore disagree: {drift}")
 
 
+class InstallerCapabilityScriptTests(unittest.TestCase):
+    """The installer's synthetic route smoke runs like Hermes's own launchers."""
+
+    def test_the_bootstrap_comes_before_any_hermes_import(self):
+        # Hermes main (2026-10) runs on its bundled Python and only the bootstrap
+        # puts the venv's packages on the path; without it the smoke failed with
+        # "No module named 'ruamel'" on a good install.
+        import install
+
+        script = install.capability_script(Path("/host/src"), Path("/host/plugin"))
+        compile(script, "capability_smoke", "exec")
+        lines = script.splitlines()
+        bootstrap = next(i for i, line in enumerate(lines) if "import hermes_bootstrap" in line)
+        first_host = next(i for i, line in enumerate(lines) if line.startswith("from agent."))
+        self.assertLess(bootstrap, first_host)
+        self.assertIn("except ImportError:", script, "an older Hermes has no bootstrap")
+        self.assertIn('print("CAPABILITY_OK")', script)
+
+
 class InstallerMemoryBudgetTests(unittest.TestCase):
     """The install brings the Hermes memory budget up to a floor, and can undo it.
 
