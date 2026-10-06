@@ -181,7 +181,14 @@ def update_available_text(latest: str) -> str:
 
 
 def stopped_text() -> str:
-    return f"{BRAND} stopped working after the Hermes update.\n{action_line(FIX_COMMAND)}"
+    # The second way out needs no fix after any later Hermes update either: a
+    # picked model writes the automatic lessons without the route Hermes removed.
+    model = tap(config.command_display_name().lstrip("/")) + " model"
+    return (
+        f"{BRAND} stopped working after the Hermes update.\n{action_line(FIX_COMMAND)}\n"
+        f"Or pick the model that writes lessons with {model}: automatic lessons on it "
+        "keep running after Hermes updates."
+    )
 
 
 def paused_text(hermes_version: str) -> str:
@@ -223,6 +230,30 @@ def plugin_working() -> bool:
         return hasattr(host_plugins, "plugin_invocation_scope")
     except Exception:
         return False
+
+
+def automatic_lessons_without_route() -> bool:
+    """A picked model writes the automatic lessons, and they need no route.
+
+    The automatic worker reaches a picked model through Hermes's plain plugin LLM,
+    which every Hermes has; only a pass on the session's own model (a manual
+    ``/refine``, or automatic passes with no model picked) needs the route patch.
+    Checked live on an unpatched Hermes main (04dc1c6ea0, 2026-10-06): the worker
+    got the plain facade and a full automatic pass reached the picked model.
+    """
+    try:
+        return config.llm_use_model_for_auto_runs() and not config.configured_model_problem()
+    except Exception:
+        return False
+
+
+def plugin_usable() -> bool:
+    """What the user is told: the plugin works, with the route or on a picked model.
+
+    ``plugin_working`` stays the route question, for the restart logic that is
+    about the route itself.
+    """
+    return plugin_working() or automatic_lessons_without_route()
 
 
 def _code_stamp() -> str:
@@ -515,8 +546,8 @@ def startup_check(now: Optional[float] = None) -> None:
         state = _load()
         pending = state.get("pending")
         version = update_check.installed_version()
-        if plugin_working():
-            if "reload_tried" in state:
+        if plugin_usable():
+            if plugin_working() and "reload_tried" in state:
                 # The restart worked; a later break is a new episode.
                 with _mutation() as fresh:
                     if fresh is not None:
@@ -610,7 +641,7 @@ def desktop_reply_note() -> Optional[str]:
             if not state.get("desktop_cards"):
                 # This app cannot render the card; its status bar says the same.
                 return None
-            if not plugin_working():
+            if not plugin_usable():
                 event = f"fix:{hermes_version()}"
             else:
                 latest = latest_known(state)
@@ -818,6 +849,13 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None, *,
         if was_working:
             return f"{BRAND} {plain_version(update_check.installed_version())} is up to date.", ""
         if _host_supported() is False:
+            if automatic_lessons_without_route():
+                return (
+                    f"{BRAND} {plain_version(update_check.installed_version())} is up to date. "
+                    "Automatic lessons run on the picked model; a manual "
+                    f"{config.command_display_name()} pass waits until Hermes "
+                    f"{hermes_version()} is supported."
+                ), ""
             return paused_text(hermes_version()), ""
         return f"{BRAND} could not fix itself. {message}".strip(), ""
     if outcome == "catalog_install":
@@ -978,7 +1016,7 @@ def desktop_state(cards: bool = False) -> Dict[str, Any]:
         "version": plain_version(update_check.installed_version()),
         # A backend running older plugin code than the disk holds is not working as
         # installed: the [Fix] it shows restarts it, which is all it needs.
-        "working": plugin_working() and not code_stale(),
+        "working": plugin_usable() and not code_stale(),
         "latest": plain_version(latest) if latest else None,
         "job": job,
         "backend": _BACKEND_ID,

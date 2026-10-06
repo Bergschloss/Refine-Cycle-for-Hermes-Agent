@@ -1423,7 +1423,14 @@ def _handle_model_subcommand(remainder: str) -> str:
             "absent": "Already on auto",
             "failed": "⚠ Could not remove the picked model, so it is still in use",
         }[outcome]
-        return f"{prefix}: {_lesson_model_line()}."
+        reply = f"{prefix}: {_lesson_model_line()}."
+        if not notices.plugin_usable():
+            # The picked model was what kept lessons running on a Hermes without the route.
+            reply += (
+                "\n⚠ Lessons on the session's model need the Hermes fix: "
+                + notices.action_line(notices.FIX_COMMAND, messaging=bool(chat))
+            )
+        return reply
     position = re.fullmatch(r"(\d+)(?:\.(\d+))?", remainder)
     if position and config.host_model_inventory_available() and not config.catalog_shown(chat):
         # A number names a row of the list on screen. With none there any more (or
@@ -1599,15 +1606,20 @@ def _status_headline() -> list:
         version = update_check.installed_version()
         messaging = _capture_active_chat() is not None
         head = f"{notices.BRAND} {notices.plain_version(version)}"
-        if not notices.plugin_working() or notices.code_stale():
+        if not notices.plugin_usable() or notices.code_stale():
             return [f"{head} · not working", notices.action_line(notices.FIX_COMMAND, messaging=messaging)]
+        # Working on a picked model without the route: say what still needs the fix.
+        manual = [] if notices.plugin_working() else [
+            f"Automatic lessons run on the picked model. A manual {_command_display_name()} pass "
+            f"needs the Hermes fix: {notices.action_line(notices.FIX_COMMAND, messaging=messaging)}"
+        ]
         latest = notices.latest_known()
         if latest:
             return [f"{head} · update available: {notices.plain_version(latest)}",
-                    notices.action_line(notices.UPDATE_COMMAND, messaging=messaging)]
+                    notices.action_line(notices.UPDATE_COMMAND, messaging=messaging)] + manual
         used, limit = core._memory_usage()
         memory = f" · memory {used}/{limit}" if used is not None and limit is not None else ""
-        return [f"{head} · working{memory}"]
+        return [f"{head} · working{memory}"] + manual
     except Exception:
         logger.debug("refine status headline failed", exc_info=True)
         return []
@@ -2431,6 +2443,13 @@ def _warn_if_core_patch_missing() -> None:
     identical to "no signal", so this is warned at registration.
     """
     if _core_patch_present():
+        return
+    if notices.automatic_lessons_without_route():
+        logger.info(
+            "Refine: Hermes core lacks the invocation-route patch; automatic lessons "
+            "run on the picked model, and a manual pass stops with "
+            "llm_invocation_unavailable until install.py --patch-only (or /refine fix)."
+        )
         return
     logger.warning(
         "Refine: Hermes core lacks the invocation-route patch; refine_run "

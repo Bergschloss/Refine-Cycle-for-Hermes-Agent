@@ -13269,6 +13269,17 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(journal.clear_model_override(), "absent")
         result = plugin_init._handle_refine_command("model auto")
         self.assertIn("Already on auto", result)
+
+    def test_model_auto_on_a_hermes_without_the_route_says_lessons_need_the_fix(self):
+        # The picked model was what kept automatic lessons running there.
+        journal.write_model_override("", "pinned-model")
+        with patch.object(plugin_init.notices, "plugin_usable", return_value=False):
+            result = plugin_init._handle_refine_command("model auto")
+        self.assertIn("Back to auto", result)
+        self.assertIn("need the Hermes fix: /refine-fix — Hermes will restart.", result)
+        with patch.object(plugin_init.notices, "plugin_usable", return_value=True):
+            self.assertNotIn("Hermes fix", plugin_init._handle_refine_command("model auto"))
+
     def test_model_auto_confirms_a_real_removal(self):
         journal.write_model_override("", "pinned-model")
         self.assertEqual(journal.clear_model_override(), "removed")
@@ -24924,6 +24935,71 @@ class NoticesTests(unittest.TestCase):
     def _working(self, value):
         return patch.object(self.notices, "plugin_working", return_value=value)
 
+    def _picked(self, value):
+        """A picked model writes the automatic lessons (the route is a separate question)."""
+        return patch.object(self.notices, "automatic_lessons_without_route", return_value=value)
+
+    def test_a_picked_model_keeps_the_plugin_working_on_a_hermes_without_the_route(self):
+        # After a Hermes update removed the route: automatic lessons still reach the
+        # picked model, so nothing says "stopped working" and nothing asks for a Fix.
+        with self._working(False), self._picked(True), \
+             patch.object(self.notices, "_host_supported", return_value=True), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check()
+            state = self.notices.desktop_state()
+            head = plugin_init._status_headline()
+        self.assertEqual(self.sent, [], "no stopped-working message")
+        self.assertTrue(state["working"])
+        self.assertIn("· working", head[0])
+        self.assertNotIn("not working", head[0])
+        # What still needs the fix is said, once, in the status.
+        self.assertIn("Automatic lessons run on the picked model", head[-1])
+        self.assertIn("/refine-fix — Hermes will restart.", head[-1])
+
+    def test_with_the_route_the_status_has_no_manual_pass_line(self):
+        with self._working(True), self._picked(True), \
+             patch.object(self.notices, "latest_known", return_value=None), \
+             patch.object(core, "_memory_usage", return_value=(10, 4400)):
+            head = plugin_init._status_headline()
+        self.assertEqual(len(head), 1)
+        self.assertTrue(head[0].endswith("· working · memory 10/4400"), head[0])
+
+    def test_without_a_picked_model_the_break_offers_the_model_as_the_second_way_out(self):
+        with self._working(False), self._picked(False), \
+             patch.object(self.notices, "_host_supported", return_value=True), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check()
+            state = self.notices.desktop_state()
+        self.assertEqual([t for t, _ in self.sent], [self.notices.stopped_text()])
+        text = self.sent[0][0]
+        self.assertIn("/refine_fix — Hermes will restart.", text)
+        self.assertIn("/refine model", text)
+        self.assertFalse(state["working"])
+
+    def test_the_second_way_out_names_the_command_this_hermes_registered(self):
+        with patch.object(config, "_COMMAND_NAME", "refine-cycle"):
+            self.assertIn("/refine_cycle model", self.notices.stopped_text())
+
+    def test_automatic_lessons_without_the_route_need_a_usable_picked_model(self):
+        for on, problem, expected in ((True, "", True), (True, "allow_model_override is off", False),
+                                      (False, "", False)):
+            with patch.object(config, "llm_use_model_for_auto_runs", return_value=on), \
+                 patch.object(config, "configured_model_problem", return_value=problem):
+                self.assertIs(self.notices.automatic_lessons_without_route(), expected, (on, problem))
+        with patch.object(config, "llm_use_model_for_auto_runs", side_effect=OSError("config unreadable")):
+            self.assertFalse(self.notices.automatic_lessons_without_route())
+
+    def test_update_on_a_hermes_no_patch_fits_still_says_lessons_run_on_the_picked_model(self):
+        with self._already_latest(), self._working(False), self._picked(True), \
+             patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_host_patched_on_disk", return_value=False), \
+             patch.object(self.notices, "_host_supported", return_value=False):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(restart_head, "")
+        self.assertIn("is up to date", reply)
+        self.assertIn("Automatic lessons run on the picked model", reply)
+        self.assertNotIn("paused", reply)
+
     def test_every_message_starts_with_the_brand(self):
         texts = [
             self.notices.update_available_text("v1.3.12"),
@@ -24940,7 +25016,7 @@ class NoticesTests(unittest.TestCase):
         self.assertNotIn("patch", " ".join(texts).lower())
         # A tap restarts Hermes and cuts off work in progress: said before the tap.
         self.assertTrue(texts[0].endswith("/refine_update — Hermes will restart."))
-        self.assertTrue(texts[1].endswith("/refine_fix — Hermes will restart."))
+        self.assertIn("\n/refine_fix — Hermes will restart.\n", texts[1])
         self.assertIn("Hermes will restart",
                       self.notices.action_line(self.notices.UPDATE_COMMAND, messaging=False))
 
