@@ -56,7 +56,7 @@ reach it through Hermes's plain plugin LLM, which needs no patch, so they keep
 running after a Hermes update and the plugin keeps reporting `working`. Only a
 manual `/refine` pass, which runs on the session's own model, waits for the patch
 then; `/refine status` says so. The desktop status bar shows no **Fix** in that
-case, so the fix is the command above.
+case: tap `/refine_fix` in chat, or run the commands above.
 
 `--status` can also report `outdated`: every marker is present, but the files carry an
 earlier revision of a patch that has since been fixed. `--patch-only` and `/refine

@@ -180,21 +180,45 @@ def update_available_text(latest: str) -> str:
     return f"{BRAND} — update available: {plain_version(latest)}.\n{action_line(UPDATE_COMMAND)}"
 
 
-def stopped_text() -> str:
-    # The second way out needs no fix after any later Hermes update either: a
-    # picked model writes the automatic lessons without the route Hermes removed.
+def _second_way_out() -> str:
+    """The way back that needs no route, or what blocks the one already chosen.
+
+    A lesson model writes the automatic lessons without the route a Hermes update
+    removes, so picking one also spares every later fix. With one already set,
+    suggesting it again would point at the wrong thing: say what stops it.
+    """
+    try:
+        if config.llm_use_model_for_auto_runs():
+            problem = config.configured_model_problem()
+            if problem:
+                return f"The chosen lesson model cannot write lessons: {problem}."
+            if not config.auto_enabled():
+                return "A lesson model is chosen, but automatic refinement is off (auto_enabled)."
+            return ""
+    except Exception:
+        logger.debug("refine notices: lesson model state unreadable", exc_info=True)
     model = tap(config.command_display_name().lstrip("/")) + " model"
     return (
-        f"{BRAND} stopped working after the Hermes update.\n{action_line(FIX_COMMAND)}\n"
         f"Or pick the model that writes lessons with {model}: automatic lessons on it "
         "keep running after Hermes updates."
     )
 
 
+def stopped_text() -> str:
+    second = _second_way_out()
+    return (
+        f"{BRAND} stopped working after the Hermes update.\n{action_line(FIX_COMMAND)}"
+        + (f"\n{second}" if second else "")
+    )
+
+
 def paused_text(hermes_version: str) -> str:
+    # No patch fits this Hermes yet, so a lesson model is the only way lessons run now.
+    second = _second_way_out()
     return (
         f"{BRAND} is paused: Hermes {hermes_version} isn't supported yet. "
         "You'll get a message when it is."
+        + (f"\n{second}" if second else "")
     )
 
 
@@ -561,22 +585,26 @@ def startup_check(now: Optional[float] = None) -> None:
             elif plugin_working() and (state.get("broken") or isinstance(pending, dict)):
                 text = working_again_text()
             else:
-                # Working on a picked model without the route: a fix that did not
-                # bring the route back is not "working again", and the break is
-                # not over until the route is (its latch stays for that message).
+                # Working on a lesson model without the route: a fix that did not
+                # bring the route back is not "working again".
                 text = ""
                 if isinstance(pending, dict):
                     with _mutation() as fresh:
                         if fresh is not None:
                             fresh.pop("pending", None)
-            if text and _claim(f"working:{version}", now) and _send(state, text):
+            # Without the route the break is not over, whatever else was said: its
+            # latch and claims stay for the "working again" the route's return brings,
+            # so the update's own message claims a key of its own.
+            route = plugin_working()
+            if text and _claim(f"{'working' if route else 'running'}:{version}", now) and _send(state, text):
                 with _mutation() as fresh:
                     if fresh is not None:
-                        fresh.pop("broken", None)
                         fresh.pop("pending", None)
-                        # The episode is over: its claims go with its latch, so a
-                        # break and a fix an hour apart are not the last word.
-                        _forget_attempts(fresh, ("working:", "broken:"))
+                        if route:
+                            fresh.pop("broken", None)
+                            # The episode is over: its claims go with its latch, so a
+                            # break and a fix an hour apart are not the last word.
+                            _forget_attempts(fresh, ("working:", "broken:"))
         else:
             # Claimed before ``_host_supported``, not after: that call runs the
             # installer as a subprocess with a 60-second timeout, and on a broken
@@ -863,7 +891,7 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None, *,
             if automatic_lessons_without_route():
                 return (
                     f"{BRAND} {plain_version(update_check.installed_version())} is up to date. "
-                    "Automatic lessons run on the picked model; a manual "
+                    "Automatic lessons run on the chosen lesson model; a manual "
                     f"{config.command_display_name()} pass waits until Hermes "
                     f"{hermes_version()} is supported."
                 ), ""

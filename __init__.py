@@ -1613,7 +1613,7 @@ def _status_headline() -> list:
             return [f"{head} · not working", notices.action_line(notices.FIX_COMMAND, messaging=messaging)]
         # Working on a picked model without the route: say what still needs the fix.
         manual = [] if notices.plugin_working() else [
-            f"Automatic lessons run on the picked model. A manual {_command_display_name()} pass "
+            f"Automatic lessons run on the chosen lesson model. A manual {_command_display_name()} pass "
             f"needs the Hermes fix: {notices.action_line(notices.FIX_COMMAND, messaging=messaging)}"
         ]
         latest = notices.latest_known()
@@ -1711,7 +1711,7 @@ def _handle_refine_command(raw_args: str) -> Optional[str]:
                 "route: present (invocation-bound LLM available)"
                 if status.get("route_present") is True
                 else (
-                    "route: MISSING — automatic passes run on the picked model, which "
+                    "route: MISSING — automatic passes run on the chosen lesson model, which "
                     "needs no route; a manual pass stops with llm_invocation_unavailable "
                     "until install.py --patch-only from the plugin directory."
                     if status.get("route_present") is False
