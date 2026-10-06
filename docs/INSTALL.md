@@ -38,12 +38,6 @@ capability it depends on is gone. New proposals then fail closed with
 `llm_invocation_unavailable` until the patch is reapplied.
 
 This is not specific to any one release. Expect it after every Hermes update.
-
-A picked lesson model (`/refine model`, or `llm.use_model_for_auto_runs` in
-config.yaml) is the exception: automatic lessons reach it through Hermes's plain
-plugin LLM, which needs no patch, so they keep running after a Hermes update and
-the plugin keeps reporting `working`. Only a manual `/refine` pass, which runs on
-the session's own model, waits for the patch then; `/refine status` says so.
 From chat, send `/refine update` (or tap `/refine_fix`): it installs a newer plugin
 release if there is one, then asks that release's installer for the host state,
 reapplies the patch when it is missing, and restarts Hermes. In the desktop app
@@ -55,6 +49,14 @@ python install.py --patch-only  # reapplies it
 ```
 
 `python install.py --status --json` prints the same report as one line of JSON.
+
+A picked lesson model (`/refine model`, or `llm.use_model_for_auto_runs` in
+config.yaml) with automatic refinement on is the exception: automatic lessons
+reach it through Hermes's plain plugin LLM, which needs no patch, so they keep
+running after a Hermes update and the plugin keeps reporting `working`. Only a
+manual `/refine` pass, which runs on the session's own model, waits for the patch
+then; `/refine status` says so. The desktop status bar shows no **Fix** in that
+case, so the fix is the command above.
 
 `--status` can also report `outdated`: every marker is present, but the files carry an
 earlier revision of a patch that has since been fixed. `--patch-only` and `/refine

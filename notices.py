@@ -242,7 +242,11 @@ def automatic_lessons_without_route() -> bool:
     got the plain facade and a full automatic pass reached the picked model.
     """
     try:
-        return config.llm_use_model_for_auto_runs() and not config.configured_model_problem()
+        return (
+            config.auto_enabled()
+            and config.llm_use_model_for_auto_runs()
+            and not config.configured_model_problem()
+        )
     except Exception:
         return False
 
@@ -554,10 +558,17 @@ def startup_check(now: Optional[float] = None) -> None:
                         fresh.pop("reload_tried", None)
             if isinstance(pending, dict) and pending.get("kind") == "update":
                 text = running_text(version)
-            elif state.get("broken") or isinstance(pending, dict):
+            elif plugin_working() and (state.get("broken") or isinstance(pending, dict)):
                 text = working_again_text()
             else:
+                # Working on a picked model without the route: a fix that did not
+                # bring the route back is not "working again", and the break is
+                # not over until the route is (its latch stays for that message).
                 text = ""
+                if isinstance(pending, dict):
+                    with _mutation() as fresh:
+                        if fresh is not None:
+                            fresh.pop("pending", None)
             if text and _claim(f"working:{version}", now) and _send(state, text):
                 with _mutation() as fresh:
                     if fresh is not None:

@@ -13137,6 +13137,17 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertEqual(override["model"], "deepseek-v4-flash")
         self.assertEqual(override["provider"], "")
         self.assertIs(override["auto_runs"], True)
+        with self._trusted_probe(), patch.object(plugin_init.notices, "plugin_working", return_value=True):
+            self.assertNotIn("lacks the route", plugin_init._handle_refine_command("model deepseek-v4-flash"),
+                             "a host with the route needs no note")
+    def test_a_pick_on_a_hermes_without_the_route_says_automatic_lessons_still_run(self):
+        with self._trusted_probe(), \
+             patch.object(plugin_init.notices, "plugin_working", return_value=False), \
+             patch.object(plugin_init.notices, "automatic_lessons_without_route", return_value=True):
+            result = plugin_init._handle_refine_command("model deepseek-v4-flash")
+        self.assertIn("Lessons are now written by deepseek-v4-flash", result)
+        self.assertIn("automatic lessons run without it", result)
+
     def test_model_command_set_provider_and_model(self):
         with self._trusted_probe():
             result = plugin_init._handle_refine_command("model opencode-go/deepseek-v4")
@@ -24981,13 +24992,52 @@ class NoticesTests(unittest.TestCase):
             self.assertIn("/refine_cycle model", self.notices.stopped_text())
 
     def test_automatic_lessons_without_the_route_need_a_usable_picked_model(self):
-        for on, problem, expected in ((True, "", True), (True, "allow_model_override is off", False),
-                                      (False, "", False)):
-            with patch.object(config, "llm_use_model_for_auto_runs", return_value=on), \
+        for auto, on, problem, expected in ((True, True, "", True),
+                                            (True, True, "allow_model_override is off", False),
+                                            (True, False, "", False),
+                                            # Automatic refinement off: nothing runs at all.
+                                            (False, True, "", False)):
+            with patch.object(config, "auto_enabled", return_value=auto), \
+                 patch.object(config, "llm_use_model_for_auto_runs", return_value=on), \
                  patch.object(config, "configured_model_problem", return_value=problem):
-                self.assertIs(self.notices.automatic_lessons_without_route(), expected, (on, problem))
+                self.assertIs(self.notices.automatic_lessons_without_route(), expected, (auto, on, problem))
         with patch.object(config, "llm_use_model_for_auto_runs", side_effect=OSError("config unreadable")):
             self.assertFalse(self.notices.automatic_lessons_without_route())
+
+    def _start_with(self, state):
+        self.notices._save(state)
+        with patch.object(self.notices, "_host_supported", return_value=True), \
+             patch.object(self.notices, "check_update"):
+            self.notices.startup_check()
+        return self.notices._load()
+
+    def test_a_start_on_a_picked_model_without_the_route_keeps_the_break_open(self):
+        # Working on the picked model, but the route is what the break was about:
+        # nothing says "working again" until it is back, and the latch waits for that.
+        broken = ["stopped", self.notices.hermes_version()]
+        with self._working(False), self._picked(True):
+            after = self._start_with({"broken": broken, "reload_tried": {"at": 1.0, "host": "h"}})
+        self.assertEqual(self.sent, [])
+        self.assertEqual(after.get("broken"), broken)
+        self.assertIn("reload_tried", after, "the restart guard is about the route; it stays")
+
+    def test_a_fix_that_did_not_bring_the_route_back_is_not_working_again(self):
+        broken = ["stopped", self.notices.hermes_version()]
+        with self._working(False), self._picked(True):
+            after = self._start_with({"broken": broken, "pending": {"kind": "fix", "version": "v1.3.19"}})
+        self.assertEqual(self.sent, [], "no 'working again' while a manual pass still cannot run")
+        self.assertNotIn("pending", after, "the stale confirmation is dropped")
+        self.assertEqual(after.get("broken"), broken)
+        # When the route does come back, that is the message.
+        with self._working(True), self._picked(True):
+            self._start_with(after)
+        self.assertEqual([t for t, _ in self.sent], [self.notices.working_again_text()])
+
+    def test_an_update_on_a_picked_model_without_the_route_says_it_is_running(self):
+        with self._working(False), self._picked(True):
+            after = self._start_with({"pending": {"kind": "update", "version": "v1.3.19"}})
+        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(update_check.installed_version())])
+        self.assertNotIn("pending", after)
 
     def test_update_on_a_hermes_no_patch_fits_still_says_lessons_run_on_the_picked_model(self):
         with self._already_latest(), self._working(False), self._picked(True), \
