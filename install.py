@@ -786,14 +786,16 @@ def capability_script(src: Path, dest: Path) -> str:
     venv's packages (ruamel.yaml and the rest) on the path. Without it the probe
     failed on Hermes main 2026-10 with "No module named 'ruamel'" although the
     install was fine. An older Hermes has no such module; the import is skipped.
+    The plugin directory goes on the path after it: the bootstrap moves the Hermes
+    root to the front, and a Hermes module named like a plugin one must not win.
     """
     return (
         "import sys; sys.path.insert(0, r'%s')\n"
-        "sys.path.insert(0, r'%s')\n"
         "try:\n"
         "    import hermes_bootstrap  # noqa: F401\n"
         "except ImportError:\n"
-        "    pass\n" % (str(src), str(dest))
+        "    pass\n"
+        "sys.path.insert(0, r'%s')\n" % (str(src), str(dest))
     ) + r'''
 import json
 from types import SimpleNamespace
@@ -1292,6 +1294,7 @@ def raise_memory_limit(src: Path, meta: dict, *, include_host: bool) -> None:
     # earlier runs, so reading the message off it would announce a raise on a rerun
     # that changed nothing.
     if raised_here:
+        # update_check._MEMORY_RAISED reads this line as "a fix raised the budget".
         say(
             f"Memory budget raised to {MEMORY_LIMIT_FLOOR} chars. Takes effect on "
             "the next gateway restart."

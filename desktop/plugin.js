@@ -110,10 +110,16 @@ function afterRestart(state) {
   // backend process answers, or this says "is running" about the old code.
   const from = pluginCtx.storage.get('restartingFrom', '')
   if (from && state.backend === from) return
+  if (!state.working) {
+    // The new backend answers, and the plugin still does not work: the status bar
+    // says so with its Fix. A success toast here would claim a fix that did not happen.
+    forgetRestart()
+    return
+  }
   try {
     host.notify({
       kind: 'success',
-      message: state.working ? `${state.brand} ${state.version} is running.` : `${state.brand} is fixed.`
+      message: `${state.brand} ${state.version} is running.`
     })
   } catch {
     // Still waiting, so the next poll tries again until the deadline in

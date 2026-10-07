@@ -236,6 +236,24 @@ check('a new backend confirms once',
 check('the wait is cleared', store.get('restartingTo'), undefined)
 dispose()
 
+// 2b. A new backend on which the plugin still does not work confirms nothing:
+//     the status bar says "not working" with its Fix, and no toast claims a fix.
+withBridge()
+recycled = 0
+globalThis.__state = state({
+  job: { status: 'done', started: 22, restart: true, reply: 'RC fixed.' }
+})
+plugin.register(context())
+await advance(1)
+await advance(1600)
+globalThis.__state = state({ backend: 'B', working: false })
+await advance(2100)
+check('a backend that still does not work is not called fixed',
+  messages(), ['RC fixed. Restarting Hermes…'])
+check('and the wait is over', store.get('restartingTo'), undefined)
+check('the bar says not working', label(), 'RC · not working')
+dispose()
+
 // 3. Without the recycle bridge, nothing claims a restart and nothing waits.
 withoutBridge()
 globalThis.__state = state({

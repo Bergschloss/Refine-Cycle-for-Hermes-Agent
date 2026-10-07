@@ -48,6 +48,8 @@ _INSTALL_TIMEOUT_SECONDS = 300
 # A release archive is about 18 MB, most of it demo animations and evidence.
 _MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 _OUTPUT_TAIL_CHARS = 1200
+# What install.raise_memory_limit prints when it wrote a higher memory budget.
+_MEMORY_RAISED = "Memory budget raised to"
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 _MANIFEST_VERSION_RE = re.compile(r"^version:\s*['\"]?([^'\"\s]+)", re.MULTILINE)
@@ -299,6 +301,8 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path,
     if before["state"] == "patched" and not memory_low:
         return False, ""
     if before["state"] == "incompatible":
+        # The installer refuses this host before it touches anything, the memory
+        # budget included: a refusal leaves nothing behind.
         return False, (
             " This Hermes has changed and none of the route patches in this release fits it, "
             f"so proposals stay off until a release that does ({before['detail']}). "
@@ -313,11 +317,21 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path,
             cwd=str(installer.parent),
         )
     except Exception as exc:
+        if before["state"] == "patched":
+            return False, f" The memory budget is low and the installer could not run ({type(exc).__name__})."
         return False, f" The host route patch is missing and the installer could not run ({type(exc).__name__})."
+    # The installer says this line only when it wrote a higher budget, so a run that
+    # found nothing to raise (a config it cannot read, another layout) is not a fix.
+    raised = _MEMORY_RAISED in (done.stdout or "")
+    if before["state"] == "patched":
+        if done.returncode == 0 and raised:
+            # Only the memory budget was off: raised, and Hermes loads it on restart.
+            return True, ""
+        return False, (
+            " The memory budget is below the floor and the installer did not raise it:\n"
+            + _tail((done.stdout or "") + "\n" + (done.stderr or ""))
+        )
     after = _host_state(runner, installer, host)
-    if done.returncode == 0 and after["state"] == "patched" and before["state"] == "patched":
-        # Only the memory budget was off: raised, and Hermes loads it on restart.
-        return True, ""
     if done.returncode == 0 and after["state"] == "patched":
         # A repair that worked says nothing: the user asked for a working plugin,
         # not for a list of Hermes files. The installer's own output names the files
@@ -415,7 +429,11 @@ def run_update(*, runner: Callable[..., Any] = subprocess.run,
                 f"{now_installed or 'no version'}."
             )
 
-        _changed, note = _repair_host(runner, tree / "install.py", host)
+        # The release's own installer raised config.yaml (--plugin-only) when it holds
+        # the budget; when it raised nothing, Hermes's defaults hold it, and only
+        # --patch-only writes those: the low budget goes along to the repair then.
+        still_low = memory_low and _MEMORY_RAISED not in (done.stdout or "")
+        _changed, note = _repair_host(runner, tree / "install.py", host, memory_low=still_low)
         return {
             "outcome": "updated",
             "tag": tag,

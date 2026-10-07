@@ -286,18 +286,26 @@ def limited_reasons() -> List[Tuple[str, str]]:
     Each of these a fix brings back: the route patch for passes on the session's
     model, and the memory budget the installer raises. The plugin then works, but
     not fully, and says so with a Fix, as it says "update available" with an Update.
+    Empty when the plugin does not work at all: that is "not working", not partial.
     """
+    if not plugin_usable():
+        return []
     reasons: List[Tuple[str, str]] = []
     if not plugin_working():
         reasons.append(("route", "manual passes (Hermes lacks the route they need)"))
     limit = _memory_limit()
-    if limit is not None and limit < config.MEMORY_LIMIT_FLOOR:
+    if _below_floor(limit):
         reasons.append(("memory", f"memory limit {limit} of {config.MEMORY_LIMIT_FLOOR} (lessons may not fit)"))
     return reasons
 
 
+def _below_floor(limit: Optional[int]) -> bool:
+    return limit is not None and limit < config.MEMORY_LIMIT_FLOOR
+
+
 def memory_below_floor() -> bool:
-    return any(key == "memory" for key, _ in limited_reasons())
+    """The memory budget is below the floor, whether or not the plugin works otherwise."""
+    return _below_floor(_memory_limit())
 
 
 def limited_text(*, messaging: bool = True) -> str:
@@ -725,7 +733,7 @@ def desktop_reply_note() -> Optional[str]:
             if not state.get("desktop_cards"):
                 # This app cannot render the card; its status bar says the same.
                 return None
-            reasons = limited_reasons() if plugin_usable() else []
+            reasons = limited_reasons()
             if not plugin_usable():
                 event = f"fix:{hermes_version()}"
             elif reasons:
@@ -904,7 +912,8 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None, *,
         return head, head
     was_working = plugin_working()
     # The memory budget is the other thing a fix brings back, patch or no patch.
-    result = update_check.run_update(host_state=host_state or None, memory_low=memory_below_floor())
+    memory_low = memory_below_floor()
+    result = update_check.run_update(host_state=host_state or None, memory_low=memory_low)
     outcome = result.get("outcome")
     # The installer's own stdout and stderr are quoted in this message, so it can
     # carry whatever the environment that ran it had in it. Turned into words here,
@@ -934,8 +943,11 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None, *,
             head = f"{head} {host_note}"
         return head, head
     if outcome == "already_latest":
-        if was_working:
+        if was_working and not memory_low:
             return f"{BRAND} {plain_version(update_check.installed_version())} is up to date.", ""
+        if was_working:
+            # The route is there, the memory budget is not, and the installer said why.
+            return f"{BRAND} could not fix itself. {message}".strip(), ""
         if _host_supported() is False:
             if automatic_lessons_without_route():
                 return (
@@ -1107,7 +1119,7 @@ def desktop_state(cards: bool = False) -> Dict[str, Any]:
         # installed: the [Fix] it shows restarts it, which is all it needs.
         "working": plugin_usable() and not code_stale(),
         # Working, but not fully: what is off, so the bar offers the Fix that brings it back.
-        "limited": [words for _, words in limited_reasons()] if plugin_usable() else [],
+        "limited": [words for _, words in limited_reasons()],
         "latest": plain_version(latest) if latest else None,
         "job": job,
         "backend": _BACKEND_ID,

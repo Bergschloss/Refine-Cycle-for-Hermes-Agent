@@ -16366,9 +16366,15 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
                                              return_value=tree))
         return stack
 
-    def _installer_runner(self, states, calls, *, patch_rc=0):
-        """A fake installer: --status --json walks through ``states``."""
+    def _installer_runner(self, states, calls, *, patch_rc=0, memory_raised=False):
+        """A fake installer: --status --json walks through ``states``.
+
+        ``memory_raised``: --patch-only says it raised the memory budget, as the
+        real one does when it wrote a higher number.
+        """
         remaining = list(states)
+        raised = "\nMemory budget raised to 4400 chars. Takes effect on the next gateway restart." \
+            if memory_raised else ""
 
         def runner(argv, **kwargs):
             calls.append(argv)
@@ -16380,7 +16386,7 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
             if "--patch-only" in argv:
                 return types.SimpleNamespace(
                     returncode=patch_rc,
-                    stdout="Host patch applied and compiled." if patch_rc == 0 else "",
+                    stdout=("Host patch applied and compiled." if patch_rc == 0 else "") + raised,
                     stderr="" if patch_rc == 0 else "ERROR: user-modified patch targets",
                 )
             return types.SimpleNamespace(returncode=0, stdout="Done", stderr="")
@@ -16453,11 +16459,52 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
         for memory_low, expected in ((False, "already_latest"), (True, "repaired")):
             calls = []
-            runner = self._installer_runner(["patched"], calls)
+            runner = self._installer_runner(["patched"], calls, memory_raised=True)
             with self._update_env(installed=["1.3.6"], latest="v1.3.6", plugin_dir=plugin_dir):
                 result = update_check.run_update(runner=runner, memory_low=memory_low)
             self.assertEqual(result["outcome"], expected, memory_low)
             self.assertEqual(any("--patch-only" in argv for argv in calls), memory_low, memory_low)
+
+    def test_a_memory_fix_the_installer_did_not_raise_is_not_a_repair(self):
+        # A run that found nothing to raise (another config layout, an unreadable
+        # file) must not say "fixed" and restart Hermes into the same low budget.
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
+        calls = []
+        runner = self._installer_runner(["patched"], calls, memory_raised=False)
+        with self._update_env(installed=["1.3.6"], latest="v1.3.6", plugin_dir=plugin_dir):
+            result = update_check.run_update(runner=runner, memory_low=True)
+        self.assertEqual(result["outcome"], "already_latest")
+        self.assertIn("did not raise", result["message"])
+        self.assertNotIn("route patch is missing", result["message"])
+        self.assertNotIn("/restart", result["message"])
+
+    def test_an_update_while_the_memory_budget_is_low_raises_it_too(self):
+        # The release installs with --plugin-only, which leaves Hermes's own
+        # defaults alone; the repair after it gets the low budget along.
+        tree = self._release_tree("99.0.0")
+        calls = []
+        runner = self._installer_runner(["patched"], calls, memory_raised=True)
+        with self._update_env(installed=["1.3.6", "99.0.0"], latest="v99.0.0", tree=tree):
+            result = update_check.run_update(runner=runner, memory_low=True)
+        self.assertEqual(result["outcome"], "updated")
+        self.assertTrue(any("--patch-only" in argv and str(tree / "install.py") in argv for argv in calls))
+        # When --plugin-only already raised config.yaml, which holds the budget then,
+        # nothing more is written into Hermes for it.
+        calls = []
+        inner = self._installer_runner(["patched"], calls)
+
+        def raising_plugin_only(argv, **kwargs):
+            done = inner(argv, **kwargs)
+            if "--plugin-only" in argv:
+                done.stdout += "\nMemory budget raised to 4400 chars. Takes effect on the next gateway restart."
+            return done
+
+        with self._update_env(installed=["1.3.6", "99.0.0"], latest="v99.0.0", tree=tree):
+            result = update_check.run_update(runner=raising_plugin_only, memory_low=True)
+        self.assertEqual(result["outcome"], "updated")
+        self.assertFalse(any("--patch-only" in argv for argv in calls))
 
     def test_update_explains_a_hermes_no_bundled_patch_fits(self):
         plugin_dir = self.root / "installed-plugin"
@@ -25045,6 +25092,27 @@ class NoticesTests(unittest.TestCase):
         self.assertIs(run.call_args.kwargs.get("memory_low"), True)
         self.assertEqual(restart_head, "♾️ Refine Cycle fixed.")
 
+    def test_a_plugin_that_does_not_work_is_not_working_partially(self):
+        # No route and no picked model: "not working", whatever else is off. The
+        # memory question stays answerable for the fix, which raises it either way.
+        with self._working(False), self._picked(False), \
+             patch.object(self.notices, "_memory_limit", return_value=2200):
+            self.assertEqual(self.notices.limited_reasons(), [])
+            self.assertTrue(self.notices.memory_below_floor())
+            self.assertEqual(self.notices.desktop_state()["limited"], [])
+
+    def test_a_fix_that_left_the_memory_budget_low_does_not_say_up_to_date(self):
+        message = "Already on the latest release (1.3.6). The memory budget is below the floor and the installer did not raise it:\nboom"
+        with self._already_latest(), self._working(True), \
+             patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_memory_limit", return_value=2200), \
+             patch.object(update_check, "run_update",
+                          return_value={"outcome": "already_latest", "message": message}):
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertEqual(restart_head, "")
+        self.assertNotIn("up to date", reply)
+        self.assertIn("did not raise", reply)
+
     def test_with_the_route_the_status_has_no_manual_pass_line(self):
         with self._working(True), self._picked(True), \
              patch.object(self.notices, "latest_known", return_value=None), \
@@ -30181,6 +30249,10 @@ class InstallerCapabilityScriptTests(unittest.TestCase):
         bootstrap = next(i for i, line in enumerate(lines) if "import hermes_bootstrap" in line)
         first_host = next(i for i, line in enumerate(lines) if line.startswith("from agent."))
         self.assertLess(bootstrap, first_host)
+        # The plugin directory goes on the path after the bootstrap, which moves the
+        # Hermes root to the front: a Hermes module named like a plugin one must not win.
+        plugin_path = next(i for i, line in enumerate(lines) if str(Path("/host/plugin")) in line)
+        self.assertLess(bootstrap, plugin_path)
         self.assertIn("except ImportError:", script, "an older Hermes has no bootstrap")
         self.assertIn('print("CAPABILITY_OK")', script)
 
