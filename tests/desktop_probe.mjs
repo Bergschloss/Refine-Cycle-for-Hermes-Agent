@@ -254,6 +254,24 @@ check('and the wait is over', store.get('restartingTo'), undefined)
 check('the bar says not working', label(), 'RC · not working')
 dispose()
 
+// 2c. The same for a backend that works only partially: the bar says so, with its
+//     Fix, and no toast says "is running" over it.
+withBridge()
+recycled = 0
+globalThis.__state = state({
+  job: { status: 'done', started: 23, restart: true, reply: 'RC fixed.' }
+})
+plugin.register(context())
+await advance(1)
+await advance(1600)
+globalThis.__state = state({ backend: 'B', limited: ['memory limit 2200 of 4400 (lessons may not fit)'] })
+await advance(2100)
+check('a backend that works partially is not confirmed as running',
+  messages(), ['RC fixed. Restarting Hermes…'])
+check('and its wait is over', store.get('restartingTo'), undefined)
+check('the bar says works partially', label(), 'RC 1.3.12 · works partially')
+dispose()
+
 // 3. Without the recycle bridge, nothing claims a restart and nothing waits.
 withoutBridge()
 globalThis.__state = state({

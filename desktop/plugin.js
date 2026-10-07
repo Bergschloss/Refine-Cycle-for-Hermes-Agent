@@ -110,9 +110,10 @@ function afterRestart(state) {
   // backend process answers, or this says "is running" about the old code.
   const from = pluginCtx.storage.get('restartingFrom', '')
   if (from && state.backend === from) return
-  if (!state.working) {
-    // The new backend answers, and the plugin still does not work: the status bar
-    // says so with its Fix. A success toast here would claim a fix that did not happen.
+  if (!state.working || (state.limited && state.limited.length)) {
+    // The new backend answers, and the plugin still does not work, or works only
+    // partially: the status bar says so with its Fix. A success toast here would
+    // claim a fix that did not happen.
     forgetRestart()
     return
   }
