@@ -679,6 +679,10 @@ def startup_check(now: Optional[float] = None) -> None:
                             # Told about this break, so the recovery from it may be
                             # told too, whatever was said about an earlier one.
                             _forget_attempts(fresh, ("working:",))
+                            # "Works partially" is no longer what the user was last
+                            # told: a recovery to it is said again, not taken as said.
+                            fresh.pop("limited", None)
+                            _forget_attempts(fresh, ("limited:",))
             if isinstance(pending, dict):
                 with _mutation() as fresh:
                     if fresh is not None:

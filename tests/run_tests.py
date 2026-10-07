@@ -25134,6 +25134,21 @@ class NoticesTests(unittest.TestCase):
         with patch.object(config, "llm_use_model_for_auto_runs", side_effect=OSError("config unreadable")):
             self.assertFalse(self.notices.automatic_lessons_without_route())
 
+    def test_a_partial_plugin_that_broke_and_came_back_partial_says_so_again(self):
+        # Told "works partially", then "stopped working": when it comes back to
+        # partial, the last word the user had is "stopped", so partial is said again.
+        # Then the full return is "is fixed", once.
+        steps = (((False, True), [self.notices.limited_text()]),
+                 ((False, False), [self.notices.stopped_text()]),
+                 ((False, True), [self.notices.limited_text()]),
+                 ((True, True), [self.notices.working_again_text()]),
+                 ((True, True), []))
+        for (route, picked), expected in steps:
+            self.sent.clear()
+            with self._working(route), self._picked(picked):
+                self._start_with(self.notices._load())
+            self.assertEqual([t for t, _ in self.sent], expected, (route, picked))
+
     def _start_with(self, state):
         self.notices._save(state)
         with patch.object(self.notices, "_host_supported", return_value=True), \
