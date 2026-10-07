@@ -113,7 +113,7 @@ function afterRestart(state) {
   try {
     host.notify({
       kind: 'success',
-      message: state.working ? `${state.brand} ${state.version} is running.` : `${state.brand} is working again.`
+      message: state.working ? `${state.brand} ${state.version} is running.` : `${state.brand} is fixed.`
     })
   } catch {
     // Still waiting, so the next poll tries again until the deadline in
@@ -212,7 +212,7 @@ function RefineStatus() {
     : !state.working
       ? `${state.brand} · not working`
       : limited
-        ? `${state.brand} ${state.version} · limited`
+        ? `${state.brand} ${state.version} · works partially`
         : update
           ? `${state.brand} · update available: ${state.latest}`
           : `${state.brand} ${state.version} · working`
@@ -285,7 +285,7 @@ function RefineCard() {
       : !state.working
         ? 'stopped working after the Hermes update'
         : limited
-          ? `works with limits. Off: ${state.limited.join('; ')}`
+          ? 'works partially'
           : update
             ? `update available: ${state.latest}`
             : `${state.version} is running`

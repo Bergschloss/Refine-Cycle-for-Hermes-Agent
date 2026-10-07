@@ -54,14 +54,13 @@ A picked lesson model (`/refine model`, or `llm.use_model_for_auto_runs` in
 config.yaml) with automatic refinement on is the exception: automatic lessons
 reach it through Hermes's plain plugin LLM, which needs no patch, so they keep
 running after a Hermes update. Only a manual `/refine` pass, which runs on the
-session's own model, waits for the patch then, so the plugin reports `limited`
-rather than `working`: once in chat (`works with limits`), in `/refine status`,
-and in the desktop status bar, each with the same **Fix** that puts the patch
-back.
+session's own model, waits for the patch then, so the plugin reports `works
+partially` rather than `working`: once in chat, in `/refine status`, and in the
+desktop status bar, each with the same **Fix** that puts the patch back.
 
 The memory budget is the other thing a fix restores. The installer raises it to
 4400 in `config.yaml` and in Hermes's own defaults, and a Hermes update puts the
-defaults back to 2200; below 4400 the plugin reports `limited` too, and
+defaults back to 2200; below 4400 the plugin reports `works partially` too, and
 `--patch-only` (what a fix runs) raises it again, on a patched host as well.
 
 `--status` can also report `outdated`: every marker is present, but the files carry an

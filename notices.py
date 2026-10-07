@@ -180,31 +180,6 @@ def update_available_text(latest: str) -> str:
     return f"{BRAND} — update available: {plain_version(latest)}.\n{action_line(UPDATE_COMMAND)}"
 
 
-def _second_way_out(*, messaging: bool = True) -> str:
-    """The way back that needs no route, or what blocks the one already chosen.
-
-    A lesson model writes the automatic lessons without the route a Hermes update
-    removes, so picking one also spares every later fix. With one already set,
-    suggesting it again would point at the wrong thing: say what stops it.
-    """
-    try:
-        if not config.auto_enabled():
-            # No automatic lessons at all: a lesson model would change nothing, and
-            # the only pass left, a manual one, needs the fix above.
-            return ""
-        if config.llm_use_model_for_auto_runs():
-            problem = config.configured_model_problem()
-            return f"The chosen lesson model cannot write lessons: {problem}." if problem else ""
-    except Exception:
-        logger.debug("refine notices: lesson model state unreadable", exc_info=True)
-    model = tap(config.command_display_name().lstrip("/"), messaging=messaging) + " model"
-    return (
-        # Sent as text: a command with an argument is not one tap on Telegram.
-        f"Or send {model} and pick the model that writes lessons: automatic lessons on it "
-        "keep running after Hermes updates."
-    )
-
-
 def manual_pass_line(command: str, *, messaging: bool, lessons: bool = False) -> str:
     """What a pass on the session's own model needs on a Hermes without the route.
 
@@ -226,21 +201,16 @@ def manual_pass_line(command: str, *, messaging: bool, lessons: bool = False) ->
     return f"{who} {needs} the Hermes fix: {action_line(FIX_COMMAND, messaging=messaging)}"
 
 
+# User-facing texts are the state and the one tap, nothing about causes: what is
+# off and why goes to the logs and the docs. The approved shape is two lines.
 def stopped_text() -> str:
-    second = _second_way_out()
-    return (
-        f"{BRAND} stopped working after the Hermes update.\n{action_line(FIX_COMMAND)}"
-        + (f"\n{second}" if second else "")
-    )
+    return f"{BRAND} stopped working after the Hermes update.\n{action_line(FIX_COMMAND)}"
 
 
 def paused_text(hermes_version: str, *, messaging: bool = True) -> str:
-    # No patch fits this Hermes yet, so a lesson model is the only way lessons run now.
-    second = _second_way_out(messaging=messaging)
     return (
         f"{BRAND} is paused: Hermes {hermes_version} isn't supported yet. "
         "You'll get a message when it is."
-        + (f"\n{second}" if second else "")
     )
 
 
@@ -249,7 +219,7 @@ def running_text(version: str) -> str:
 
 
 def working_again_text() -> str:
-    return f"{BRAND} is working again."
+    return f"{BRAND} is fixed."
 
 
 def desktop_half_text() -> str:
@@ -330,9 +300,9 @@ def memory_below_floor() -> bool:
     return any(key == "memory" for key, _ in limited_reasons())
 
 
-def limited_text(reasons: List[Tuple[str, str]], *, messaging: bool = True) -> str:
-    off = "; ".join(words for _, words in reasons)
-    return f"{BRAND} works with limits. Off: {off}.\n{action_line(FIX_COMMAND, messaging=messaging)}"
+def limited_text(*, messaging: bool = True) -> str:
+    """Working, but a function is off (``limited_reasons`` names which, for the logs)."""
+    return f"{BRAND} works partially.\n{action_line(FIX_COMMAND, messaging=messaging)}"
 
 
 def plugin_usable() -> bool:
@@ -673,8 +643,9 @@ def startup_check(now: Optional[float] = None) -> None:
             if reasons:
                 # Once per Hermes and set of functions off: what is off, and the Fix.
                 key = hermes_version() + "|" + ",".join(k for k, _ in reasons)
+                logger.info("refine notices: working partially: %s", "; ".join(w for _, w in reasons))
                 if state.get("limited") != key and _claim(f"limited:{key}", now) \
-                        and _send(state, limited_text(reasons)):
+                        and _send(state, limited_text()):
                     with _mutation() as fresh:
                         if fresh is not None:
                             fresh["limited"] = key

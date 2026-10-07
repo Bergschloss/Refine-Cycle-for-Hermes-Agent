@@ -24993,6 +24993,19 @@ class NoticesTests(unittest.TestCase):
         """A picked model writes the automatic lessons (the route is a separate question)."""
         return patch.object(self.notices, "automatic_lessons_without_route", return_value=value)
 
+    def test_the_messages_are_the_approved_two_lines(self):
+        # The state and the one tap: nothing about causes (they go to the logs).
+        self.assertEqual(self.notices.stopped_text(),
+                         "♾️ Refine Cycle stopped working after the Hermes update.\n/refine_fix — Hermes will restart.")
+        self.assertEqual(self.notices.limited_text(),
+                         "♾️ Refine Cycle works partially.\n/refine_fix — Hermes will restart.")
+        self.assertEqual(self.notices.working_again_text(), "♾️ Refine Cycle is fixed.")
+        self.assertEqual(self.notices.running_text("v1.3.21"), "♾️ Refine Cycle 1.3.21 is running.")
+        self.assertEqual(self.notices.update_available_text("v1.3.21"),
+                         "♾️ Refine Cycle — update available: 1.3.21.\n/refine_update — Hermes will restart.")
+        self.assertEqual(self.notices.paused_text("0.22.0"),
+                         "♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.")
+
     def test_a_picked_model_keeps_the_plugin_working_with_limits_and_a_fix(self):
         # After a Hermes update removed the route: automatic lessons still reach the
         # picked model, so it is not "stopped working" -- but manual passes are off,
@@ -25004,14 +25017,11 @@ class NoticesTests(unittest.TestCase):
             self.notices.startup_check()  # a second start says nothing new
             state = self.notices.desktop_state()
             head = plugin_init._status_headline()
-        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])])
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text()])
         self.assertTrue(state["working"])
         self.assertEqual(state["limited"], ["manual passes (Hermes lacks the route they need)"])
-        self.assertIn("· limited", head[0])
-        self.assertNotIn("not working", head[0])
-        self.assertIn("Off: manual passes", head[1])
-        self.assertIn("Automatic lessons run on the chosen lesson model", "\n".join(head))
-        self.assertIn("/refine-fix — Hermes will restart.", head[-1])
+        self.assertIn("· works partially", head[0])
+        self.assertEqual(head[1:], ["/refine-fix — Hermes will restart."], "the state and the tap, nothing more")
 
     def test_a_memory_budget_below_the_floor_is_limited_and_the_fix_raises_it(self):
         with self._working(True), self._picked(False), \
@@ -25022,9 +25032,9 @@ class NoticesTests(unittest.TestCase):
             state = self.notices.desktop_state()
             head = plugin_init._status_headline()
         off = "memory limit 2200 of 4400 (lessons may not fit)"
-        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("memory", off)])])
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text()])
         self.assertEqual(state["limited"], [off])
-        self.assertTrue(head[0].endswith("· limited · memory 1900/2200"), head[0])
+        self.assertTrue(head[0].endswith("· works partially · memory 1900/2200"), head[0])
         self.assertEqual(head[-1], "/refine-fix — Hermes will restart.")
         # The fix itself: the installer runs on a patched host when memory is low.
         with self._already_latest(), self._working(True), \
@@ -25042,22 +25052,6 @@ class NoticesTests(unittest.TestCase):
             head = plugin_init._status_headline()
         self.assertEqual(len(head), 1)
         self.assertTrue(head[0].endswith("· working · memory 10/4400"), head[0])
-
-    def test_without_a_picked_model_the_break_offers_the_model_as_the_second_way_out(self):
-        with self._working(False), self._picked(False), \
-             patch.object(self.notices, "_host_supported", return_value=True), \
-             patch.object(self.notices, "check_update"):
-            self.notices.startup_check()
-            state = self.notices.desktop_state()
-        self.assertEqual([t for t, _ in self.sent], [self.notices.stopped_text()])
-        text = self.sent[0][0]
-        self.assertIn("/refine_fix — Hermes will restart.", text)
-        self.assertIn("/refine model", text)
-        self.assertFalse(state["working"])
-
-    def test_the_second_way_out_names_the_command_this_hermes_registered(self):
-        with patch.object(config, "_COMMAND_NAME", "refine-cycle"):
-            self.assertIn("/refine_cycle model", self.notices.stopped_text())
 
     def test_automatic_lessons_without_the_route_need_a_usable_picked_model(self):
         for auto, on, problem, expected in ((True, True, "", True),
@@ -25085,7 +25079,7 @@ class NoticesTests(unittest.TestCase):
         broken = ["stopped", self.notices.hermes_version()]
         with self._working(False), self._picked(True):
             after = self._start_with({"broken": broken, "reload_tried": {"at": 1.0, "host": "h"}})
-        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])], "what is off, not 'working again'")
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text()], "what is off, not 'working again'")
         self.assertEqual(after.get("broken"), broken)
         self.assertIn("reload_tried", after, "the restart guard is about the route; it stays")
 
@@ -25093,7 +25087,7 @@ class NoticesTests(unittest.TestCase):
         broken = ["stopped", self.notices.hermes_version()]
         with self._working(False), self._picked(True):
             after = self._start_with({"broken": broken, "pending": {"kind": "fix", "version": "v1.3.19"}})
-        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])],
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text()],
                          "no 'working again' while a manual pass still cannot run")
         self.assertNotIn("pending", after, "the stale confirmation is dropped")
         self.assertEqual(after.get("broken"), broken)
@@ -25107,7 +25101,7 @@ class NoticesTests(unittest.TestCase):
         with self._working(False), self._picked(True):
             after = self._start_with({"pending": {"kind": "update", "version": "v1.3.19"}})
         self.assertEqual([t for t, _ in self.sent],
-                         [self.notices.running_text(update_check.installed_version()), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])])
+                         [self.notices.running_text(update_check.installed_version()), self.notices.limited_text()])
         self.assertNotIn("pending", after)
 
     def test_a_delivered_running_message_does_not_hold_the_next_one(self):
@@ -25118,7 +25112,7 @@ class NoticesTests(unittest.TestCase):
             self._start_with(dict(self.notices._load(), pending={"kind": "update", "version": version}))
         # Both reloads say they run; the limits were said once.
         self.assertEqual([t for t, _ in self.sent],
-                         [self.notices.running_text(version), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")]), self.notices.running_text(version)])
+                         [self.notices.running_text(version), self.notices.limited_text(), self.notices.running_text(version)])
 
     def test_a_lesson_model_the_hosts_allowlist_refuses_is_a_problem_not_working(self):
         # Hermes gates an override by its flag and then by llm.allowed_models /
@@ -25153,19 +25147,6 @@ class NoticesTests(unittest.TestCase):
              self._working(False):
             self.assertFalse(self.notices.plugin_usable())
 
-    def test_the_paused_reply_to_a_typed_fix_writes_the_command_as_typed_there(self):
-        with self._already_latest(), self._working(False), self._picked(False), \
-             patch.object(self.notices, "code_stale", return_value=False), \
-             patch.object(self.notices, "_host_patched_on_disk", return_value=False), \
-             patch.object(self.notices, "_host_supported", return_value=False), \
-             patch.object(config, "auto_enabled", return_value=True), \
-             patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
-             patch.object(config, "_COMMAND_NAME", "refine-cycle"):
-            typed, _ = self.notices.run_update_command(None)
-            tapped, _ = self.notices.run_update_command(("telegram", "1", ""))
-        self.assertIn("/refine-cycle model", typed)
-        self.assertIn("/refine_cycle model", tapped)
-
     def test_on_a_hermes_no_patch_fits_a_manual_pass_waits_rather_than_asks_for_a_fix(self):
         with patch.object(self.notices, "_host_supported", return_value=False):
             line = self.notices.manual_pass_line("/refine", messaging=False)
@@ -25185,12 +25166,12 @@ class NoticesTests(unittest.TestCase):
         version = update_check.installed_version()
         with self._working(False), self._picked(True):
             after = self._start_with({"broken": broken, "pending": {"kind": "update", "version": version}})
-        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(version), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])])
+        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(version), self.notices.limited_text()])
         self.assertEqual(after.get("broken"), broken, "the route is still missing")
         with self._working(True), self._picked(True):
             self._start_with(self.notices._load())
         self.assertEqual([t for t, _ in self.sent],
-                         [self.notices.running_text(version), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")]), self.notices.working_again_text()])
+                         [self.notices.running_text(version), self.notices.limited_text(), self.notices.working_again_text()])
 
     def test_the_desktop_card_offers_the_fix_while_the_plugin_works_with_limits(self):
         state = {"desktop_seen": True, "desktop_cards": True}
@@ -25206,31 +25187,6 @@ class NoticesTests(unittest.TestCase):
         with self._working(False), self._picked(False):
             self.notices._save(dict(state))
             self.assertEqual(self.notices.desktop_reply_note(), self.notices.DESKTOP_CARD)
-
-    def test_the_second_way_out_names_what_blocks_a_lesson_model_already_set(self):
-        with patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
-             patch.object(config, "auto_enabled", return_value=False):
-            # No automatic lessons at all: a lesson model would change nothing.
-            self.assertNotIn("Or send", self.notices.stopped_text())
-            self.assertNotIn("Or send", self.notices.paused_text("0.22.0"))
-        with patch.object(config, "llm_use_model_for_auto_runs", return_value=False), \
-             patch.object(config, "auto_enabled", return_value=True):
-            self.assertIn("Or send /refine model and pick the model that writes lessons", self.notices.stopped_text())
-            self.assertIn("Or send /refine model", self.notices.paused_text("0.22.0"),
-                          "no patch fits: a lesson model is the only way lessons run")
-        with patch.object(config, "llm_use_model_for_auto_runs", return_value=True), \
-             patch.object(config, "configured_model_problem", return_value="llm.allow_model_override is not on"), \
-             patch.object(config, "auto_enabled", return_value=True):
-            text = self.notices.stopped_text()
-        self.assertIn("The chosen lesson model cannot write lessons: llm.allow_model_override is not on.", text)
-        self.assertNotIn("Or send", text)
-        with patch.object(config, "llm_use_model_for_auto_runs", return_value=True), \
-             patch.object(config, "configured_model_problem", return_value=""), \
-             patch.object(config, "auto_enabled", return_value=False):
-            text = self.notices.stopped_text()
-        self.assertNotIn("Or send", text)
-        self.assertEqual(text, "♾️ Refine Cycle stopped working after the Hermes update.\n"
-                               "/refine_fix — Hermes will restart.", "the fix is the only way left")
 
     def test_update_on_a_hermes_no_patch_fits_still_says_lessons_run_on_the_picked_model(self):
         with self._already_latest(), self._working(False), self._picked(True), \
@@ -25259,7 +25215,7 @@ class NoticesTests(unittest.TestCase):
         self.assertNotIn("patch", " ".join(texts).lower())
         # A tap restarts Hermes and cuts off work in progress: said before the tap.
         self.assertTrue(texts[0].endswith("/refine_update — Hermes will restart."))
-        self.assertIn("\n/refine_fix — Hermes will restart.\n", texts[1])
+        self.assertTrue(texts[1].endswith("/refine_fix — Hermes will restart."))
         self.assertIn("Hermes will restart",
                       self.notices.action_line(self.notices.UPDATE_COMMAND, messaging=False))
 
