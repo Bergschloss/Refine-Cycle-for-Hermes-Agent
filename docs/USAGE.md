@@ -155,7 +155,7 @@ Every message starts with `♾️ Refine Cycle` and is sent once per event, to t
 |---|---|
 | A new release is out (checked once a day across all Hermes processes) | `♾️ Refine Cycle — update available: 1.3.12.` + `/refine_update — Hermes will restart.` |
 | A Hermes update stopped the plugin | `♾️ Refine Cycle stopped working after the Hermes update.` + `/refine_fix — Hermes will restart.` |
-| The plugin works, but a function is off (no route patch, so no manual passes, while a chosen lesson model keeps the automatic lessons running; or a memory budget below 4400) | `♾️ Refine Cycle works partially.` + `/refine_fix — Hermes will restart.` Once per Hermes version and set of functions off. Which ones are off goes to the log, not the chat. |
+| The plugin works, but a function is off (no route patch, so no manual passes, while a chosen lesson model keeps the automatic lessons running; or a memory budget below 4400) | `♾️ Refine Cycle works partially.` + `/refine_fix — Hermes will restart.` Once per Hermes version and set of functions off. Which ones are off goes to the log, not the chat. An update that leaves the same functions off says `♾️ Refine Cycle 1.3.12 is running.` and not this again; `/refine status` and the status bar keep showing it. |
 | No bundled patch fits the new Hermes | `♾️ Refine Cycle is paused: Hermes 0.22.0 isn't supported yet. You'll get a message when it is.` |
 | Hermes restarted on the new version | `♾️ Refine Cycle 1.3.12 is running.` |
 | Hermes restarted after a fix | `♾️ Refine Cycle is fixed.` |
