@@ -297,6 +297,44 @@ def automatic_lessons_without_route() -> bool:
         return False
 
 
+def _memory_limit() -> Optional[int]:
+    """The host's memory store limit, or None when it cannot be read."""
+    try:
+        try:
+            from . import core as _core
+        except ImportError:
+            import core as _core  # type: ignore
+        return _core._memory_usage()[1]
+    except Exception:
+        logger.debug("refine notices: memory limit unreadable", exc_info=True)
+        return None
+
+
+def limited_reasons() -> List[Tuple[str, str]]:
+    """What is off while the plugin still works: ``(key, words)`` per function.
+
+    Each of these a fix brings back: the route patch for passes on the session's
+    model, and the memory budget the installer raises. The plugin then works, but
+    not fully, and says so with a Fix, as it says "update available" with an Update.
+    """
+    reasons: List[Tuple[str, str]] = []
+    if not plugin_working():
+        reasons.append(("route", "manual passes (Hermes lacks the route they need)"))
+    limit = _memory_limit()
+    if limit is not None and limit < config.MEMORY_LIMIT_FLOOR:
+        reasons.append(("memory", f"memory limit {limit} of {config.MEMORY_LIMIT_FLOOR} (lessons may not fit)"))
+    return reasons
+
+
+def memory_below_floor() -> bool:
+    return any(key == "memory" for key, _ in limited_reasons())
+
+
+def limited_text(reasons: List[Tuple[str, str]], *, messaging: bool = True) -> str:
+    off = "; ".join(words for _, words in reasons)
+    return f"{BRAND} works with limits. Off: {off}.\n{action_line(FIX_COMMAND, messaging=messaging)}"
+
+
 def plugin_usable() -> bool:
     """What the user is told: the plugin works, with the route or on a picked model.
 
@@ -602,34 +640,45 @@ def startup_check(now: Optional[float] = None) -> None:
                 with _mutation() as fresh:
                     if fresh is not None:
                         fresh.pop("reload_tried", None)
+            reasons = limited_reasons()
+            full = not reasons
             if isinstance(pending, dict) and pending.get("kind") == "update":
                 text = running_text(version)
-            elif plugin_working() and (state.get("broken") or isinstance(pending, dict)):
+            elif full and (state.get("broken") or state.get("limited") or isinstance(pending, dict)):
                 text = working_again_text()
             else:
-                # Working on a lesson model without the route: a fix that did not
-                # bring the route back is not "working again".
+                # Working with limits: a fix that did not bring everything back is
+                # not "working again".
                 text = ""
                 if isinstance(pending, dict):
                     with _mutation() as fresh:
                         if fresh is not None:
                             fresh.pop("pending", None)
-            # Without the route the break is not over, whatever else was said: its
-            # latch and claims stay for the "working again" the route's return brings,
-            # so the update's own message claims a key of its own.
-            route = plugin_working()
-            if text and _claim(f"{'working' if route else 'running'}:{version}", now) and _send(state, text):
+            # While anything is off the episode is not over, whatever else was said:
+            # its latches and claims stay for the "working again" a full return
+            # brings, so the update's own message claims a key of its own.
+            if text and _claim(f"{'working' if full else 'running'}:{version}", now) and _send(state, text):
                 with _mutation() as fresh:
                     if fresh is not None:
                         fresh.pop("pending", None)
                         # Delivered: the claim is done with, so the next restart's own
                         # message is not held for the retry window.
                         _forget_attempts(fresh, ("running:",))
-                        if route:
+                        if full:
                             fresh.pop("broken", None)
+                            fresh.pop("limited", None)
                             # The episode is over: its claims go with its latch, so a
                             # break and a fix an hour apart are not the last word.
-                            _forget_attempts(fresh, ("working:", "broken:"))
+                            _forget_attempts(fresh, ("working:", "broken:", "limited:"))
+            if reasons:
+                # Once per Hermes and set of functions off: what is off, and the Fix.
+                key = hermes_version() + "|" + ",".join(k for k, _ in reasons)
+                if state.get("limited") != key and _claim(f"limited:{key}", now) \
+                        and _send(state, limited_text(reasons)):
+                    with _mutation() as fresh:
+                        if fresh is not None:
+                            fresh["limited"] = key
+                            _forget_attempts(fresh, ("working:",))
         else:
             # Claimed before ``_host_supported``, not after: that call runs the
             # installer as a subprocess with a 60-second timeout, and on a broken
@@ -705,8 +754,11 @@ def desktop_reply_note() -> Optional[str]:
             if not state.get("desktop_cards"):
                 # This app cannot render the card; its status bar says the same.
                 return None
+            reasons = limited_reasons() if plugin_usable() else []
             if not plugin_usable():
                 event = f"fix:{hermes_version()}"
+            elif reasons:
+                event = f"limited:{hermes_version()}|" + ",".join(k for k, _ in reasons)
             else:
                 latest = latest_known(state)
                 event = f"update:{latest}" if latest else ""
@@ -880,7 +932,8 @@ def run_update_command(chat: Optional[Tuple[str, str, str]] = None, *,
         head = f"{BRAND} fixed."
         return head, head
     was_working = plugin_working()
-    result = update_check.run_update(host_state=host_state or None)
+    # The memory budget is the other thing a fix brings back, patch or no patch.
+    result = update_check.run_update(host_state=host_state or None, memory_low=memory_below_floor())
     outcome = result.get("outcome")
     # The installer's own stdout and stderr are quoted in this message, so it can
     # carry whatever the environment that ran it had in it. Turned into words here,
@@ -1082,6 +1135,8 @@ def desktop_state(cards: bool = False) -> Dict[str, Any]:
         # A backend running older plugin code than the disk holds is not working as
         # installed: the [Fix] it shows restarts it, which is all it needs.
         "working": plugin_usable() and not code_stale(),
+        # Working, but not fully: what is off, so the bar offers the Fix that brings it back.
+        "limited": [words for _, words in limited_reasons()] if plugin_usable() else [],
         "latest": plain_version(latest) if latest else None,
         "job": job,
         "backend": _BACKEND_ID,

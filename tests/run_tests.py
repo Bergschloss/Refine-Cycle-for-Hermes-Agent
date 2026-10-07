@@ -16447,6 +16447,18 @@ print(json.dumps(core.refine_run(ProcessLlm(), session_id="session")))
         self.assertTrue(any("--patch-only" in argv for argv in calls))
         self.assertNotIn("no patch fits", result["message"])
 
+    def test_a_fix_on_a_patched_host_runs_the_installer_only_for_a_low_memory_budget(self):
+        plugin_dir = self.root / "installed-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "install.py").write_text("# installed\n", encoding="utf-8")
+        for memory_low, expected in ((False, "already_latest"), (True, "repaired")):
+            calls = []
+            runner = self._installer_runner(["patched"], calls)
+            with self._update_env(installed=["1.3.6"], latest="v1.3.6", plugin_dir=plugin_dir):
+                result = update_check.run_update(runner=runner, memory_low=memory_low)
+            self.assertEqual(result["outcome"], expected, memory_low)
+            self.assertEqual(any("--patch-only" in argv for argv in calls), memory_low, memory_low)
+
     def test_update_explains_a_hermes_no_bundled_patch_fits(self):
         plugin_dir = self.root / "installed-plugin"
         plugin_dir.mkdir()
@@ -24968,6 +24980,11 @@ class NoticesTests(unittest.TestCase):
         seen = patch.object(self.notices, "_desktop_half_seen", 0.0)
         seen.start()
         self.addCleanup(seen.stop)
+        # The memory budget is at the floor unless a test says otherwise: the fake
+        # host's store reads as stock 2200, which would make every test "limited".
+        memory = patch.object(self.notices, "_memory_limit", return_value=config.MEMORY_LIMIT_FLOOR)
+        memory.start()
+        self.addCleanup(memory.stop)
 
     def _working(self, value):
         return patch.object(self.notices, "plugin_working", return_value=value)
@@ -24976,22 +24993,47 @@ class NoticesTests(unittest.TestCase):
         """A picked model writes the automatic lessons (the route is a separate question)."""
         return patch.object(self.notices, "automatic_lessons_without_route", return_value=value)
 
-    def test_a_picked_model_keeps_the_plugin_working_on_a_hermes_without_the_route(self):
+    def test_a_picked_model_keeps_the_plugin_working_with_limits_and_a_fix(self):
         # After a Hermes update removed the route: automatic lessons still reach the
-        # picked model, so nothing says "stopped working" and nothing asks for a Fix.
+        # picked model, so it is not "stopped working" -- but manual passes are off,
+        # so it says it works with limits, once, with the Fix that brings them back.
         with self._working(False), self._picked(True), \
              patch.object(self.notices, "_host_supported", return_value=True), \
              patch.object(self.notices, "check_update"):
             self.notices.startup_check()
+            self.notices.startup_check()  # a second start says nothing new
             state = self.notices.desktop_state()
             head = plugin_init._status_headline()
-        self.assertEqual(self.sent, [], "no stopped-working message")
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])])
         self.assertTrue(state["working"])
-        self.assertIn("· working", head[0])
+        self.assertEqual(state["limited"], ["manual passes (Hermes lacks the route they need)"])
+        self.assertIn("· limited", head[0])
         self.assertNotIn("not working", head[0])
-        # What still needs the fix is said, once, in the status.
-        self.assertIn("Automatic lessons run on the chosen lesson model", head[-1])
+        self.assertIn("Off: manual passes", head[1])
+        self.assertIn("Automatic lessons run on the chosen lesson model", "\n".join(head))
         self.assertIn("/refine-fix — Hermes will restart.", head[-1])
+
+    def test_a_memory_budget_below_the_floor_is_limited_and_the_fix_raises_it(self):
+        with self._working(True), self._picked(False), \
+             patch.object(self.notices, "_memory_limit", return_value=2200), \
+             patch.object(self.notices, "check_update"), \
+             patch.object(core, "_memory_usage", return_value=(1900, 2200)):
+            self.notices.startup_check()
+            state = self.notices.desktop_state()
+            head = plugin_init._status_headline()
+        off = "memory limit 2200 of 4400 (lessons may not fit)"
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("memory", off)])])
+        self.assertEqual(state["limited"], [off])
+        self.assertTrue(head[0].endswith("· limited · memory 1900/2200"), head[0])
+        self.assertEqual(head[-1], "/refine-fix — Hermes will restart.")
+        # The fix itself: the installer runs on a patched host when memory is low.
+        with self._already_latest(), self._working(True), \
+             patch.object(self.notices, "code_stale", return_value=False), \
+             patch.object(self.notices, "_memory_limit", return_value=2200), \
+             patch.object(update_check, "run_update", return_value={"outcome": "repaired", "message": ""}) as run:
+            reply, restart_head = self.notices.run_update_command(None)
+        self.assertIs(run.call_args.kwargs.get("memory_low"), True)
+        self.assertEqual(restart_head, "♾️ Refine Cycle fixed.")
 
     def test_with_the_route_the_status_has_no_manual_pass_line(self):
         with self._working(True), self._picked(True), \
@@ -25043,7 +25085,7 @@ class NoticesTests(unittest.TestCase):
         broken = ["stopped", self.notices.hermes_version()]
         with self._working(False), self._picked(True):
             after = self._start_with({"broken": broken, "reload_tried": {"at": 1.0, "host": "h"}})
-        self.assertEqual(self.sent, [])
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])], "what is off, not 'working again'")
         self.assertEqual(after.get("broken"), broken)
         self.assertIn("reload_tried", after, "the restart guard is about the route; it stays")
 
@@ -25051,18 +25093,21 @@ class NoticesTests(unittest.TestCase):
         broken = ["stopped", self.notices.hermes_version()]
         with self._working(False), self._picked(True):
             after = self._start_with({"broken": broken, "pending": {"kind": "fix", "version": "v1.3.19"}})
-        self.assertEqual(self.sent, [], "no 'working again' while a manual pass still cannot run")
+        self.assertEqual([t for t, _ in self.sent], [self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])],
+                         "no 'working again' while a manual pass still cannot run")
         self.assertNotIn("pending", after, "the stale confirmation is dropped")
         self.assertEqual(after.get("broken"), broken)
-        # When the route does come back, that is the message.
+        # When the route does come back, that is the message, and the limits are over.
         with self._working(True), self._picked(True):
-            self._start_with(after)
-        self.assertEqual([t for t, _ in self.sent], [self.notices.working_again_text()])
+            after = self._start_with(self.notices._load())
+        self.assertEqual([t for t, _ in self.sent][-1], self.notices.working_again_text())
+        self.assertNotIn("limited", after)
 
     def test_an_update_on_a_picked_model_without_the_route_says_it_is_running(self):
         with self._working(False), self._picked(True):
             after = self._start_with({"pending": {"kind": "update", "version": "v1.3.19"}})
-        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(update_check.installed_version())])
+        self.assertEqual([t for t, _ in self.sent],
+                         [self.notices.running_text(update_check.installed_version()), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])])
         self.assertNotIn("pending", after)
 
     def test_a_delivered_running_message_does_not_hold_the_next_one(self):
@@ -25071,7 +25116,9 @@ class NoticesTests(unittest.TestCase):
             self._start_with({"pending": {"kind": "update", "version": version}})
             # A reload of the same version inside the hour still gets its message.
             self._start_with(dict(self.notices._load(), pending={"kind": "update", "version": version}))
-        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(version)] * 2)
+        # Both reloads say they run; the limits were said once.
+        self.assertEqual([t for t, _ in self.sent],
+                         [self.notices.running_text(version), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")]), self.notices.running_text(version)])
 
     def test_a_lesson_model_the_hosts_allowlist_refuses_is_a_problem_not_working(self):
         # Hermes gates an override by its flag and then by llm.allowed_models /
@@ -25138,19 +25185,24 @@ class NoticesTests(unittest.TestCase):
         version = update_check.installed_version()
         with self._working(False), self._picked(True):
             after = self._start_with({"broken": broken, "pending": {"kind": "update", "version": version}})
-        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(version)])
+        self.assertEqual([t for t, _ in self.sent], [self.notices.running_text(version), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")])])
         self.assertEqual(after.get("broken"), broken, "the route is still missing")
         with self._working(True), self._picked(True):
             self._start_with(self.notices._load())
         self.assertEqual([t for t, _ in self.sent],
-                         [self.notices.running_text(version), self.notices.working_again_text()])
+                         [self.notices.running_text(version), self.notices.limited_text([("route", "manual passes (Hermes lacks the route they need)")]), self.notices.working_again_text()])
 
-    def test_the_desktop_card_offers_no_fix_while_a_lesson_model_carries_the_lessons(self):
+    def test_the_desktop_card_offers_the_fix_while_the_plugin_works_with_limits(self):
         state = {"desktop_seen": True, "desktop_cards": True}
         with self._working(False), self._picked(True), \
              patch.object(self.notices, "latest_known", return_value=None):
             self.notices._save(dict(state))
-            self.assertIsNone(self.notices.desktop_reply_note())
+            self.assertEqual(self.notices.desktop_reply_note(), self.notices.DESKTOP_CARD)
+            self.assertIsNone(self.notices.desktop_reply_note(), "once per Hermes and set of limits")
+        with self._working(True), self._picked(True), \
+             patch.object(self.notices, "latest_known", return_value=None):
+            self.notices._save(dict(state))
+            self.assertIsNone(self.notices.desktop_reply_note(), "working fully: nothing to fix")
         with self._working(False), self._picked(False):
             self.notices._save(dict(state))
             self.assertEqual(self.notices.desktop_reply_note(), self.notices.DESKTOP_CARD)
@@ -28210,6 +28262,22 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertEqual(state, "patched", detail)
         self.assertEqual(self._read_metadata()["mode"], "patch-only")
 
+    def test_patch_only_brings_the_memory_budget_to_the_floor_patched_or_not(self):
+        """A fix runs --patch-only: it raises the budget a Hermes update can lower,
+        on a stock host (with the patch) and on a patched one (alone)."""
+        import install
+
+        config_yaml = self.home / "config.yaml"
+        config_yaml.parent.mkdir(parents=True, exist_ok=True)
+        for run in ("stock host", "patched host"):
+            config_yaml.write_text("memory:\n  memory_char_limit: 2200\n", encoding="utf-8")
+            with self._as_stock_host(), \
+                 patch.dict(os.environ, {"HERMES_HOME": str(self.home)}, clear=False):
+                install.do_install(self._args(patch_only=True, plugin_only=False))
+                state, detail = install.classify_host(self.src)
+            self.assertEqual(state, "patched", (run, detail))
+            self.assertIn("memory_char_limit: 4400", config_yaml.read_text(encoding="utf-8"), run)
+
     def test_plugin_only_never_classifies_the_host(self):
         """Belt to the byte-identity brace: the host-patching path is not entered."""
         import install
@@ -30133,6 +30201,13 @@ class FakeHostContractTests(unittest.TestCase):
             if real_required is not None and fake_required != real_required:
                 drift.append(f"{name}: fake takes {fake_required}, real takes {real_required}")
         self.assertEqual(drift, [], f"fake and real MemoryStore disagree: {drift}")
+
+
+class MemoryFloorTests(unittest.TestCase):
+    def test_the_plugin_checks_the_floor_the_installer_raises_to(self):
+        import install
+
+        self.assertEqual(config.MEMORY_LIMIT_FLOOR, install.MEMORY_LIMIT_FLOOR)
 
 
 class InstallerCapabilityScriptTests(unittest.TestCase):

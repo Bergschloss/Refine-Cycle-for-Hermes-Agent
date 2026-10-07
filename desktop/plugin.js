@@ -203,15 +203,19 @@ function RefineStatus() {
   if (!state) return null
 
   const busy = state.job && state.job.status === 'running'
-  const fix = !state.working
-  const update = state.working && state.latest
+  // Working but not fully (state.limited names what is off): the same Fix.
+  const limited = Boolean(state.working && state.limited && state.limited.length)
+  const fix = !state.working || limited
+  const update = state.working && !limited && state.latest
   const label = busy
     ? `${state.brand} · ${fix ? 'fixing' : 'updating'}…`
-    : fix
+    : !state.working
       ? `${state.brand} · not working`
-      : update
-        ? `${state.brand} · update available: ${state.latest}`
-        : `${state.brand} ${state.version} · working`
+      : limited
+        ? `${state.brand} ${state.version} · limited`
+        : update
+          ? `${state.brand} · update available: ${state.latest}`
+          : `${state.brand} ${state.version} · working`
 
   const children = [jsx('span', { children: label }, 'label')]
   if (!busy && (fix || update)) {
@@ -271,17 +275,20 @@ function RefineCard() {
 
   const brand = state ? state.brand : 'Refine Cycle'
   const busy = Boolean(state && state.job && state.job.status === 'running')
-  const fix = Boolean(state && !state.working)
-  const update = Boolean(state && state.working && state.latest)
+  const limited = Boolean(state && state.working && state.limited && state.limited.length)
+  const fix = Boolean(state && (!state.working || limited))
+  const update = Boolean(state && state.working && !limited && state.latest)
   const line = !state
     ? 'checking…'
     : busy
       ? `${fix ? 'fixing' : 'updating'}…`
-      : fix
+      : !state.working
         ? 'stopped working after the Hermes update'
-        : update
-          ? `update available: ${state.latest}`
-          : `${state.version} is running`
+        : limited
+          ? `works with limits. Off: ${state.limited.join('; ')}`
+          : update
+            ? `update available: ${state.latest}`
+            : `${state.version} is running`
 
   const children = [
     jsx('span', { className: cn('font-medium'), children: brand }, 'brand'),

@@ -15,6 +15,11 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 _RUNTIME_JOURNAL_DIR: Optional[Path] = None
 _RUNTIME_JOURNAL_COMMIT_MARKER: Optional[Path] = None
+# The memory budget the installer raises Hermes to (install.MEMORY_LIMIT_FLOOR).
+# Below it a lesson may not fit; a Hermes update can put the host default back
+# to its stock 2200, so the plugin checks it at runtime and a fix raises it again.
+MEMORY_LIMIT_FLOOR = 4400
+
 # The slash command the plugin actually registered: "refine", or "refine-cycle"
 # on a Hermes that ships its own /refine. Set once at registration; every
 # message that names the command reads it here, so none can name the wrong one.

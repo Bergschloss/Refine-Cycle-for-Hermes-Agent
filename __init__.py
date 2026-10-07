@@ -1616,18 +1616,31 @@ def _status_headline() -> list:
         head = f"{notices.BRAND} {notices.plain_version(version)}"
         if not notices.plugin_usable() or notices.code_stale():
             return [f"{head} · not working", notices.action_line(notices.FIX_COMMAND, messaging=messaging)]
-        # Working on a picked model without the route: say what still needs the fix.
-        manual = [] if notices.plugin_working() else [
-            "Automatic lessons run on the chosen lesson model. "
-            + notices.manual_pass_line(_command_display_name(), messaging=messaging)
-        ]
         latest = notices.latest_known()
-        if latest:
-            return [f"{head} · update available: {notices.plain_version(latest)}",
-                    notices.action_line(notices.UPDATE_COMMAND, messaging=messaging)] + manual
         used, limit = core._memory_usage()
         memory = f" · memory {used}/{limit}" if used is not None and limit is not None else ""
-        return [f"{head} · working{memory}"] + manual
+        reasons = notices.limited_reasons()
+        if reasons:
+            # Working, but not fully: what is off, and the Fix that brings it back
+            # (which installs a newer release too, when there is one).
+            keys = {key for key, _ in reasons}
+            lines = [
+                f"{head} · limited{memory}"
+                + (f" · update available: {notices.plain_version(latest)}" if latest else ""),
+                "Off: " + "; ".join(words for _, words in reasons) + ".",
+            ]
+            if "route" in keys and notices.automatic_lessons_without_route():
+                lines.append("Automatic lessons run on the chosen lesson model.")
+            lines.append(
+                notices.action_line(notices.FIX_COMMAND, messaging=messaging) if "memory" in keys
+                # Only the route is off: where no patch fits this Hermes, a fix cannot help.
+                else notices.manual_pass_line(_command_display_name(), messaging=messaging)
+            )
+            return lines
+        if latest:
+            return [f"{head} · update available: {notices.plain_version(latest)}",
+                    notices.action_line(notices.UPDATE_COMMAND, messaging=messaging)]
+        return [f"{head} · working{memory}"]
     except Exception:
         logger.debug("refine status headline failed", exc_info=True)
         return []

@@ -1697,7 +1697,14 @@ def do_install(args) -> None:
     say(f"Host state      : {state} — {detail}")
 
     if args.patch_only and state == "patched":
-        say("Host capability already present — nothing to do.")
+        say("Host capability already present.")
+        # The memory budget is part of what the plugin needs, and a Hermes update
+        # can put its host default back to stock: a fix raises it here too.
+        mdir = metadata_dir(src)
+        meta = new_metadata(src, previous_metadata(mdir), mode="patch-only")
+        say("Memory budget:")
+        raise_memory_limit(src, meta, include_host=True)
+        write_metadata(mdir, meta)
         return
     if state == "incompatible":
         fail(f"Incompatible host: {detail}")
@@ -1814,6 +1821,8 @@ def do_install(args) -> None:
         say("Host capability already present; leaving host untouched.")
 
     if args.patch_only:
+        say("Memory budget:")
+        raise_memory_limit(src, meta, include_host=True)
         write_metadata(mdir, meta)
         say("Done (--patch-only). Restart the gateway to load the new core.")
         return

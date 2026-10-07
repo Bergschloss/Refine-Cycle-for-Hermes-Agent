@@ -282,7 +282,8 @@ def _host_state(runner: Callable[..., Any], installer: Path, host: Path) -> Dict
 
 
 def _repair_host(runner: Callable[..., Any], installer: Path, host: Path,
-                 before: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
+                 before: Optional[Dict[str, str]] = None, *,
+                 memory_low: bool = False) -> Tuple[bool, str]:
     """Put the host route patch back when an update removed it.
 
     The installer decides everything here: which bundled patch fits this Hermes,
@@ -291,9 +292,11 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path,
     first. This only asks for its state, asks it to patch when the patch is
     missing, and reports what it said. Returns ``(changed, sentence)``.
     ``before``: this installer's answer for this host, when the caller already has it.
+    ``memory_low``: the memory budget is below the installer's floor; the same
+    ``--patch-only`` run raises it, on a patched host too.
     """
     before = before or _host_state(runner, installer, host)
-    if before["state"] == "patched":
+    if before["state"] == "patched" and not memory_low:
         return False, ""
     if before["state"] == "incompatible":
         return False, (
@@ -312,6 +315,9 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path,
     except Exception as exc:
         return False, f" The host route patch is missing and the installer could not run ({type(exc).__name__})."
     after = _host_state(runner, installer, host)
+    if done.returncode == 0 and after["state"] == "patched" and before["state"] == "patched":
+        # Only the memory budget was off: raised, and Hermes loads it on restart.
+        return True, ""
     if done.returncode == 0 and after["state"] == "patched":
         # A repair that worked says nothing: the user asked for a working plugin,
         # not for a list of Hermes files. The installer's own output names the files
@@ -325,7 +331,8 @@ def _repair_host(runner: Callable[..., Any], installer: Path, host: Path,
 
 
 def run_update(*, runner: Callable[..., Any] = subprocess.run,
-               host_state: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+               host_state: Optional[Dict[str, str]] = None,
+               memory_low: bool = False) -> Dict[str, str]:
     """Install the latest release over this plugin, when the user asks for it.
 
     Uses the installer shipped inside that release, the same one a manual
@@ -363,7 +370,7 @@ def run_update(*, runner: Callable[..., Any] = subprocess.run,
         installer = plugin_dir / "install.py"
         if host is None or not installer.is_file():
             return {"outcome": "already_latest", "message": message}
-        changed, note = _repair_host(runner, installer, host, host_state)
+        changed, note = _repair_host(runner, installer, host, host_state, memory_low=memory_low)
         if changed:
             return {"outcome": "repaired",
                     "message": message + note + " Restart Hermes to load it (in chat: /restart)."}

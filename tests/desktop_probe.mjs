@@ -198,6 +198,22 @@ await advance(20 * 60 * 1000)
 check('the toast is not repeated on later polls', messages(), ['RC is up to date.'])
 dispose()
 
+// 1b. Working with limits (a function is off): the same Fix, ahead of an Update,
+//     since the fix installs a newer release too.
+withBridge()
+globalThis.__state = state({ limited: ['manual passes (Hermes lacks the route they need)'], latest: '1.3.13' })
+plugin.register(context())
+await advance(1)
+check('a plugin working with limits says so', label(), 'RC 1.3.12 · limited')
+check('and offers the Fix', button().p.children, 'Fix')
+check('the Fix says before the press that it restarts Hermes', rendered().p.label, 'Fix: Hermes will restart')
+dispose()
+globalThis.__state = state({ limited: [] })
+plugin.register(context())
+await advance(1)
+check('nothing off: plain working', label(), 'RC 1.3.12 · working')
+dispose()
+
 // 2. A restart job with the bridge: honest wording, recycle, and a confirmation
 //    only once a different backend answers.
 withBridge()
