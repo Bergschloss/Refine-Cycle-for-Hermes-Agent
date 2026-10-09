@@ -116,6 +116,9 @@ PATCH_MARKERS = {
     # because that pool copies the context. The patch's own gateway test now
     # drives the pool hop on a real thread.
     "invocation-route-v2026.9.23.patch": _V021_MARKERS,
+    # Hermes main at 8bff64d6ed modernized collection type annotations in
+    # plugin_llm and plugins. Same route contract and topology, new context.
+    "invocation-route-v2026.10.9.patch": _V021_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 
