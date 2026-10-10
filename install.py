@@ -119,6 +119,9 @@ PATCH_MARKERS = {
     # Hermes main at 8bff64d6ed modernized collection type annotations in
     # plugin_llm and plugins. Same route contract and topology, new context.
     "invocation-route-v2026.10.9.patch": _V021_MARKERS,
+    # Same route changes, regenerated with one context line after Hermes
+    # unquoted MessageEvent in the adjacent gateway method annotation.
+    "invocation-route-v2026.10.10.patch": _V021_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 

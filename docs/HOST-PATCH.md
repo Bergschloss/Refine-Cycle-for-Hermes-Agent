@@ -12,6 +12,14 @@ This cannot be solved plugin-side. The invocation lives in the agent object that
 
 ## Shape
 
+`assets/invocation-route-v2026.10.10.patch` covers Hermes main after `99b067e315`,
+checked at `7318e666c2`. It has exactly the same added and removed lines as
+the 10.9 revision, regenerated with one context line (`git diff -U1`).
+Hermes removed the quotes around `MessageEvent` in an adjacent gateway
+annotation; reducing context avoids depending on that cosmetic line.
+The installer still uses plain `git apply --check` and `git apply`, verifies
+all eight target markers, and compiles the patch files.
+
 `assets/invocation-route-v2026.10.9.patch` covers Hermes main at `8bff64d6ed`.
 Hermes changed collection annotations from `List`/`Dict`/`Set` to
 `list`/`dict`/`set` in the plugin facade and registry, breaking the older
@@ -71,7 +79,7 @@ python install.py --patch-only
 4. Regenerate the patch, name it `invocation-route-v<version>.patch`, and add it to `assets/`. The installer picks by applicability, not by version number, so old patches stay and keep working for old hosts.
 5. Verify: `python install.py --status` should report all 8 targets carrying markers.
 
-Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`, `v2026.9.16`, `v2026.9.23`, `v2026.10.9`.
+Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`, `v2026.9.16`, `v2026.9.23`, `v2026.10.9`, `v2026.10.10`.
 
 ### A merge without conflicts is not a working patch
 
