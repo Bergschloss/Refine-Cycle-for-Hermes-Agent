@@ -29528,6 +29528,76 @@ class InstallerHermesHomeTests(unittest.TestCase):
 
         self.assertEqual(found, live.resolve())
 
+    def test_an_explicit_hermes_src_is_never_swapped_for_another_hermes(self):
+        """--hermes-src names one checkout; a wrong one is an error, not a hint.
+
+        It used to be only the first candidate: a path that did not exist fell
+        through to the gateway unit, HERMES_HOME and ~/releases. On 2026-10-09 a
+        --patch-only meant for a scratch clone whose checkout had failed ran on
+        the owner's live Hermes that way.
+        """
+        import install
+
+        with tempfile.TemporaryDirectory(prefix="refine-explicit-") as td:
+            root = Path(td)
+            live = root / "release"
+            (live / "hermes_cli").mkdir(parents=True)
+            (live / "hermes_cli" / "plugins.py").write_text("x", encoding="utf-8")
+            unit_dir = root / "systemd"
+            unit_dir.mkdir()
+            (unit_dir / "hermes-gateway.service").write_text(
+                "[Service]\nExecStart={}/.venv/bin/hermes gateway run\n".format(live),
+                encoding="utf-8",
+            )
+            not_a_checkout = root / "empty"
+            not_a_checkout.mkdir()
+            with patch.dict(os.environ, {"HERMES_SRC": str(live), "HERMES_HOME": str(root)}, clear=False), \
+                 patch.object(install, "systemd_unit_dirs", lambda: (unit_dir,)), \
+                 patch.object(install, "_emit", lambda *a, **k: None):
+                for wrong in (root / "missing", not_a_checkout):
+                    with self.assertRaises(SystemExit, msg=str(wrong)):
+                        install.find_hermes_src(str(wrong))
+                # The same explicit path, when it is a checkout, is taken as given.
+                self.assertEqual(install.find_hermes_src(str(live)), live.resolve())
+
+    def test_an_unreadable_candidate_is_skipped_not_fatal(self):
+        """Another user's Hermes is not a reason to crash.
+
+        On a server where the gateway runs as another user, the unit names a
+        checkout under a home this user cannot enter; Path.is_file() raises
+        PermissionError there instead of returning False, and discovery died
+        before it reached the checkout this user can use.
+        """
+        import install
+
+        with tempfile.TemporaryDirectory(prefix="refine-locked-") as td:
+            root = Path(td)
+            locked = root / "locked-release"
+            data_home = root / "hermes"
+            mine = data_home / "hermes-agent"
+            (mine / "hermes_cli").mkdir(parents=True)
+            (mine / "hermes_cli" / "plugins.py").write_text("x", encoding="utf-8")
+            unit_dir = root / "systemd"
+            unit_dir.mkdir()
+            (unit_dir / "hermes-gateway.service").write_text(
+                "[Service]\nExecStart={}/.venv/bin/hermes gateway run\n".format(locked),
+                encoding="utf-8",
+            )
+            real_is_file = Path.is_file
+
+            def is_file(path, *a, **kw):
+                if "locked-release" in str(path):
+                    raise PermissionError(13, "Permission denied", str(path))
+                return real_is_file(path, *a, **kw)
+
+            with patch.dict(os.environ, {"HERMES_HOME": str(data_home)}, clear=False), \
+                 patch.object(install, "systemd_unit_dirs", lambda: (unit_dir,)), \
+                 patch.object(Path, "is_file", is_file):
+                os.environ.pop("HERMES_SRC", None)
+                found = install.find_hermes_src(None)
+
+        self.assertEqual(found, mine.resolve())
+
     def test_the_host_helper_in_the_checkout_is_actually_consulted(self):
         """config.hermes_home() asks hermes_constants first; it must be reachable.
 

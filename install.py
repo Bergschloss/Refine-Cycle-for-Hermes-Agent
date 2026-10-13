@@ -458,11 +458,32 @@ def systemd_unit_dirs() -> tuple[Path, ...]:
     )
 
 
+def _is_checkout(path: Path) -> bool:
+    """True when `path` is a Hermes checkout this user can read.
+
+    Path.is_file() raises PermissionError under a home this user cannot enter
+    (a gateway run by another user names one); that is "not a candidate", not
+    a reason to stop looking.
+    """
+    try:
+        return (path / "hermes_cli" / "plugins.py").is_file()
+    except OSError:
+        return False
+
+
 def find_hermes_src(explicit: str | None) -> Path:
-    """Locate the active Hermes checkout without POSIX-only tools."""
-    candidates: list[Path] = []
+    """Locate the active Hermes checkout without POSIX-only tools.
+
+    An explicit --hermes-src is taken as given or refused; it never falls
+    through to another Hermes. Scripts point it at scratch clones, and a
+    clone whose checkout failed must not turn into the user's live install.
+    """
     if explicit:
-        candidates.append(Path(explicit))
+        chosen = Path(explicit).resolve()
+        if _is_checkout(chosen):
+            return chosen
+        fail(f"--hermes-src {explicit} is not a Hermes checkout (no hermes_cli/plugins.py).")
+    candidates: list[Path] = []
     env = os.environ.get("HERMES_SRC")
     if env:
         candidates.append(Path(env))
@@ -500,7 +521,7 @@ def find_hermes_src(explicit: str | None) -> Path:
             # .../venv/bin/python|hermes -> walk up to the checkout root
             p = Path(first)
             for parent in p.parents:
-                if (parent / "hermes_cli" / "plugins.py").is_file():
+                if _is_checkout(parent):
                     candidates.append(parent)
                     break
             break
@@ -532,11 +553,11 @@ def find_hermes_src(explicit: str | None) -> Path:
             except OSError:
                 continue
             for e in entries:
-                if "hermes" in e.name.lower() and (e / "hermes_cli" / "plugins.py").is_file():
+                if "hermes" in e.name.lower() and _is_checkout(e):
                     candidates.append(e)
     for c in candidates:
         c = c.resolve()
-        if (c / "hermes_cli" / "plugins.py").is_file():
+        if _is_checkout(c):
             return c
     fail(
         "Cannot locate an active Hermes checkout. Set HERMES_SRC=/path/to/hermes-agent "
