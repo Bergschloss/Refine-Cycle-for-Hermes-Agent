@@ -172,7 +172,7 @@ Every message starts with `♾️ Refine Cycle` and is sent once per event, to t
 
 The button is the supported way to update from the desktop app or a TUI, because the 30-second bound applies to a *typed* `/refine-update` too: Hermes stops waiting for the answer, the session reports a timeout, and the update itself carries on and restarts Hermes without ever printing its reply. In a chat the command is awaited for as long as it needs, so the one-tap message path is unaffected.
 
-What was already said lives in `notices.json` in the journal directory. `update_check_enabled: false` turns the release check off.
+What was already said lives in `notices.json` in the journal directory. `update_check: false` turns the release check off.
 
 ### Automatic refinement
 
