@@ -1068,13 +1068,15 @@ class RefineTests(unittest.TestCase):
     def test_llm_import_compatibility_keeps_unbound_host_blocked(self):
         """Older host APIs may omit the route error, never the route gate."""
         host_llm = sys.modules["agent.plugin_llm"]
-        invocation_error = host_llm.PluginLlmInvocationError
+        has_invocation_error = hasattr(host_llm, "PluginLlmInvocationError")
+        if has_invocation_error:
+            invocation_error = host_llm.PluginLlmInvocationError
+            del host_llm.PluginLlmInvocationError
         package_name = "refine_llm_compat_test"
         package = types.ModuleType(package_name)
         package.__path__ = [str(ROOT)]
         package.__package__ = package_name
         sys.modules[package_name] = package
-        del host_llm.PluginLlmInvocationError
         try:
             spec = importlib.util.spec_from_file_location(
                 f"{package_name}.llm", ROOT / "llm.py"
@@ -1091,7 +1093,8 @@ class RefineTests(unittest.TestCase):
             )
             self.assertIsNone(plugin_init._session_llm())
         finally:
-            host_llm.PluginLlmInvocationError = invocation_error
+            if has_invocation_error:
+                host_llm.PluginLlmInvocationError = invocation_error
             for name in tuple(sys.modules):
                 if name == package_name or name.startswith(package_name + "."):
                     sys.modules.pop(name, None)

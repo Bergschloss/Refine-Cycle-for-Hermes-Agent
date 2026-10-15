@@ -1063,6 +1063,8 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> str:
         return (
             f"No module named '{name}'" in stderr
             or f"No module named '{name}." in stderr
+            or f"from '{name}'" in stderr
+            or f"from '{name}." in stderr
         )
 
     # Present on disk means the absence is not about our copy. The Hermes
