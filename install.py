@@ -1091,7 +1091,22 @@ def verify_plugin_imports(dest: Path, python: str, src: Path) -> str:
             "the installed plugin does not parse; the copy cannot load in any "
             f"environment.\n  {detail}\n  tree: {dest}"
         )
-    host_absent = [name for name in HOST_IMPORT_ROOTS if _unresolved(name)]
+    # A missing symbol on an older or unpatched host is an identifiable host
+    # mismatch too. Match the actual exception, not source lines or an unrelated
+    # RuntimeError that merely mentions a host import.
+    missing_symbol = re.fullmatch(
+        r"ImportError: cannot import name '[^']+' from '([^']+)'(?: \([^\n]*\))?",
+        detail,
+    )
+    host_absent = [
+        name for name in HOST_IMPORT_ROOTS
+        if _unresolved(name) or (
+            missing_symbol and (
+                missing_symbol.group(1) == name
+                or missing_symbol.group(1).startswith(name + ".")
+            )
+        )
+    ]
     if host_absent:
         say(
             f"NOTE: could not fully import the plugin here ({detail}). The "

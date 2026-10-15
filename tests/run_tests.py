@@ -29416,6 +29416,35 @@ class InstallerImportVerificationTests(unittest.TestCase):
         self.assertIn("Hermes host module", joined)
         self.assertIn("not an incomplete install", joined)
 
+    def test_a_missing_host_symbol_is_identified_without_claiming_verification(self):
+        import install
+
+        (self.src / "agent").mkdir()
+        (self.src / "agent" / "__init__.py").write_text("", encoding="utf-8")
+        (self.src / "agent" / "plugin_llm.py").write_text("", encoding="utf-8")
+        (self.dest / "core.py").write_text(
+            "from agent.plugin_llm import PluginLlmInvocationError\n", encoding="utf-8"
+        )
+        messages = []
+        with patch.object(install, "say", messages.append):
+            result = install.verify_plugin_imports(self.dest, sys.executable, self.src)
+        self.assertEqual(result, "host-unresolved")
+        self.assertIn("Hermes host module", " ".join(messages))
+        self.assertNotIn("Plugin import verified", " ".join(messages))
+
+    def test_a_runtime_error_mentioning_a_host_import_is_still_unclassified(self):
+        import install
+
+        (self.dest / "core.py").write_text(
+            'raise RuntimeError("cannot import name X from \'agent.plugin_llm\'")\n',
+            encoding="utf-8",
+        )
+        messages = []
+        with patch.object(install, "say", messages.append):
+            result = install.verify_plugin_imports(self.dest, sys.executable, self.src)
+        self.assertEqual(result, "unclassified")
+        self.assertNotIn("host resolution in this environment", " ".join(messages))
+
     def test_an_unclassified_failure_does_not_claim_to_be_host_resolution(self):
         import install
 
