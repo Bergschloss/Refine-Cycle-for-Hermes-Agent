@@ -28384,6 +28384,29 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertEqual(len(applied), total)
         self.assertEqual(total, 8)
 
+    def test_a_hooks_dispatch_host_does_not_need_a_marker_in_run_inbound(self):
+        """A real 0.22 patch marks the hooks mixin, not its unmodified parent.
+
+        Checking the old file would misclassify a working installation as partial
+        and make the next update attempt repair it unnecessarily.
+        """
+        import install
+
+        selected = install.patch_by_name("invocation-route-v2026.10.15.patch")
+        markers = install.patch_markers(selected)
+        for rel, marker in markers.items():
+            (self.src / rel).write_text(f"BASE = True\n{marker} = True\n", encoding="utf-8")
+        with patch.object(install, "select_reverse_patch", return_value=selected):
+            state, detail = install.classify_host(self.src)
+        self.assertEqual(state, "patched", detail)
+        self.assertIn("all 8 files", detail)
+        self.assertNotIn("plugin_invocation_scope_for_agent",
+                         (self.src / "gateway/run_inbound.py").read_text(encoding="utf-8"))
+        detected, applied, total = install.detected_patch_topology(self.src)
+        self.assertEqual(detected, selected)
+        self.assertEqual(len(applied), total)
+        self.assertEqual(total, 8)
+
     def test_rollback_restores_only_the_recorded_patch_topology(self):
         """A 0.21 rollback must not overwrite untouched legacy-only host files."""
         import install

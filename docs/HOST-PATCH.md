@@ -12,6 +12,19 @@ This cannot be solved plugin-side. The invocation lives in the agent object that
 
 ## Shape
 
+`assets/invocation-route-v2026.10.15.patch` covers Hermes v0.22.1 and main
+at `7bda2a3368`, with one context line. Hermes moved gateway plugin dispatch
+to `gateway/run_inbound_hooks.py`; this revision wraps that real call site
+and moves its cache helper there, without copying or overriding upstream
+dispatch methods. Its eight-file marker table follows the moved target.
+It restores the `contextvars` import in `hermes_cli/plugins.py`, whose
+existing import moved with `resolve_plugin_command_result` to
+`plugins_dispatch.py`; the obsolete comment-only hunk is dropped.
+All 40 route tests and their assertions stay: only the gateway test's
+`build_session_context` mock target moves to the module that now calls it.
+The installer still uses plain `git apply --check` and `git apply`, checks
+all eight markers, and compiles the patched files.
+
 `assets/invocation-route-v2026.10.10.patch` covers Hermes main after `99b067e315`,
 checked at `7318e666c2`. It has exactly the same added and removed lines as
 the 10.9 revision, regenerated with one context line (`git diff -U1`).
@@ -79,7 +92,7 @@ python install.py --patch-only
 4. Regenerate the patch, name it `invocation-route-v<version>.patch`, and add it to `assets/`. The installer picks by applicability, not by version number, so old patches stay and keep working for old hosts.
 5. Verify: `python install.py --status` should report all 8 targets carrying markers.
 
-Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`, `v2026.9.16`, `v2026.9.23`, `v2026.10.9`, `v2026.10.10`.
+Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`, `v2026.9.16`, `v2026.9.23`, `v2026.10.9`, `v2026.10.10`, `v2026.10.15`.
 
 ### A merge without conflicts is not a working patch
 

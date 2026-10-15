@@ -84,6 +84,11 @@ _V021_MARKERS = {
     "hermes_cli/plugins.py": "plugin_invocation_scope",
     "tui_gateway/methods_tools.py": "plugin_invocation_scope_for_agent",
 }
+_V022_MARKERS = {
+    rel: marker for rel, marker in _V021_MARKERS.items()
+    if rel != "gateway/run_inbound.py"
+}
+_V022_MARKERS["gateway/run_inbound_hooks.py"] = "plugin_invocation_scope_for_agent"
 PATCH_MARKERS = {
     "invocation-route-v2026.8.16.patch": _LEGACY_MARKERS,
     "invocation-route-v2026.8.31.patch": _LEGACY_MARKERS,
@@ -122,6 +127,9 @@ PATCH_MARKERS = {
     # Same route changes, regenerated with one context line after Hermes
     # unquoted MessageEvent in the adjacent gateway method annotation.
     "invocation-route-v2026.10.10.patch": _V021_MARKERS,
+    # Dispatch moved to the hooks mixin; patch its real call site rather than
+    # shadowing upstream methods back in run_inbound.py.
+    "invocation-route-v2026.10.15.patch": _V022_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 
