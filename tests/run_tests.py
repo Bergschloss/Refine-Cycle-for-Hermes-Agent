@@ -28403,7 +28403,9 @@ class InstallerPluginOnlyTests(unittest.TestCase):
         self.assertNotIn("plugin_invocation_scope_for_agent",
                          (self.src / "gateway/run_inbound.py").read_text(encoding="utf-8"))
         detected, applied, total = install.detected_patch_topology(self.src)
-        self.assertEqual(detected, selected)
+        family = [p for p in install.patch_candidates()
+                  if install.patch_markers(p) is install._V022_MARKERS]
+        self.assertEqual(detected, family[0])
         self.assertEqual(len(applied), total)
         self.assertEqual(total, 8)
 

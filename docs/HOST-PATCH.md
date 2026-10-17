@@ -12,6 +12,15 @@ This cannot be solved plugin-side. The invocation lives in the agent object that
 
 ## Shape
 
+`assets/invocation-route-v2026.10.17.patch` covers Hermes main at
+`ab44d8acf7`, with one context line. It binds the route in the shared
+`_hm_run_plugin_handler`, now used by messaging and local CLI commands via
+the gateway. The upstream `session_entry` argument stays intact. All 40
+existing route tests and assertions remain; the gateway mock accepts that
+optional argument. Two additional cases exercise sync and async local commands.
+The CLI fallback keeps its existing scope, and the eight-file marker table
+is unchanged. Older patches remain bundled for their original hosts.
+
 `assets/invocation-route-v2026.10.15.patch` covers Hermes v0.22.1 and main
 at `7bda2a3368`, with one context line. Hermes moved gateway plugin dispatch
 to `gateway/run_inbound_hooks.py`; this revision wraps that real call site
@@ -92,7 +101,7 @@ python install.py --patch-only
 4. Regenerate the patch, name it `invocation-route-v<version>.patch`, and add it to `assets/`. The installer picks by applicability, not by version number, so old patches stay and keep working for old hosts.
 5. Verify: `python install.py --status` should report all 8 targets carrying markers.
 
-Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`, `v2026.9.16`, `v2026.9.23`, `v2026.10.9`, `v2026.10.10`, `v2026.10.15`.
+Bundled patches so far: `v0.21.0`, `v2026.8.16`, `v2026.8.31`, `v2026.9.10`, `v2026.9.14`, `v2026.9.16`, `v2026.9.23`, `v2026.10.9`, `v2026.10.10`, `v2026.10.15`, `v2026.10.17`.
 
 ### A merge without conflicts is not a working patch
 

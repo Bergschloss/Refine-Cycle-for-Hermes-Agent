@@ -130,6 +130,7 @@ PATCH_MARKERS = {
     # Dispatch moved to the hooks mixin; patch its real call site rather than
     # shadowing upstream methods back in run_inbound.py.
     "invocation-route-v2026.10.15.patch": _V022_MARKERS,
+    "invocation-route-v2026.10.17.patch": _V022_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 
