@@ -131,6 +131,8 @@ PATCH_MARKERS = {
     # shadowing upstream methods back in run_inbound.py.
     "invocation-route-v2026.10.15.patch": _V022_MARKERS,
     "invocation-route-v2026.10.17.patch": _V022_MARKERS,
+    # refine-bot: rebased onto Hermes main 3752497cc4 by Antigravity (gemini-3.8-flash-high), which changed the patch's logic, not only its anchoring.
+    "invocation-route-v2026.10.18.patch": _V022_MARKERS,
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 
