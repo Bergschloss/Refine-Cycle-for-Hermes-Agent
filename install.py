@@ -137,6 +137,8 @@ PATCH_MARKERS = {
     "invocation-route-v2026.10.22.patch": _V022_MARKERS,
     # refine-bot: rebased onto Hermes main f1cf410733 by Antigravity (gemini-3.8-flash-high), which changed the patch's logic, not only its anchoring.
     "invocation-route-v2026.11.6.patch": {"agent/auxiliary_client.py": "call_llm_route_locked", "agent/plugin_llm.py": "bind_invocation", "agent/turn_context.py": "set_plugin_invocation_agent", "agent/turn_facade.py": "plugin_invocation_scope", "cli.py": "plugin_invocation_scope_for_agent", "gateway/run_inbound_hooks.py": "plugin_invocation_scope_for_agent", "hermes_cli/plugins_context.py": "plugin_invocation_scope", "tui_gateway/methods_tools.py": "plugin_invocation_scope_for_agent"},
+    # refine-bot: rebased onto Hermes main 8d7061f1a7 by Antigravity (gemini-3.8-flash-high), which changed the patch's logic, not only its anchoring.
+    "invocation-route-v2026.11.8.patch": {"agent/auxiliary_client.py": "call_llm_route_locked", "agent/plugin_llm.py": "bind_invocation", "agent/turn_context.py": "set_plugin_invocation_agent", "agent/turn_facade.py": "plugin_invocation_scope", "cli.py": "plugin_invocation_scope_for_agent", "gateway/run_inbound_hooks.py": "plugin_invocation_scope_for_agent", "hermes_cli/plugins_context.py": "plugin_invocation_scope", "tui_gateway/methods_tools.py": "plugin_invocation_scope_for_agent"},
 }
 PATCH_TEST_FILE = "tests/agent/test_plugin_invocation_route.py"
 
